@@ -1,5 +1,10 @@
 const std = @import("std");
 
+comptime {
+    // Allow large compile-time code generation for grammars and helpers.
+    @setEvalBranchQuota(200000);
+}
+
 pub const Input = struct {
     data: []const u8,
     cur: usize = 0,
@@ -31,14 +36,22 @@ pub const Input = struct {
 
 pub fn ProgramFor(comptime G: type) type {
     return struct {
-        const C = G.C; // Grammar's combinators (Combinators(G))
-        const Op = C.Op;
-        const Rule = C.Rule;
+        // Determine types from the grammar without requiring a public 'C'.
+        const Rule = std.meta.DeclEnum(G);
+        const FirstRuleArrT = @TypeOf(@field(G, @tagName(Rule.Start)));
+        const Op = switch (@typeInfo(FirstRuleArrT)) {
+            .array => |a| a.child,
+            else => @compileError("Grammar Start rule must be an array of ops"),
+        };
         const E = std.enums.values(Rule);
 
         inline fn ruleBody(comptime nm: Rule) [RuleSize(nm)]Op {
             const raw = @field(G, @tagName(nm));
-            return raw;
+            const RawT = @TypeOf(raw);
+            return switch (@typeInfo(RawT)) {
+                .array => |a| if (a.child == Op) raw else .{},
+                else => .{},
+            };
         }
 
         fn GetCodeSize() usize {
@@ -48,12 +61,17 @@ pub fn ProgramFor(comptime G: type) type {
         }
 
         fn RuleSize(r: Rule) usize {
-            return @field(G, @tagName(r)).len;
+            const raw = @field(G, @tagName(r));
+            const RawT = @TypeOf(raw);
+            return switch (@typeInfo(RawT)) {
+                .array => |a| if (a.child == Op) a.len else 0,
+                else => 0,
+            };
         }
 
         pub const CodeSize = GetCodeSize();
 
-        inline fn RuleCode() struct { ips: [E.len]usize, ops: C.OpN(CodeSize) } {
+        inline fn RuleCode() struct { ips: [E.len]usize, ops: [CodeSize]Op } {
             comptime var ips: [E.len]usize = undefined;
             comptime var ops: []const Op = &.{};
             comptime var off: usize = 0;
@@ -119,23 +137,19 @@ pub fn InlineVm(comptime Grammar: type, comptime config: struct { debug: type = 
         fn formatOp(op: P.OpT, writer: anytype) !void {
             switch (op) {
                 .Char => |c| {
-                    if (c == ' ') try writer.print("'\\s'", .{})
-                    else if (c == '\t') try writer.print("'\\t'", .{})
-                    else if (c == '\n') try writer.print("'\\n'", .{})
-                    else if (c == '\r') try writer.print("'\\r'", .{})
-                    else try writer.print("'{c}'", .{c});
+                    if (c == ' ') try writer.print("'\\s'", .{}) else if (c == '\t') try writer.print("'\\t'", .{}) else if (c == '\n') try writer.print("'\\n'", .{}) else if (c == '\r') try writer.print("'\\r'", .{}) else try writer.print("'{c}'", .{c});
                 },
-                .String => |s| try writer.print("\"{s}\"", .{s}),
-                .SkipWS => try writer.print("⟪whitespace⟫", .{}),
-                .Ident => try writer.print("⟪identifier⟫", .{}),
-                .Number => try writer.print("⟪number⟫", .{}),
-                .EndInput => try writer.print("⟪end-of-input⟫", .{}),
-                .ChoiceRel => |d| try writer.print("try alternative at +{}", .{d}),
-                .CommitRel => |d| try writer.print("commit choice, jump {s}{}", .{ if (d >= 0) "+" else "", d }),
-                .Call => |r| try writer.print("→ {s}", .{@tagName(r)}),
-                .Ret => try writer.print("← return", .{}),
-                .Fail => try writer.print("✗ fail", .{}),
-                .Accept => try writer.print("✓ accept", .{}),
+                .String => |s| try writer.print("\x1b[92m\"{s}\"\x1b[0m", .{s}),
+                .SkipWS => try writer.print("\x1b[94mWS\x1b[0m", .{}),
+                .Ident => try writer.print("\x1b[94mIDENT\x1b[0m", .{}),
+                .Number => try writer.print("\x1b[94mNUMBER\x1b[0m", .{}),
+                .EndInput => try writer.print("\x1b[94mEOF\x1b[0m", .{}),
+                .ChoiceRel => |d| try writer.print("\x1b[95malt{[s]s}{[d]d}\x1b[0m", .{ .s = if (d >= 0) "+" else "", .d = d }),
+                .CommitRel => |d| try writer.print("\x1b[95mcut{[s]s}{[d]d}\x1b[0m", .{ .s = if (d >= 0) "+" else "", .d = d }),
+                .Call => |r| try writer.print("\x1b[96m→{s}\x1b[0m", .{@tagName(r)}),
+                .Ret => try writer.print("\x1b[93mret\x1b[0m", .{}),
+                .Fail => try writer.print("\x1b[91mfail\x1b[0m", .{}),
+                .Accept => try writer.print("\x1b[92mACCEPT\x1b[0m", .{}),
             }
         }
 
@@ -149,16 +163,12 @@ pub fn InlineVm(comptime Grammar: type, comptime config: struct { debug: type = 
             const end = @min(pos + 15, input.len);
             const before = input[start..pos];
             const at = input[pos];
-            const after = input[pos + 1..end];
+            const after = input[pos + 1 .. end];
 
             try writer.print("…{s}", .{before});
-            
-            if (at == ' ') try writer.print("⎵", .{})
-            else if (at == '\t') try writer.print("⇥", .{})
-            else if (at == '\n') try writer.print("⏎", .{})
-            else if (at == '\r') try writer.print("⏎", .{})
-            else try writer.print("{c}", .{at});
-            
+
+            if (at == ' ') try writer.print("⎵", .{}) else if (at == '\t') try writer.print("⇥", .{}) else if (at == '\n') try writer.print("⏎", .{}) else if (at == '\r') try writer.print("⏎", .{}) else try writer.print("{c}", .{at});
+
             try writer.print("{s}…", .{after});
         }
 
@@ -192,7 +202,7 @@ pub fn InlineVm(comptime Grammar: type, comptime config: struct { debug: type = 
 
         fn formatTrail(trail: []const Backtrack, writer: anytype) !void {
             if (trail.len == 0) return;
-            
+
             try writer.print("[", .{});
             var i: usize = 0;
             for (trail) |bt| {
@@ -203,6 +213,35 @@ pub fn InlineVm(comptime Grammar: type, comptime config: struct { debug: type = 
                 i += 1;
             }
             try writer.print("↺]", .{});
+        }
+
+        fn getRuleBounds(ip: usize) struct { start: usize, end: usize } {
+            const rules = comptime std.enums.values(P.RuleT);
+            comptime var i: usize = 0;
+            inline for (rules) |_| {
+                const rule_start = P.rule_ip[i];
+                const rule_end = if (i + 1 < rules.len) P.rule_ip[i + 1] else P.code.len;
+                if (ip >= rule_start and ip < rule_end) {
+                    return .{ .start = rule_start, .end = rule_end };
+                }
+                i += 1;
+            }
+            return .{ .start = 0, .end = 0 };
+        }
+
+        fn renderGrammarState(ip: usize, writer: anytype) !void {
+            const rule_name = ipToRuleName(ip);
+            const off = ipToRuleOffset(ip);
+            const bounds = getRuleBounds(ip);
+
+            try writer.print("{s}[{}]: ", .{ rule_name, off });
+            var idx: usize = bounds.start;
+            while (idx < bounds.end) : (idx += 1) {
+                if (idx == ip) try writer.print("[", .{});
+                try formatOp(P.code[idx], writer);
+                if (idx == ip) try writer.print("]", .{});
+                if (idx + 1 < bounds.end) try writer.print(" ", .{});
+            }
         }
 
         pub fn tick(self: *Machine, comptime _: ExecMode) !Status {
@@ -225,13 +264,30 @@ pub fn InlineVm(comptime Grammar: type, comptime config: struct { debug: type = 
                     const next = k + 1;
 
                     const depth = @min(self.call.items.len, 8);
-                    
-                    // Format trail with rule names
-                    var trail_buf: [200]u8 = undefined;
-                    var trail_fbs = std.io.fixedBufferStream(&trail_buf);
-                    try formatTrail(self.trail.items, trail_fbs.writer());
-                    const formatted_trail = trail_fbs.getWritten();
-                    
+
+                    // Format trail with rule names (only for verbose debuggers)
+                    const formatted_trail: []const u8 = blk: {
+                        if (comptime @hasDecl(config.debug, "wantsTrail") and config.debug.wantsTrail) {
+                            var trail_buf: [200]u8 = undefined;
+                            var trail_fbs = std.io.fixedBufferStream(&trail_buf);
+                            try formatTrail(self.trail.items, trail_fbs.writer());
+                            break :blk trail_fbs.getWritten();
+                        } else {
+                            break :blk &[_]u8{};
+                        }
+                    };
+
+                    // Optional concise state callback (for StateDebug)
+                    if (comptime @hasDecl(config.debug, "onState")) {
+                        var gb: [512]u8 = undefined;
+                        var gfb = std.io.fixedBufferStream(&gb);
+                        try renderGrammarState(k, gfb.writer());
+                        const gline = gfb.getWritten();
+                        const rn = ipToRuleName(k);
+                        const ro = ipToRuleOffset(k);
+                        config.debug.onState(rn, ro, k, gline, self.input.cur, self.input.data);
+                    }
+
                     config.debug.onOp(op, depth, k, self.input.cur, self.input.data, formatted_trail);
 
                     switch (op) {
@@ -310,7 +366,7 @@ pub fn InlineVm(comptime Grammar: type, comptime config: struct { debug: type = 
                                 } else break;
                             }
                             if (n == 0) continue :vm BACKTRACK;
-                            
+
                             const number = self.input.data[start_pos..self.input.cur];
                             config.debug.onConsume(number, "number", depth);
                             continue :vm next;
@@ -386,20 +442,31 @@ pub fn InlineVm(comptime Grammar: type, comptime config: struct { debug: type = 
 
 /// Silent debug handler (no output)
 pub const SilentDebug = struct {
+    pub const wantsTrail = false;
     pub fn onOp(op: anytype, depth: usize, ip: usize, input_pos: usize, input: []const u8, trail: []const u8) void {
-        _ = op; _ = depth; _ = ip; _ = input_pos; _ = input; _ = trail;
+        _ = op;
+        _ = depth;
+        _ = ip;
+        _ = input_pos;
+        _ = input;
+        _ = trail;
     }
     pub fn onConsume(consumed: []const u8, kind: []const u8, depth: usize) void {
-        _ = consumed; _ = kind; _ = depth;
+        _ = consumed;
+        _ = kind;
+        _ = depth;
     }
     pub fn onBacktrack(to_ip: usize, to_pos: usize, depth: usize) void {
-        _ = to_ip; _ = to_pos; _ = depth;
+        _ = to_ip;
+        _ = to_pos;
+        _ = depth;
     }
     pub fn onFail() void {}
 };
 
 /// Verbose debug handler (with colored output)
 pub const VerboseDebug = struct {
+    pub const wantsTrail = true;
     pub fn onOp(op: anytype, depth: usize, _: usize, input_pos: usize, input: []const u8, trail: []const u8) void {
         std.debug.lockStdErr();
         defer std.debug.unlockStdErr();
@@ -473,7 +540,7 @@ pub const VerboseDebug = struct {
     pub fn onConsume(consumed: []const u8, kind: []const u8, depth: usize) void {
         std.debug.lockStdErr();
         defer std.debug.unlockStdErr();
-        
+
         std.debug.print("\x1b[90m", .{});
         if (depth == 0) {
             std.debug.print("    ", .{});
@@ -481,7 +548,7 @@ pub const VerboseDebug = struct {
             for (0..depth - 1) |_| std.debug.print("│ ", .{});
             std.debug.print("│   ", .{});
         }
-        
+
         if (std.mem.eql(u8, kind, "char")) {
             std.debug.print("\x1b[0m\x1b[92m✓ consumed '{s}'\x1b[0m\n", .{consumed});
         } else if (std.mem.eql(u8, kind, "string")) {
@@ -495,13 +562,262 @@ pub const VerboseDebug = struct {
     }
 
     pub fn onBacktrack(to_ip: usize, to_pos: usize, depth: usize) void {
-        _ = to_ip; _ = to_pos; _ = depth;
+        _ = to_ip;
+        _ = to_pos;
+        _ = depth;
         // Could add backtrack visualization here if needed
     }
 
     pub fn onFail() void {
         // Could add fail visualization here if needed
     }
+};
+
+/// Rich, structured debug handler focused on grammar troubleshooting
+/// - Shows rule call stack (tracked via Call/Ret)
+/// - Highlights expected vs. got at the input cursor
+/// - Displays input context with a caret and safe whitespace glyphs
+/// - Summarizes failure with furthest-point information
+pub const TraceDebug = struct {
+    pub const wantsTrail = true;
+    // Simple global state — tests are sequential, VM is single-threaded.
+    var stack: [64][]const u8 = undefined;
+    var sp: usize = 0;
+
+    var furthest_pos: usize = 0;
+
+    fn reset() void {
+        sp = 0;
+        furthest_pos = 0;
+    }
+
+    fn indent(depth: usize) void {
+        if (depth == 0) {
+            return;
+        }
+        for (0..depth) |_| std.debug.print("│ ", .{});
+    }
+
+    fn glyph(b: u8) u8 {
+        // Keep ASCII-only glyphs to avoid multi-byte chars in a single codepoint.
+        return switch (b) {
+            ' ' => ' ',
+            9, 10, 13 => ' ', // tab, nl, cr
+            else => b,
+        };
+    }
+
+    fn showInputContext(input: []const u8, pos: usize) void {
+        std.debug.print("\x1b[90m", .{});
+        if (pos >= input.len) {
+            std.debug.print("…⟪EOF⟫…", .{});
+            std.debug.print("\x1b[0m", .{});
+            return;
+        }
+
+        const start = if (pos >= 10) pos - 10 else 0;
+        const end = @min(pos + 15, input.len);
+        std.debug.print("…", .{});
+        var i: usize = start;
+        while (i < end) : (i += 1) {
+            if (i == pos) {
+                std.debug.print("\x1b[93m^\x1b[0m\x1b[90m", .{});
+            }
+            const ch = glyph(input[i]);
+            std.debug.print("{c}", .{ch});
+        }
+        if (end < input.len) std.debug.print("…", .{});
+        std.debug.print("\x1b[0m", .{});
+    }
+
+    fn fmtOp(op: anytype, input: []const u8, pos: usize) void {
+        switch (op) {
+            .Call => |r| std.debug.print("\x1b[96m→ {s}\x1b[0m", .{@tagName(r)}),
+            .Ret => std.debug.print("\x1b[93m← return\x1b[0m", .{}),
+            .ChoiceRel => |d| std.debug.print("\x1b[95mchoice +{}\x1b[0m", .{d}),
+            .CommitRel => |d| std.debug.print("\x1b[95mcommit +{}\x1b[0m", .{d}),
+            .Fail => std.debug.print("\x1b[91m✗ fail\x1b[0m", .{}),
+            .Accept => std.debug.print("\x1b[92m✓ accept\x1b[0m", .{}),
+            .EndInput => {
+                if (pos >= input.len) {
+                    std.debug.print("\x1b[92mEOF\x1b[0m", .{});
+                } else {
+                    std.debug.print("\x1b[91mexpect EOF, got more\x1b[0m", .{});
+                }
+            },
+            .Char => |c| {
+                if (pos >= input.len) {
+                    std.debug.print("\x1b[91mexpect '{c}', got EOF\x1b[0m", .{c});
+                } else if (input[pos] == c) {
+                    std.debug.print("\x1b[92m'{c}'✓\x1b[0m", .{c});
+                } else {
+                    std.debug.print("\x1b[91mexpect '{c}', got '{c}'\x1b[0m", .{ c, input[pos] });
+                }
+            },
+            .String => |s| {
+                const remain = if (pos < input.len) input[pos..] else input[input.len..input.len];
+                const matchable = remain.len >= s.len and std.mem.eql(u8, remain[0..s.len], s);
+                if (matchable) {
+                    std.debug.print("\x1b[92m\"{s}\"✓\x1b[0m", .{s});
+                } else {
+                    std.debug.print("\x1b[91mexpect \"{s}\"\x1b[0m", .{s});
+                }
+            },
+            .SkipWS => std.debug.print("\x1b[94m⟪whitespace⟫\x1b[0m", .{}),
+            .Ident => std.debug.print("\x1b[94m⟪identifier⟫\x1b[0m", .{}),
+            .Number => std.debug.print("\x1b[94m⟪number⟫\x1b[0m", .{}),
+        }
+    }
+
+    pub fn onOp(op: anytype, depth: usize, _ip: usize, input_pos: usize, input: []const u8, trail: []const u8) void {
+        _ = _ip;
+        _ = depth;
+        // Reset heuristically when starting a new parse (first Start call)
+        if (sp == 0) switch (op) {
+            .Call => |r| if (std.mem.eql(u8, @tagName(r), "Start")) {
+                reset();
+                std.debug.print("\n\x1b[1m=== Parse Trace ===\x1b[0m\n", .{});
+            },
+            else => {},
+        };
+
+        if (input_pos > furthest_pos) furthest_pos = input_pos;
+
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
+
+        // Maintain our own rule stack for clarity
+        switch (op) {
+            .Call => |r| {
+                indent(sp);
+                std.debug.print("┌ ", .{});
+                fmtOp(op, input, input_pos);
+                std.debug.print("\n", .{});
+
+                if (sp < stack.len) {
+                    stack[sp] = @tagName(r);
+                    sp += 1;
+                }
+
+                indent(sp);
+                std.debug.print("→ ", .{});
+                showInputContext(input, input_pos);
+                if (trail.len > 0) {
+                    std.debug.print("  \x1b[90m{[t]s}\x1b[0m", .{ .t = trail });
+                }
+                std.debug.print("\n", .{});
+                return;
+            },
+            .Ret => {
+                if (sp > 0) sp -= 1;
+                indent(sp);
+                std.debug.print("└ ", .{});
+                fmtOp(op, input, input_pos);
+                std.debug.print("\n", .{});
+                return;
+            },
+            else => {},
+        }
+
+        // Default op line
+        indent(sp);
+        std.debug.print("• ", .{});
+        fmtOp(op, input, input_pos);
+        std.debug.print("\n", .{});
+
+        // Show input context and trail for non-structural ops
+        indent(sp);
+        std.debug.print("  ", .{});
+        showInputContext(input, input_pos);
+        if (trail.len > 0) {
+            std.debug.print("  \x1b[90m{[t]s}\x1b[0m", .{ .t = trail });
+        }
+        std.debug.print("\n", .{});
+    }
+
+    pub fn onConsume(consumed: []const u8, kind: []const u8, depth: usize) void {
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
+
+        const d = @min(depth, sp);
+        indent(d);
+        if (std.mem.eql(u8, kind, "whitespace")) {
+            std.debug.print("\x1b[92m✓ skipped {d} ws\x1b[0m\n", .{consumed.len});
+            return;
+        }
+        std.debug.print("\x1b[92m✓ consumed {s} \"{s}\"\x1b[0m\n", .{ kind, consumed });
+    }
+
+    pub fn onBacktrack(_: usize, to_pos: usize, depth: usize) void {
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
+        const d = @min(depth, sp);
+        indent(d);
+        std.debug.print("\x1b[91m↺ backtrack to pos {}\x1b[0m\n", .{to_pos});
+    }
+
+    pub fn onFail() void {
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
+        std.debug.print("\x1b[1;31mParse failed\x1b[0m", .{});
+        std.debug.print(" at furthest pos {}\n", .{furthest_pos});
+    }
+};
+
+/// Concise state-by-state grammar-focused debug output
+/// Prints one line per VM step with the rule and highlighted opcode.
+pub const StateDebug = struct {
+    pub const wantsTrail = true;
+    fn showInput(input: []const u8, pos: usize) void {
+        std.debug.print(" | ", .{});
+        if (pos >= input.len) {
+            std.debug.print("⟪EOF⟫", .{});
+            return;
+        }
+        const start = if (pos >= 8) pos - 8 else 0;
+        const end = @min(pos + 12, input.len);
+        std.debug.print("…", .{});
+        var i: usize = start;
+        while (i < end) : (i += 1) {
+            if (i == pos) std.debug.print("^", .{});
+            const b = input[i];
+            switch (b) {
+                ' ', 9, 10, 13 => std.debug.print(" ", .{}),
+                else => std.debug.print("{c}", .{b}),
+            }
+        }
+        if (end < input.len) std.debug.print("…", .{});
+    }
+
+    pub fn onState(rule_name: []const u8, _: usize, _: usize, grammar: []const u8, input_pos: usize, input: []const u8) void {
+        _ = rule_name; // already included in grammar line
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
+        std.debug.print("{s}", .{grammar});
+        showInput(input, input_pos);
+        std.debug.print("\n", .{});
+    }
+
+    pub fn onOp(op: anytype, depth: usize, ip: usize, input_pos: usize, input: []const u8, trail: []const u8) void {
+        // Intentionally minimal to avoid tree noise
+        _ = op;
+        _ = depth;
+        _ = ip;
+        _ = input_pos;
+        _ = input;
+        _ = trail;
+    }
+    pub fn onConsume(consumed: []const u8, kind: []const u8, depth: usize) void {
+        _ = consumed;
+        _ = kind;
+        _ = depth; // keep quiet
+    }
+    pub fn onBacktrack(to_ip: usize, to_pos: usize, depth: usize) void {
+        _ = to_ip;
+        _ = to_pos;
+        _ = depth; // keep quiet
+    }
+    pub fn onFail() void {}
 };
 
 /// Grammar-specific combinators + Op generator
@@ -565,6 +881,9 @@ pub fn Combinators(comptime G: type, comptime config: struct { debug: type = Sil
         }
 
         pub inline fn seq(comptime parts: anytype) OpN(sizeSum(parts)) {
+            comptime {
+                @setEvalBranchQuota(200000);
+            }
             comptime var out: OpN(sizeSum(parts)) = .{undefined} ** sizeSum(parts);
             var i: usize = 0;
 
@@ -580,6 +899,9 @@ pub fn Combinators(comptime G: type, comptime config: struct { debug: type = Sil
 
         // Ordered choice across many alts: alt(.{A,B,C}) := A / B / C with PEG backtracking.
         pub inline fn or2(comptime A: anytype, comptime B: anytype) OpN(A.len + B.len + 2) {
+            comptime {
+                @setEvalBranchQuota(200000);
+            }
             const j_alt: i32 = comptime @intCast(A.len + 1);
             const j_end: i32 = comptime @intCast(B.len);
 
@@ -588,53 +910,131 @@ pub fn Combinators(comptime G: type, comptime config: struct { debug: type = Sil
         }
 
         pub inline fn many0(comptime X: anytype) OpN(X.len + 2) {
-            const to_end = X.len + 1;
-            const back = -@as(i32, @intCast(to_end));
+            comptime {
+                @setEvalBranchQuota(200000);
+            }
+            const to_end = X.len + 1; // from ChoiceRel next to end
+            const back = -@as(i32, @intCast(X.len + 2)); // from CommitRel back to ChoiceRel
             return op1(.{ .ChoiceRel = @intCast(to_end) }) ++ X ++
                 op1(.{ .CommitRel = back });
         }
 
         pub inline fn alt(comptime parts: anytype) OpN(sizeSum(parts) + (parts.len - 1) * 2) {
+            comptime {
+                @setEvalBranchQuota(200000);
+            }
             if (parts.len < 2) @compileError("alt needs at least 2 parts");
-            var out: OpN(sizeSum(parts) + (parts.len - 1) * 2) = .{undefined} ** (sizeSum(parts) + (parts.len - 1) * 2);
-            var i: usize = 0;
-            var j: usize = 0;
+
+            // Precompute lengths of each alternative
+            comptime var lens: [parts.len]usize = undefined;
+            comptime var idx: usize = 0;
             inline for (parts) |p| {
-                if (j != 0) {
-                    out[i] = .{ .CommitRel = p.len };
-                    i += 1;
-                }
+                lens[idx] = p.len;
+                idx += 1;
+            }
 
-                if (j == parts.len - 1) {
-                    inline for (p) |item| {
-                        out[i] = item;
-                        i += 1;
+            const total_len: usize = sizeSum(parts) + (parts.len - 1) * 2;
+            var out: OpN(total_len) = .{undefined} ** total_len;
+            var o: usize = 0;
+
+            comptime var i: usize = 0;
+            inline while (i < parts.len) : (i += 1) {
+                // Emit commit for the previous alternative to skip the remainder
+                if (i != 0) {
+                    comptime var rest_len: usize = 0;
+                    comptime var k: usize = i;
+                    inline while (k < parts.len) : (k += 1) {
+                        if (k != parts.len - 1) rest_len += 1; // ChoiceRel before alt k if not last
+                        rest_len += lens[k];                  // body of alt k
+                        if (k > i) rest_len += 1;             // commits at start of later alts
                     }
-                    break;
+                    out[o] = .{ .CommitRel = @intCast(rest_len) };
+                    o += 1;
                 }
 
-                out[i] = .{ .ChoiceRel = p.len + 1 };
-                i += 1;
-
-                inline for (p) |item| {
-                    out[i] = item;
-                    i += 1;
+                // Choice into current alternative if not the last
+                if (i != parts.len - 1) {
+                    out[o] = .{ .ChoiceRel = @intCast(lens[i] + 1) };
+                    o += 1;
                 }
 
-                j += 1;
+                // Emit body for current alt
+                inline for (parts[i]) |item| {
+                    out[o] = item;
+                    o += 1;
+                }
             }
 
             return out;
         }
 
         pub inline fn opt(comptime X: anytype) OpN(X.len + 2) {
+            comptime {
+                @setEvalBranchQuota(200000);
+            }
             return or2(X, .{});
+        }
+
+        // One-or-more occurrences built from many0
+        pub inline fn many1(comptime X: anytype) OpN(X.len + (X.len + 2)) {
+            comptime {
+                @setEvalBranchQuota(200000);
+            }
+            return seq(.{ X, many0(X) });
+        }
+
+        // Build an alternative over a contiguous character range [lo..hi]
+        pub inline fn chRange(comptime lo: u8, comptime hi: u8) [@as(usize, hi) - @as(usize, lo) + 1][1]Op {
+            comptime {
+                @setEvalBranchQuota(200000);
+            }
+            const N: usize = @as(usize, hi) - @as(usize, lo) + 1;
+            var out: [N][1]Op = undefined;
+            var i: usize = 0;
+            comptime var c: u8 = lo;
+            inline while (c <= hi) : (c += 1) {
+                out[i] = CH(c);
+                i += 1;
+            }
+            return out;
+        }
+
+        // Character class from multiple ranges. Example:
+        // classRanges(.{ .{ 'a','z' }, .{ 'A','Z' }, .{ '0','9' } })
+        pub inline fn classRanges(comptime ranges: anytype) OpN(block: {
+            var count: usize = 0;
+            var idx: usize = 0;
+            while (idx < ranges.len) : (idx += 1) {
+                const r = ranges[idx];
+                count += @as(usize, r[1]) - @as(usize, r[0]) + 1;
+            }
+            // alt emits N bodies + 2 op overhead per separator
+            break :block count + (count - 1) * 2;
+        }) {
+            comptime {
+                @setEvalBranchQuota(200000);
+            }
+
+            // Build flat list of one-char alternatives
+            comptime var total: usize = 0;
+            inline for (ranges) |r| total += @as(usize, r[1]) - @as(usize, r[0]) + 1;
+
+            var alts: [total][1]Op = undefined;
+            var k: usize = 0;
+            inline for (ranges) |r| {
+                comptime var c: u8 = r[0];
+                inline while (c <= r[1]) : (c += 1) {
+                    alts[k] = CH(c);
+                    k += 1;
+                }
+            }
+            return alt(alts);
         }
     };
 }
 
-const Demo = struct {
-    const C = Combinators(@This(), .{ .debug = VerboseDebug });
+pub const Demo = struct {
+    const C = Combinators(@This(), .{ .debug = StateDebug });
 
     // Prim <- Number / Ident / '(' WS Expr WS ')'
     pub const Prim = C.alt(.{
@@ -676,12 +1076,12 @@ const Demo = struct {
     pub const Start = C.seq(.{ C.WS, C.Call(.Call), C.WS, C.END, C.ACCEPT });
 };
 
-const VM = InlineVm(Demo, .{ .debug = VerboseDebug });
+const VM = InlineVm(Demo, .{ .debug = StateDebug });
 
 const TrivialVM = InlineVm(struct {
-    const C = Combinators(@This(), .{ .debug = VerboseDebug });
+    const C = Combinators(@This(), .{ .debug = StateDebug });
     pub const Start = C.seq(.{ C.CH('a'), C.CH('b'), C.END, C.ACCEPT });
-}, .{ .debug = VerboseDebug });
+}, .{ .debug = StateDebug });
 
 fn expectParse(src: []const u8) !void {
     try std.testing.expect(try VM.parseFully(std.testing.allocator, src, .auto_continue));
@@ -741,4 +1141,116 @@ export fn parse(src: [*]const u8, len: usize) i32 {
         .Fail => return 1,
         .Running => return 2,
     }
+}
+
+// -------------------------
+// JSON grammar (ASCII-only)
+// -------------------------
+pub const Json = struct {
+    const C = Combinators(@This(), .{ .debug = StateDebug });
+
+    // Hex digit for \uXXXX escapes
+    const HEX = C.classRanges(.{ .{ '0','9' }, .{ 'A','F' }, .{ 'a','f' } });
+
+    // Unescaped JSON string char: any ASCII except control, '"' and '\\'
+    const UnescapedChar = C.classRanges(.{ .{ ' ', '!' }, .{ '#', '[' }, .{ ']', '~' } });
+
+    // Escaped: \\" \\ \/ \b \f \n \r \t or \uXXXX
+    const SimpleEscape = C.seq(.{
+        C.CH('\\'),
+        C.classRanges(.{ .{ '"','"' }, .{ '\\','\\' }, .{ '/','/' }, .{ 'b','b' }, .{ 'f','f' }, .{ 'n','n' }, .{ 'r','r' }, .{ 't','t' } }),
+    });
+    const UnicodeEscape = C.seq(.{ C.CH('\\'), C.CH('u'), HEX, HEX, HEX, HEX });
+
+    // String <- '"' (Unescaped / Escape)* '"'
+    pub const String = C.seq(.{
+        C.CH('"'),
+        C.many0(C.alt(.{ UnescapedChar, SimpleEscape, UnicodeEscape })),
+        C.CH('"'),
+        C.RET,
+    });
+
+    // Number per JSON (no leading zeros unless exactly 0)
+    // Integer <- '-'? ( '0' / [1-9] [0-9]* )
+    // Frac <- ('.' [0-9]+)?  using NUMBER for [0-9]+
+    // Exp  <- ([eE] [+-]? [0-9]+)?
+    const DIGIT1_9 = C.classRanges(.{ .{ '1','9' } });
+    const SignOpt = C.opt(C.CH('-'));
+    const IntPart = C.alt(.{ C.STR("0"), C.seq(.{ DIGIT1_9, C.many0(C.NUMBER) }) });
+    const FracOpt = C.opt(C.seq(.{ C.CH('.'), C.NUMBER }));
+    const ExpOpt = C.opt(C.seq(.{
+        C.classRanges(.{ .{ 'e','e' }, .{ 'E','E' } }),
+        C.opt(C.classRanges(.{ .{ '+','+' }, .{ '-','-' } })),
+        C.NUMBER,
+    }));
+    pub const Number = C.seq(.{ SignOpt, IntPart, FracOpt, ExpOpt, C.RET });
+
+    // Value <- Object / Array / String / Number / 'true' / 'false' / 'null'
+    pub const Value = C.alt(.{
+        C.Call(.Object),
+        C.Call(.Array),
+        C.Call(.String),
+        C.Call(.Number),
+        C.STR("true"),
+        C.STR("false"),
+        C.STR("null"),
+    }) ++ C.RET;
+
+    // Member <- String WS ':' WS Value
+    pub const Member = C.seq(.{ C.Call(.String), C.WS, C.CH(':'), C.WS, C.Call(.Value), C.RET });
+
+    // Members <- Member (WS ',' WS Member)*
+    pub const Members = C.seq(.{ C.Call(.Member), C.many0(C.seq(.{ C.WS, C.CH(','), C.WS, C.Call(.Member) })), C.RET });
+
+    // Object <- '{' WS Members? WS '}'
+    pub const Object = C.seq(.{ C.CH('{'), C.WS, C.opt(C.Call(.Members)), C.WS, C.CH('}'), C.RET });
+
+    // Elements <- Value (WS ',' WS Value)*
+    pub const Elements = C.seq(.{ C.Call(.Value), C.many0(C.seq(.{ C.WS, C.CH(','), C.WS, C.Call(.Value) })), C.RET });
+
+    // Array <- '[' WS Elements? WS ']'
+    pub const Array = C.seq(.{ C.CH('['), C.WS, C.opt(C.Call(.Elements)), C.WS, C.CH(']'), C.RET });
+
+    // Start <- WS Value WS EOF
+    pub const Start = C.seq(.{ C.WS, C.Call(.Value), C.WS, C.END, C.ACCEPT });
+};
+
+const JSON_VM = InlineVm(Json, .{ .debug = SilentDebug });
+
+fn expectJsonOk(src: []const u8) !void {
+    try std.testing.expect(try JSON_VM.parseFully(std.testing.allocator, src, .auto_continue));
+}
+
+fn expectJsonFail(src: []const u8) !void {
+    try std.testing.expect(!try JSON_VM.parseFully(std.testing.allocator, src, .auto_continue));
+}
+
+test "json primitives" {
+    try expectJsonOk(" true ");
+    try expectJsonOk(" false ");
+    try expectJsonOk(" null ");
+}
+
+test "json numbers" {
+    try expectJsonOk("0");
+    try expectJsonOk("-0");
+    try expectJsonOk("10");
+    try expectJsonOk("42\n");
+    try expectJsonOk("3.14");
+    try expectJsonOk("1e10");
+    try expectJsonOk("1E-10");
+    try expectJsonFail("01"); // no leading zeros
+}
+
+test "json strings" {
+    try expectJsonOk("\"hello\"\n");
+    try expectJsonOk("\"he\\nllo\"\n");
+    try expectJsonOk("\"\\u0041\"\n");
+}
+
+test "json arrays and objects" {
+    try expectJsonOk("[]");
+    try expectJsonOk("[1, 2, 3]");
+    try expectJsonOk("{\"a\": 1}");
+    try expectJsonOk("{\"a\": [true, false, null]}\n");
 }
