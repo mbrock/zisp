@@ -79,7 +79,7 @@ pub fn ProgramFor(comptime G: type) type {
 
 const ExecMode = enum { auto_continue, yield_each };
 
-pub fn InlineVm(comptime Grammar: type) type {
+pub fn InlineVm(comptime Grammar: type, comptime config: struct { debug: type = SilentDebug }) type {
     const P = ProgramFor(Grammar);
 
     const Backtrack = struct {
@@ -116,16 +116,107 @@ pub fn InlineVm(comptime Grammar: type) type {
 
         pub const Status = enum { Ok, Fail, Running };
 
+        fn formatOp(op: P.OpT, writer: anytype) !void {
+            switch (op) {
+                .Char => |c| {
+                    if (c == ' ') try writer.print("'\\s'", .{})
+                    else if (c == '\t') try writer.print("'\\t'", .{})
+                    else if (c == '\n') try writer.print("'\\n'", .{})
+                    else if (c == '\r') try writer.print("'\\r'", .{})
+                    else try writer.print("'{c}'", .{c});
+                },
+                .String => |s| try writer.print("\"{s}\"", .{s}),
+                .SkipWS => try writer.print("⟪whitespace⟫", .{}),
+                .Ident => try writer.print("⟪identifier⟫", .{}),
+                .Number => try writer.print("⟪number⟫", .{}),
+                .EndInput => try writer.print("⟪end-of-input⟫", .{}),
+                .ChoiceRel => |d| try writer.print("try alternative at +{}", .{d}),
+                .CommitRel => |d| try writer.print("commit choice, jump {s}{}", .{ if (d >= 0) "+" else "", d }),
+                .Call => |r| try writer.print("→ {s}", .{@tagName(r)}),
+                .Ret => try writer.print("← return", .{}),
+                .Fail => try writer.print("✗ fail", .{}),
+                .Accept => try writer.print("✓ accept", .{}),
+            }
+        }
+
+        fn formatInput(input: []const u8, pos: usize, writer: anytype) !void {
+            if (pos >= input.len) {
+                try writer.print("⟪EOF⟫", .{});
+                return;
+            }
+
+            const start = if (pos >= 5) pos - 5 else 0;
+            const end = @min(pos + 15, input.len);
+            const before = input[start..pos];
+            const at = input[pos];
+            const after = input[pos + 1..end];
+
+            try writer.print("…{s}", .{before});
+            
+            if (at == ' ') try writer.print("⎵", .{})
+            else if (at == '\t') try writer.print("⇥", .{})
+            else if (at == '\n') try writer.print("⏎", .{})
+            else if (at == '\r') try writer.print("⏎", .{})
+            else try writer.print("{c}", .{at});
+            
+            try writer.print("{s}…", .{after});
+        }
+
+        fn ipToRuleName(ip: usize) []const u8 {
+            const rules = comptime std.enums.values(P.RuleT);
+            comptime var i: usize = 0;
+            inline for (rules) |rule| {
+                const rule_start = P.rule_ip[i];
+                const rule_end = if (i + 1 < rules.len) P.rule_ip[i + 1] else P.code.len;
+                if (ip >= rule_start and ip < rule_end) {
+                    return @tagName(rule);
+                }
+                i += 1;
+            }
+            return "?";
+        }
+
+        fn ipToRuleOffset(ip: usize) usize {
+            const rules = comptime std.enums.values(P.RuleT);
+            comptime var i: usize = 0;
+            inline for (rules) |_| {
+                const rule_start = P.rule_ip[i];
+                const rule_end = if (i + 1 < rules.len) P.rule_ip[i + 1] else P.code.len;
+                if (ip >= rule_start and ip < rule_end) {
+                    return ip - rule_start;
+                }
+                i += 1;
+            }
+            return ip;
+        }
+
+        fn formatTrail(trail: []const Backtrack, writer: anytype) !void {
+            if (trail.len == 0) return;
+            
+            try writer.print("[", .{});
+            var i: usize = 0;
+            for (trail) |bt| {
+                if (i > 0) try writer.print(",", .{});
+                const rule_name = ipToRuleName(bt.ip);
+                const offset = ipToRuleOffset(bt.ip);
+                try writer.print("{s}+{}", .{ rule_name, offset });
+                i += 1;
+            }
+            try writer.print("↺]", .{});
+        }
+
         pub fn tick(self: *Machine, comptime _: ExecMode) !Status {
             const BACKTRACK = P.code.len;
             vm: switch (self.ip) {
                 BACKTRACK => {
                     if (self.trail.pop()) |bt| {
+                        config.debug.onBacktrack(bt.ip, bt.pos, @min(self.call.items.len, 8));
                         self.input.cur = bt.pos;
                         self.vstack.shrinkRetainingCapacity(bt.vsp);
                         self.call.shrinkRetainingCapacity(bt.csp);
                         continue :vm bt.ip;
                     } else {
+                        config.debug.onFail();
                         return .Fail;
                     }
                 },
@@ -133,18 +224,30 @@ pub fn InlineVm(comptime Grammar: type) type {
                     const op = comptime P.code[k];
                     const next = k + 1;
 
-                    std.debug.lockStdErr();
-                    std.debug.print("Op {any} IP={}\n", .{ op, k });
-                    for (self.trail.items) |item| {
-                        std.debug.print("  Trail: {any}\n", .{item});
-                    }
-                    std.debug.unlockStdErr();
+                    const depth = @min(self.call.items.len, 8);
+                    
+                    // Format trail with rule names
+                    var trail_buf: [200]u8 = undefined;
+                    var trail_fbs = std.io.fixedBufferStream(&trail_buf);
+                    try formatTrail(self.trail.items, trail_fbs.writer());
+                    const formatted_trail = trail_fbs.getWritten();
+                    
+                    config.debug.onOp(op, depth, k, self.input.cur, self.input.data, formatted_trail);
 
                     switch (op) {
                         inline .Char => |c| {
-                            if (try self.input.take() != c)
+                            const old_pos = self.input.cur;
+                            if (try self.input.take()) |got| {
+                                if (got != c) {
+                                    self.input.cur = old_pos; // restore position
+                                    continue :vm BACKTRACK;
+                                }
+                                var consumed: [1]u8 = .{got};
+                                config.debug.onConsume(&consumed, "char", depth);
+                                continue :vm next;
+                            } else {
                                 continue :vm BACKTRACK;
-                            continue :vm next;
+                            }
                         },
                         inline .String => |lit| {
                             if (!try self.input.ensure(self.input.cur, lit.len))
@@ -156,9 +259,11 @@ pub fn InlineVm(comptime Grammar: type) type {
                                 continue :vm BACKTRACK;
 
                             self.input.cur += lit.len;
+                            config.debug.onConsume(got, "string", depth);
                             continue :vm next;
                         },
                         inline .SkipWS => {
+                            const start_pos = self.input.cur;
                             while (true) {
                                 const mb = try self.input.peek();
                                 if (mb) |b| switch (b) {
@@ -166,9 +271,14 @@ pub fn InlineVm(comptime Grammar: type) type {
                                     else => break,
                                 } else break;
                             }
+                            if (self.input.cur > start_pos) {
+                                const consumed = self.input.data[start_pos..self.input.cur];
+                                config.debug.onConsume(consumed, "whitespace", depth);
+                            }
                             continue :vm next;
                         },
                         inline .Ident => {
+                            const start_pos = self.input.cur;
                             const mb = try self.input.peek() orelse continue :vm BACKTRACK;
                             const is0 = (mb >= 'A' and mb <= 'Z') or (mb >= 'a' and mb <= 'z') or mb == '_';
                             if (!is0) continue :vm BACKTRACK;
@@ -183,9 +293,12 @@ pub fn InlineVm(comptime Grammar: type) type {
                                 } else break;
                             }
 
+                            const ident = self.input.data[start_pos..self.input.cur];
+                            config.debug.onConsume(ident, "identifier", depth);
                             continue :vm next;
                         },
                         inline .Number => {
+                            const start_pos = self.input.cur;
                             var n: usize = 0;
                             while (true) {
                                 const mb = try self.input.peek();
@@ -197,6 +310,9 @@ pub fn InlineVm(comptime Grammar: type) type {
                                 } else break;
                             }
                             if (n == 0) continue :vm BACKTRACK;
+                            
+                            const number = self.input.data[start_pos..self.input.cur];
+                            config.debug.onConsume(number, "number", depth);
                             continue :vm next;
                         },
 
@@ -246,12 +362,6 @@ pub fn InlineVm(comptime Grammar: type) type {
             switch (mode) {
                 .yield_each => {
                     foo: while (true) {
-                        std.debug.lockStdErr();
-                        std.debug.print("IP={}\n", .{m.ip});
-                        for (m.trail.items) |item| {
-                            std.debug.print("  Trail: {any}\n", .{item});
-                        }
-                        std.debug.unlockStdErr();
                         const st = try m.tick(.yield_each);
 
                         switch (st) {
@@ -274,8 +384,130 @@ pub fn InlineVm(comptime Grammar: type) type {
     };
 }
 
+/// Silent debug handler (no output)
+pub const SilentDebug = struct {
+    pub fn onOp(op: anytype, depth: usize, ip: usize, input_pos: usize, input: []const u8, trail: []const u8) void {
+        _ = op; _ = depth; _ = ip; _ = input_pos; _ = input; _ = trail;
+    }
+    pub fn onConsume(consumed: []const u8, kind: []const u8, depth: usize) void {
+        _ = consumed; _ = kind; _ = depth;
+    }
+    pub fn onBacktrack(to_ip: usize, to_pos: usize, depth: usize) void {
+        _ = to_ip; _ = to_pos; _ = depth;
+    }
+    pub fn onFail() void {}
+};
+
+/// Verbose debug handler (with colored output)
+pub const VerboseDebug = struct {
+    pub fn onOp(op: anytype, depth: usize, _: usize, input_pos: usize, input: []const u8, trail: []const u8) void {
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
+
+        // Print tree structure with proper indentation
+        std.debug.print("\x1b[90m", .{});
+        if (depth == 0) {
+            std.debug.print("  ", .{});
+        } else if (depth == 1) {
+            std.debug.print("├─", .{});
+        } else {
+            for (0..depth - 1) |_| std.debug.print("│ ", .{});
+            std.debug.print("├─", .{});
+        }
+        std.debug.print("\x1b[0m ", .{});
+
+        // Print operation with color
+        switch (op) {
+            .Call => |rule| std.debug.print("\x1b[96m→ {s}\x1b[0m\n", .{@tagName(rule)}),
+            .Ret => std.debug.print("\x1b[93m← return\x1b[0m\n", .{}),
+            .ChoiceRel => |offset| std.debug.print("\x1b[95mtry alternative at +{}\x1b[0m\n", .{offset}),
+            .CommitRel => |offset| std.debug.print("\x1b[95mcommit choice, jump +{}\x1b[0m\n", .{offset}),
+            .Fail => std.debug.print("\x1b[91m✗ fail\x1b[0m\n", .{}),
+            .Char => |c| std.debug.print("\x1b[92m'{c}'\x1b[0m\n", .{c}),
+            .String => |s| std.debug.print("\x1b[92m\"{s}\"\x1b[0m\n", .{s}),
+            .SkipWS => std.debug.print("\x1b[94m⟪whitespace⟫\x1b[0m\n", .{}),
+            .Ident => std.debug.print("\x1b[94m⟪identifier⟫\x1b[0m\n", .{}),
+            .Number => std.debug.print("\x1b[94m⟪number⟫\x1b[0m\n", .{}),
+            .EndInput => std.debug.print("\x1b[94m⟪end-of-input⟫\x1b[0m\n", .{}),
+            .Accept => std.debug.print("\x1b[92m✓ accept\x1b[0m\n", .{}),
+        }
+
+        // Print input position
+        std.debug.print("\x1b[90m", .{});
+        if (depth == 0) {
+            std.debug.print("    ", .{});
+        } else {
+            for (0..depth - 1) |_| std.debug.print("│ ", .{});
+            std.debug.print("│   ", .{});
+        }
+        std.debug.print("\x1b[0m\x1b[90m→\x1b[0m ", .{});
+
+        // Display input preview
+        if (input_pos < input.len) {
+            const remaining = input[input_pos..];
+            const display_len = @min(remaining.len, 10);
+            std.debug.print("\x1b[97m…{s}", .{remaining[0..display_len]});
+            if (display_len < remaining.len) std.debug.print("…", .{});
+            std.debug.print("\x1b[0m", .{});
+        } else {
+            std.debug.print("\x1b[97m⟪EOF⟫\x1b[0m", .{});
+        }
+
+        // Print backtrack trail if present
+        if (trail.len > 0) {
+            std.debug.print("\n\x1b[90m", .{});
+            if (depth == 0) {
+                std.debug.print("    ", .{});
+            } else {
+                for (0..depth - 1) |_| std.debug.print("│ ", .{});
+                std.debug.print("│   ", .{});
+            }
+            std.debug.print("\x1b[0m\x1b[90m↺\x1b[0m \x1b[33m", .{});
+            std.debug.print("{s}", .{trail});
+            std.debug.print("\x1b[0m", .{});
+        }
+
+        std.debug.print("\n", .{});
+    }
+
+    pub fn onConsume(consumed: []const u8, kind: []const u8, depth: usize) void {
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
+        
+        std.debug.print("\x1b[90m", .{});
+        if (depth == 0) {
+            std.debug.print("    ", .{});
+        } else {
+            for (0..depth - 1) |_| std.debug.print("│ ", .{});
+            std.debug.print("│   ", .{});
+        }
+        
+        if (std.mem.eql(u8, kind, "char")) {
+            std.debug.print("\x1b[0m\x1b[92m✓ consumed '{s}'\x1b[0m\n", .{consumed});
+        } else if (std.mem.eql(u8, kind, "string")) {
+            std.debug.print("\x1b[0m\x1b[92m✓ consumed \"{s}\"\x1b[0m\n", .{consumed});
+        } else if (std.mem.eql(u8, kind, "whitespace")) {
+            const count = consumed.len;
+            std.debug.print("\x1b[0m\x1b[92m✓ skipped {} whitespace\x1b[0m\n", .{count});
+        } else {
+            std.debug.print("\x1b[0m\x1b[92m✓ consumed {s} '{s}'\x1b[0m\n", .{ kind, consumed });
+        }
+    }
+
+    pub fn onBacktrack(to_ip: usize, to_pos: usize, depth: usize) void {
+        _ = to_ip; _ = to_pos; _ = depth;
+        // Could add backtrack visualization here if needed
+    }
+
+    pub fn onFail() void {
+        // Could add fail visualization here if needed
+    }
+};
+
 /// Grammar-specific combinators + Op generator
-pub fn Combinators(comptime G: type, comptime _: struct {}) type {
+pub fn Combinators(comptime G: type, comptime config: struct { debug: type = SilentDebug }) type {
+    const debug = config.debug;
+    _ = debug; // Use the debug parameter
     return struct {
         pub const Rule = std.meta.DeclEnum(G);
 
@@ -368,6 +600,11 @@ pub fn Combinators(comptime G: type, comptime _: struct {}) type {
             var i: usize = 0;
             var j: usize = 0;
             inline for (parts) |p| {
+                if (j != 0) {
+                    out[i] = .{ .CommitRel = p.len };
+                    i += 1;
+                }
+
                 if (j == parts.len - 1) {
                     inline for (p) |item| {
                         out[i] = item;
@@ -384,8 +621,6 @@ pub fn Combinators(comptime G: type, comptime _: struct {}) type {
                     i += 1;
                 }
 
-                out[i] = .{ .CommitRel = -@as(i32, @intCast(p.len + 1)) };
-                i += 1;
                 j += 1;
             }
 
@@ -399,7 +634,7 @@ pub fn Combinators(comptime G: type, comptime _: struct {}) type {
 }
 
 const Demo = struct {
-    const C = Combinators(@This(), .{});
+    const C = Combinators(@This(), .{ .debug = VerboseDebug });
 
     // Prim <- Number / Ident / '(' WS Expr WS ')'
     pub const Prim = C.alt(.{
@@ -441,12 +676,12 @@ const Demo = struct {
     pub const Start = C.seq(.{ C.WS, C.Call(.Call), C.WS, C.END, C.ACCEPT });
 };
 
-const VM = InlineVm(Demo);
+const VM = InlineVm(Demo, .{ .debug = VerboseDebug });
 
 const TrivialVM = InlineVm(struct {
-    const C = Combinators(@This(), .{});
+    const C = Combinators(@This(), .{ .debug = VerboseDebug });
     pub const Start = C.seq(.{ C.CH('a'), C.CH('b'), C.END, C.ACCEPT });
-});
+}, .{ .debug = VerboseDebug });
 
 fn expectParse(src: []const u8) !void {
     try std.testing.expect(try VM.parseFully(std.testing.allocator, src, .auto_continue));
