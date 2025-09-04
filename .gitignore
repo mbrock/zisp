@@ -1,0 +1,25 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# Debug and temporary files
+*.air
+*.asm
+*.ast
+*.c
+*.ir
+*.ll
+*.o
+*.s
+*.zir
+debug.log
+liveness.log
+*~
+
+# VS Code
+.vscode/
+
+# Executables
+/parse
+/bug
