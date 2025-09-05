@@ -6,7 +6,7 @@ comptime {
 
 pub const Input = struct {};
 
-const CharBitset = std.bit_set.StaticBitSet(256);
+const CharBitset = std.bit_set.ArrayBitSet(u64, 256);
 
 pub fn ProgramFor(comptime G: type) type {
     return struct {
@@ -67,56 +67,74 @@ pub fn ProgramFor(comptime G: type) type {
 
 const ExecMode = enum { auto_continue, yield_each };
 
-pub fn VM(comptime Grammar: type) type {
+pub fn VM(
+    comptime Grammar: type,
+    comptime TrailCap: usize,
+    comptime StackCap: usize,
+) type {
     return struct {
         pub const P = ProgramFor(Grammar);
 
-        const Backtrack = struct {
-            ip: usize,
-            pos: usize,
-            csp: usize,
+        pub const Backtrack = struct {
+            ip: u16,
+            csp: u16,
+            pos: u32,
+
+            // comptime {
+            //     if (@alignOf(@This()) != 8) @compileError("alignment confusion");
+            //     if (@sizeOf(@This()) != 8 * 3) @compileError("size confusion");
+            // }
         };
+
+        pub const CallFrame = u16;
 
         const Machine = @This();
 
-        gpa: std.mem.Allocator,
         src: []const u8,
-        cur: usize = 0,
+        cur: u32 = 0,
 
-        ip: usize = P.start_ip,
-        trail: std.ArrayList(Backtrack) = .empty,
-        call: std.ArrayList(usize) = .empty,
+        ip: u16 = P.start_ip,
 
-        pub fn init(alloc: std.mem.Allocator, src: []const u8) Machine {
+        trailbuf: [TrailCap]Backtrack = undefined,
+        trailtop: u16 = 0,
+        stackbuf: [StackCap]u16 = undefined,
+        stacktop: u16 = 0,
+
+        pub fn init(
+            src: []const u8,
+        ) Machine {
             return .{
-                .gpa = alloc,
                 .src = src,
-                .trail = std.ArrayList(Backtrack).initCapacity(alloc, 64) catch @panic("no memory for backtrack"),
-                .call = std.ArrayList(usize).initCapacity(alloc, 64) catch @panic("no memory for call stack"),
             };
         }
 
-        pub fn deinit(self: *Machine) void {
-            self.call.deinit(self.gpa);
-            self.trail.deinit(self.gpa);
-        }
+        pub fn deinit(_: *Machine) void {}
 
         pub const Status = enum { Ok, Fail, Running };
 
-        fn ensure(self: *@This(), from: usize, n: usize) !bool {
+        fn ensure(self: @This(), from: usize, n: usize) bool {
             return from + n <= self.src.len;
         }
 
-        fn atEnd(self: *@This()) !bool {
+        fn atEnd(self: @This()) bool {
             return self.cur >= self.src.len;
         }
 
-        fn peek(self: *@This()) ?u8 {
+        fn peek(self: @This()) ?u8 {
             if (self.cur >= self.src.len) return null;
             return self.src[self.cur];
         }
 
-        fn take(self: *@This()) ?u8 {
+        fn lookingAt(self: @This(), c: u8) bool {
+            return self.cur < self.src.len and self.src[self.cur] == c;
+        }
+
+        fn lookingAtMatch(self: @This(), set: CharBitset) bool {
+            if (self.cur >= self.src.len) return false;
+            return set.isSet(self.src[self.cur]);
+        }
+
+        fn take(self: @This()) ?u8 {
             if (self.cur >= self.src.len) return null;
             const b = self.src[self.cur];
             self.cur += 1;
@@ -124,94 +142,89 @@ pub fn VM(comptime Grammar: type) type {
         }
 
         pub fn tick(self: *Machine, comptime mode: ExecMode) !Status {
-            const BACKTRACK = P.code.len;
-            var yield = false;
-            
-            vm: switch (self.ip) {
-                BACKTRACK => {
-                    if (self.trail.pop()) |bt| {
-                        self.cur = bt.pos;
-                        self.call.shrinkRetainingCapacity(bt.csp);
-                        continue :vm bt.ip;
-                    } else {
-                        return .Fail;
-                    }
-                },
-                inline 0...P.code.len - 1 => |k| {
-                    // Check yield flag before processing op
-                    if (mode == .yield_each and yield) {
-                        self.ip = k;  // Save current IP before yielding
-                        return .Running;
-                    } else {
-                        yield = true;  // Set flag for next time
-                    }
-                    
-                    const op = comptime P.code[k];
-                    const next = k + 1;
+            const yield = mode == .yield_each;
 
-                    switch (op) {
+            vm: switch (self.ip) {
+                inline 0...P.code.len - 1 => |ip| {
+                    const next = ip + 1;
+                    self.ip = next;
+
+                    switch (comptime P.code[ip]) {
                         inline .Char => |c| {
-                            if (self.peek() == c) {
+                            if (self.lookingAt(c)) {
                                 self.cur += 1;
-                                continue :vm next;
-                            } else {
-                                continue :vm BACKTRACK;
+                                if (yield) return .Running else continue :vm next;
                             }
                         },
 
                         inline .CharSet => |set| {
-                            if (self.peek()) |got| {
-                                if (set.isSet(got)) {
-                                    self.cur += 1;
-                                    continue :vm next;
-                                }
+                            if (self.lookingAtMatch(set)) {
+                                self.cur += 1;
+                                if (yield) return .Running else continue :vm next;
                             }
-                            continue :vm BACKTRACK;
                         },
 
                         inline .String => |s| {
-                            if (self.ensure(self.cur, s.len) catch false) {
+                            if (self.ensure(self.cur, s.len)) {
                                 if (std.mem.eql(u8, self.src[self.cur .. self.cur + s.len], s)) {
                                     self.cur += s.len;
-                                    continue :vm next;
+                                    if (yield) return .Running else continue :vm next;
                                 }
                             }
-
-                            continue :vm BACKTRACK;
                         },
 
                         inline .ChoiceRel => |d| {
-                            try self.trail.appendBounded(.{
-                                .ip = comptime @as(usize, @intCast(@as(isize, @intCast(k)) + 1 + d)),
+                            if (self.trailtop == self.trailbuf.len - 1) return error.TrailOverflow;
+                            self.trailtop += 1;
+                            self.trailbuf[self.trailtop] = .{
+                                .ip = @as(usize, @intCast(@as(isize, @intCast(ip)) + 1 + d)),
                                 .pos = self.cur,
-                                .csp = self.call.items.len,
-                            });
+                                .csp = self.stacktop,
+                            };
 
-                            continue :vm next;
+                            if (yield) return .Running else continue :vm next;
                         },
 
                         inline .CommitRel => |d| {
-                            if (self.trail.items.len != 0) _ = self.trail.pop();
-                            continue :vm (comptime @as(usize, @intCast(@as(isize, k) + 1 + d)));
+                            if (self.trailtop == 0) return error.TrailUnderflow;
+                            self.trailtop -= 1;
+                            const dst = (@as(usize, @intCast(@as(isize, ip) + 1 + d)));
+                            self.ip = dst;
+                            if (yield) return .Running else continue :vm dst;
                         },
 
                         inline .Call => |r| {
-                            try self.call.appendBounded(next);
-                            continue :vm P.rule_ip[@intCast(@intFromEnum(r))];
+                            if (self.stacktop == self.stackbuf.len - 1) return error.StackOverflow;
+                            self.stacktop += 1;
+                            self.stackbuf[self.stacktop] = ip + 1;
+                            const callee = P.rule_ip[@intCast(@intFromEnum(r))];
+                            self.ip = callee;
+                            if (yield) return .Running else continue :vm callee;
                         },
 
-                        .Ret => if (self.call.pop()) |ret|
-                            continue :vm ret
-                        else
-                            return error.InvalidRet,
+                        .Ret => if (self.stacktop == 0)
+                            return error.StackUnderflow
+                        else {
+                            const ret_ip = self.stackbuf[self.stacktop];
+                            self.ip = ret_ip;
+                            self.stacktop -= 1;
+                            if (yield) return .Running else continue :vm ret_ip;
+                        },
 
-                        .EndInput => if (!try self.atEnd())
-                            continue :vm BACKTRACK
-                        else
-                            continue :vm next,
-
-                        .Fail => continue :vm BACKTRACK,
+                        .EndInput => if (self.atEnd()) if (yield) return .Running else continue :vm next,
+                        .Fail => void,
                         .Accept => return .Ok,
+                    }
+
+                    if (self.trailtop != 0) {
+                        const bt = self.trailbuf[self.trailtop];
+                        self.trailtop -= 1;
+                        self.cur = bt.pos;
+                        self.stacktop = bt.csp;
+                        self.ip = bt.ip;
+                        if (yield) return .Running else continue :vm bt.ip;
+                    } else {
+                        return .Fail;
                     }
                 },
 
@@ -220,11 +233,10 @@ pub fn VM(comptime Grammar: type) type {
         }
 
         pub fn parseFully(
-            alloc: std.mem.Allocator,
             src: []const u8,
             comptime mode: ExecMode,
         ) !bool {
-            var m = @This().init(alloc, src);
+            var m = @This().init(src);
             defer m.deinit();
             switch (mode) {
                 .yield_each => {
@@ -256,8 +268,8 @@ pub fn Combinators(comptime G: type) type {
         pub const Rule = std.meta.DeclEnum(G);
 
         pub const Op = union(enum) {
-            ChoiceRel: i32,
-            CommitRel: i32,
+            ChoiceRel: i16,
+            CommitRel: i16,
             Fail: void,
             Call: Rule,
             Ret: void,
@@ -323,19 +335,13 @@ pub fn Combinators(comptime G: type) type {
         }
 
         pub inline fn many0(comptime X: anytype) OpN(X.len + 2) {
-            comptime {
-                @setEvalBranchQuota(200000);
-            }
             const to_end = X.len + 1; // from ChoiceRel next to end
-            const back = -@as(i32, @intCast(X.len + 2)); // from CommitRel back to ChoiceRel
+            const back = -@as(i16, @intCast(X.len + 2)); // from CommitRel back to ChoiceRel
             return op1(.{ .ChoiceRel = @intCast(to_end) }) ++ X ++
                 op1(.{ .CommitRel = back });
         }
 
         pub inline fn alt(comptime parts: anytype) OpN(sizeSum(parts) + (parts.len - 1) * 2) {
-            comptime {
-                @setEvalBranchQuota(200000);
-            }
             if (parts.len < 2) @compileError("alt needs at least 2 parts");
 
             // Precompute lengths of each alternative
@@ -382,17 +388,11 @@ pub fn Combinators(comptime G: type) type {
         }
 
         pub inline fn opt(comptime X: anytype) OpN(X.len + 2) {
-            comptime {
-                @setEvalBranchQuota(200000);
-            }
             return alt(.{ X, .{} });
         }
 
         // One-or-more occurrences built from many0
         pub inline fn many1(comptime X: anytype) OpN(X.len + (X.len + 2)) {
-            comptime {
-                @setEvalBranchQuota(200000);
-            }
             return seq(.{ X, many0(X) });
         }
 
@@ -532,18 +532,18 @@ pub const JSONGrammar = struct {
     });
 };
 
-const JSONParser = VM(JSONGrammar);
+const JSONParser = VM(JSONGrammar, 32, 32);
+
+fn parseJSON(src: []const u8) !bool {
+    return JSONParser.parseFully(src, .auto_continue);
+}
 
 fn expectJsonOk(src: []const u8) !void {
-    try std.testing.expect(
-        try JSONParser.parseFully(std.testing.allocator, src, .auto_continue),
-    );
+    try std.testing.expect(try parseJSON(src));
 }
 
 fn expectJsonFail(src: []const u8) !void {
-    try std.testing.expect(
-        !try JSONParser.parseFully(std.testing.allocator, src, .auto_continue),
-    );
+    try std.testing.expect(!try parseJSON(src));
 }
 
 test "show json grammar ops" {
@@ -616,28 +616,42 @@ test "json arrays and objects" {
     try expectJsonOk("{\"a\": [true, false, null]}\n");
 }
 
-pub fn parse(src: []const u8) !i32 {
-    var buf: [4096]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&buf);
-    const gpa = alloc.allocator();
-    var m = JSONParser.init(gpa, src);
+pub export fn parse(src: [*]const u8, len: usize) u8 {
+    var m = JSONParser.init(src[0..len]);
     defer m.deinit();
-    switch (try m.tick(.auto_continue)) {
-        .Ok => return 0,
-        .Fail => return 1,
-        .Running => return 2,
+    defer std.debug.print("\n", .{});
+    while (true) {
+        switch (m.tick(.yield_each) catch return 2) {
+            .Ok => {
+                std.debug.print("ok", .{});
+                return 0;
+            },
+            .Fail => {
+                std.debug.print("no", .{});
+                return 1;
+            },
+            .Running => {
+                std.debug.print(".", .{});
+                continue;
+            },
+        }
     }
+}
+
+pub fn main() u8 {
+    const src = std.posix.getenv("SRC") orelse "";
+    return parse(@ptrCast(src), src.len);
 }
 
 test "yield mode" {
     const src = "true";
-    var m = JSONParser.init(std.testing.allocator, src);
+    var m = JSONParser.init(src);
     defer m.deinit();
-    
+
     // First tick should execute first op and return Running
     const st1 = try m.tick(.yield_each);
     try std.testing.expect(st1 == .Running);
-    
+
     // Keep ticking until we get a final result
     var count: usize = 1;
     while (true) : (count += 1) {
@@ -648,7 +662,7 @@ test "yield mode" {
             .Fail => return error.TestUnexpectedFailure,
         }
     }
-    
+
     // Should have taken multiple steps
     try std.testing.expect(count > 1);
     std.debug.print("\nParsing 'true' took {d} steps in yield mode\n", .{count});
@@ -656,9 +670,9 @@ test "yield mode" {
 
 test "yield mode complex" {
     const src = "[1, 2, 3]";
-    var m = JSONParser.init(std.testing.allocator, src);
+    var m = JSONParser.init(src);
     defer m.deinit();
-    
+
     var count: usize = 0;
     while (true) : (count += 1) {
         const st = try m.tick(.yield_each);
@@ -668,7 +682,7 @@ test "yield mode complex" {
             .Fail => return error.TestUnexpectedFailure,
         }
     }
-    
+
     std.debug.print("Parsing '[1, 2, 3]' took {d} steps in yield mode\n", .{count});
     try std.testing.expect(count > 10); // Should take many steps
 }
