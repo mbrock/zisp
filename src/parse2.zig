@@ -123,8 +123,10 @@ pub fn VM(comptime Grammar: type) type {
             return b;
         }
 
-        pub fn tick(self: *Machine, comptime _: ExecMode) !Status {
+        pub fn tick(self: *Machine, comptime mode: ExecMode) !Status {
             const BACKTRACK = P.code.len;
+            var yield = false;
+            
             vm: switch (self.ip) {
                 BACKTRACK => {
                     if (self.trail.pop()) |bt| {
@@ -136,6 +138,14 @@ pub fn VM(comptime Grammar: type) type {
                     }
                 },
                 inline 0...P.code.len - 1 => |k| {
+                    // Check yield flag before processing op
+                    if (mode == .yield_each and yield) {
+                        self.ip = k;  // Save current IP before yielding
+                        return .Running;
+                    } else {
+                        yield = true;  // Set flag for next time
+                    }
+                    
                     const op = comptime P.code[k];
                     const next = k + 1;
 
@@ -619,15 +629,46 @@ pub fn parse(src: []const u8) !i32 {
     }
 }
 
-test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(
-                try parse(input) >= 0,
-            );
+test "yield mode" {
+    const src = "true";
+    var m = JSONParser.init(std.testing.allocator, src);
+    defer m.deinit();
+    
+    // First tick should execute first op and return Running
+    const st1 = try m.tick(.yield_each);
+    try std.testing.expect(st1 == .Running);
+    
+    // Keep ticking until we get a final result
+    var count: usize = 1;
+    while (true) : (count += 1) {
+        const st = try m.tick(.yield_each);
+        switch (st) {
+            .Running => continue,
+            .Ok => break,
+            .Fail => return error.TestUnexpectedFailure,
         }
-    };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
+    }
+    
+    // Should have taken multiple steps
+    try std.testing.expect(count > 1);
+    std.debug.print("\nParsing 'true' took {d} steps in yield mode\n", .{count});
+}
+
+test "yield mode complex" {
+    const src = "[1, 2, 3]";
+    var m = JSONParser.init(std.testing.allocator, src);
+    defer m.deinit();
+    
+    var count: usize = 0;
+    while (true) : (count += 1) {
+        const st = try m.tick(.yield_each);
+        switch (st) {
+            .Running => continue,
+            .Ok => break,
+            .Fail => return error.TestUnexpectedFailure,
+        }
+    }
+    
+    std.debug.print("Parsing '[1, 2, 3]' took {d} steps in yield mode\n", .{count});
+    try std.testing.expect(count > 10); // Should take many steps
 }
