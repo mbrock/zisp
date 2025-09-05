@@ -37,7 +37,6 @@ pub const Input = struct {
 
 pub fn ProgramFor(comptime G: type) type {
     return struct {
-        // Determine types from the grammar without requiring a public 'C'.
         const Rule = std.meta.DeclEnum(G);
         const FirstRuleArrT = @TypeOf(@field(G, @tagName(Rule.Start)));
         const Op = switch (@typeInfo(FirstRuleArrT)) {
@@ -474,8 +473,8 @@ pub fn Combinators(comptime G: type, comptime config: struct { debug: type = dbg
                     comptime var k: usize = i;
                     inline while (k < parts.len) : (k += 1) {
                         if (k != parts.len - 1) rest_len += 1; // ChoiceRel before alt k if not last
-                        rest_len += lens[k];                  // body of alt k
-                        if (k > i) rest_len += 1;             // commits at start of later alts
+                        rest_len += lens[k]; // body of alt k
+                        if (k > i) rest_len += 1; // commits at start of later alts
                     }
                     out[o] = .{ .CommitRel = @intCast(rest_len) };
                     o += 1;
@@ -679,7 +678,7 @@ pub const Json = struct {
     const C = Combinators(@This(), .{ .debug = StateDebug });
 
     // Hex digit for \uXXXX escapes
-    const HEX = C.classRanges(.{ .{ '0','9' }, .{ 'A','F' }, .{ 'a','f' } });
+    const HEX = C.classRanges(.{ .{ '0', '9' }, .{ 'A', 'F' }, .{ 'a', 'f' } });
 
     // Unescaped JSON string char: any ASCII except control, '"' and '\\'
     const UnescapedChar = C.classRanges(.{ .{ ' ', '!' }, .{ '#', '[' }, .{ ']', '~' } });
@@ -687,7 +686,7 @@ pub const Json = struct {
     // Escaped: \\" \\ \/ \b \f \n \r \t or \uXXXX
     const SimpleEscape = C.seq(.{
         C.CH('\\'),
-        C.classRanges(.{ .{ '"','"' }, .{ '\\','\\' }, .{ '/','/' }, .{ 'b','b' }, .{ 'f','f' }, .{ 'n','n' }, .{ 'r','r' }, .{ 't','t' } }),
+        C.classRanges(.{ .{ '"', '"' }, .{ '\\', '\\' }, .{ '/', '/' }, .{ 'b', 'b' }, .{ 'f', 'f' }, .{ 'n', 'n' }, .{ 'r', 'r' }, .{ 't', 't' } }),
     });
     const UnicodeEscape = C.seq(.{ C.CH('\\'), C.CH('u'), HEX, HEX, HEX, HEX });
 
@@ -703,13 +702,13 @@ pub const Json = struct {
     // Integer <- '-'? ( '0' / [1-9] [0-9]* )
     // Frac <- ('.' [0-9]+)?  using NUMBER for [0-9]+
     // Exp  <- ([eE] [+-]? [0-9]+)?
-    const DIGIT1_9 = C.classRanges(.{ .{ '1','9' } });
+    const DIGIT1_9 = C.classRanges(.{.{ '1', '9' }});
     const SignOpt = C.opt(C.CH('-'));
     const IntPart = C.alt(.{ C.STR("0"), C.seq(.{ DIGIT1_9, C.many0(C.NUMBER) }) });
     const FracOpt = C.opt(C.seq(.{ C.CH('.'), C.NUMBER }));
     const ExpOpt = C.opt(C.seq(.{
-        C.classRanges(.{ .{ 'e','e' }, .{ 'E','E' } }),
-        C.opt(C.classRanges(.{ .{ '+','+' }, .{ '-','-' } })),
+        C.classRanges(.{ .{ 'e', 'e' }, .{ 'E', 'E' } }),
+        C.opt(C.classRanges(.{ .{ '+', '+' }, .{ '-', '-' } })),
         C.NUMBER,
     }));
     pub const Number = C.seq(.{ SignOpt, IntPart, FracOpt, ExpOpt, C.RET });

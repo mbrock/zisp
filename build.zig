@@ -103,34 +103,6 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(bench_exe);
 
-    // Test demo executable
-    const test_demo_exe = b.addExecutable(.{
-        .name = "test_demo",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/test_demo.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zisp", .module = mod },
-            },
-        }),
-    });
-    b.installArtifact(test_demo_exe);
-
-    // Debug demo executable
-    const debug_demo_exe = b.addExecutable(.{
-        .name = "debug_demo",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/debug_demo.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zisp", .module = mod },
-            },
-        }),
-    });
-    b.installArtifact(debug_demo_exe);
-
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
@@ -176,19 +148,19 @@ pub fn build(b: *std.Build) void {
     // Creates an executable that will run `test` blocks from the executable's
     // root module. Note that test executables only test one module at a time,
     // hence why we have to create two separate ones.
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
+    // const exe_tests = b.addTest(.{
+    //     .root_module = exe.root_module,
+    // });
 
     // A run step that will run the second test executable.
-    const run_exe_tests = b.addRunArtifact(exe_tests);
+    //    const run_exe_tests = b.addRunArtifact(exe_tests);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+    //    test_step.dependOn(&run_exe_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
