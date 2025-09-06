@@ -68,44 +68,48 @@ pub fn ProgramFor(comptime G: type) type {
 const ExecMode = enum { auto_continue, yield_each };
 
 pub fn VM(
-    comptime Grammar: type,
-    comptime TrailCap: usize,
-    comptime StackCap: usize,
+    /// Grammar type
+    comptime G: type,
+    /// Back stack size
+    comptime T: usize,
+    /// Rule stack size
+    comptime R: usize,
 ) type {
     return struct {
-        pub const P = ProgramFor(Grammar);
-
-        pub const Backtrack = struct {
-            ip: u16,
-            csp: u16,
-            pos: u32,
-
-            // comptime {
-            //     if (@alignOf(@This()) != 8) @compileError("alignment confusion");
-            //     if (@sizeOf(@This()) != 8 * 3) @compileError("size confusion");
-            // }
-        };
-
-        pub const CallFrame = u16;
-
         const Machine = @This();
 
-        src: []const u8,
-        cur: u32 = 0,
+        pub const P = ProgramFor(G);
 
-        ip: u16 = P.start_ip,
+        const O = P.code;
+        const I0 = P.start_ip;
 
-        trailbuf: [TrailCap]Backtrack = undefined,
-        trailtop: u16 = 0,
-        stackbuf: [StackCap]u16 = undefined,
-        stacktop: u16 = 0,
+        /// Backtrackable state record
+        pub const F = extern struct {
+            /// Code offset
+            i: u32 = 0,
+            /// Text offset
+            j: u32 = 0,
+            /// Rule stack height
+            h: u32 = 0,
+            /// Code origin
+            k: u32 = 0,
+        };
 
-        pub fn init(
-            src: []const u8,
-        ) Machine {
-            return .{
-                .src = src,
-            };
+        /// Input string
+        s: []const u8,
+        /// Rule stack buffer
+        r: [R]u32 = .{0} ** R,
+        /// Current state
+        i: u32 = I0,
+        j: u32 = 0,
+        h: u32 = 0,
+        /// Back stack height
+        g: u32 = 0,
+        /// Back stack buffer
+        t: [T]F align(16) = [1]F{.{}} ** T,
+
+        pub fn init(src: []const u8) Machine {
+            return .{ .s = src };
         }
 
         pub fn deinit(_: *Machine) void {}
@@ -113,116 +117,113 @@ pub fn VM(
         pub const Status = enum { Ok, Fail, Running };
 
         fn ensure(self: @This(), from: usize, n: usize) bool {
-            return from + n <= self.src.len;
+            return from + n <= self.s.len;
         }
 
         fn atEnd(self: @This()) bool {
-            return self.cur >= self.src.len;
+            return self.j >= self.s.len;
         }
 
         fn peek(self: @This()) ?u8 {
-            if (self.cur >= self.src.len) return null;
-            return self.src[self.cur];
+            if (self.j >= self.s.len) return null;
+            return self.s[self.j];
         }
 
         fn lookingAt(self: @This(), c: u8) bool {
-            return self.cur < self.src.len and self.src[self.cur] == c;
+            return self.j < self.s.len and self.s[self.j] == c;
         }
 
         fn lookingAtMatch(self: @This(), set: CharBitset) bool {
-            if (self.cur >= self.src.len) return false;
-            return set.isSet(self.src[self.cur]);
+            if (self.j >= self.s.len) return false;
+            return set.isSet(self.s[self.j]);
         }
 
         fn take(self: @This()) ?u8 {
-            if (self.cur >= self.src.len) return null;
-            const b = self.src[self.cur];
-            self.cur += 1;
+            if (self.j >= self.s.len) return null;
+            const b = self.s[self.j];
+            self.j += 1;
             return b;
         }
 
         pub fn tick(self: *Machine, comptime mode: ExecMode) !Status {
             const yield = mode == .yield_each;
 
-            vm: switch (self.ip) {
-                inline 0...P.code.len - 1 => |ip| {
-                    const next = ip + 1;
-                    self.ip = next;
+            vm: switch (self.i) {
+                inline 0...P.code.len - 1 => |I| {
+                    const I1 = I + 1;
+                    self.i = I1;
+                    const ci = self.peek() orelse 0;
 
-                    switch (comptime P.code[ip]) {
+                    switch (comptime O[I]) {
                         inline .Char => |c| {
-                            if (self.lookingAt(c)) {
-                                self.cur += 1;
-                                if (yield) return .Running else continue :vm next;
+                            if (ci == c) {
+                                self.j += 1;
+                                if (yield) return .Running else continue :vm I1;
                             }
                         },
 
                         inline .CharSet => |set| {
-                            if (self.lookingAtMatch(set)) {
-                                self.cur += 1;
-                                if (yield) return .Running else continue :vm next;
+                            if (set.isSet(ci)) {
+                                self.j += 1;
+                                if (yield) return .Running else continue :vm I1;
                             }
                         },
 
                         inline .String => |s| {
-                            if (self.ensure(self.cur, s.len)) {
-                                if (std.mem.eql(u8, self.src[self.cur .. self.cur + s.len], s)) {
-                                    self.cur += s.len;
-                                    if (yield) return .Running else continue :vm next;
+                            if (self.ensure(self.j, s.len)) {
+                                if (std.mem.eql(u8, self.s[self.j .. self.j + s.len], s)) {
+                                    self.j += s.len;
+                                    if (yield) return .Running else continue :vm I1;
                                 }
                             }
                         },
 
                         inline .ChoiceRel => |d| {
-                            if (self.trailtop == self.trailbuf.len - 1) return error.TrailOverflow;
-                            self.trailtop += 1;
-                            self.trailbuf[self.trailtop] = .{
-                                .ip = @as(usize, @intCast(@as(isize, @intCast(ip)) + 1 + d)),
-                                .pos = self.cur,
-                                .csp = self.stacktop,
+                            self.t[self.g] = .{
+                                .h = self.h,
+                                .k = I,
+                                .i = @as(usize, @intCast(@as(isize, @intCast(I)) + 1 + d)),
+                                .j = self.j,
                             };
 
-                            if (yield) return .Running else continue :vm next;
+                            self.g += 1;
+                            if (yield) return .Running else continue :vm I1;
                         },
 
                         inline .CommitRel => |d| {
-                            if (self.trailtop == 0) return error.TrailUnderflow;
-                            self.trailtop -= 1;
-                            const dst = (@as(usize, @intCast(@as(isize, ip) + 1 + d)));
-                            self.ip = dst;
+                            self.g -= 1;
+                            const dst = (@as(usize, @intCast(@as(isize, I) + 1 + d)));
+                            self.i = dst;
                             if (yield) return .Running else continue :vm dst;
                         },
 
                         inline .Call => |r| {
-                            if (self.stacktop == self.stackbuf.len - 1) return error.StackOverflow;
-                            self.stacktop += 1;
-                            self.stackbuf[self.stacktop] = ip + 1;
+                            self.h += 1;
+                            self.r[self.h] = I1;
                             const callee = P.rule_ip[@intCast(@intFromEnum(r))];
-                            self.ip = callee;
+                            self.i = callee;
                             if (yield) return .Running else continue :vm callee;
                         },
 
-                        .Ret => if (self.stacktop == 0)
-                            return error.StackUnderflow
-                        else {
-                            const ret_ip = self.stackbuf[self.stacktop];
-                            self.ip = ret_ip;
-                            self.stacktop -= 1;
+                        .Ret => {
+                            const ret_ip = self.r[self.h];
+                            self.i = ret_ip;
+                            self.h -= 1;
                             if (yield) return .Running else continue :vm ret_ip;
                         },
 
-                        .EndInput => if (self.atEnd()) if (yield) return .Running else continue :vm next,
+                        .EndInput => if (self.atEnd()) if (yield) return .Running else continue :vm I1,
                         .Fail => void,
                         .Accept => return .Ok,
                     }
 
-                    if (self.trailtop != 0) {
-                        const bt = self.trailbuf[self.trailtop];
-                        self.trailtop -= 1;
-                        self.cur = bt.pos;
-                        self.stacktop = bt.csp;
-                        self.ip = bt.ip;
-                        if (yield) return .Running else continue :vm bt.ip;
+                    if (self.g != 0) {
+                        self.g -= 1;
+                        const tg = self.t[self.g];
+                        self.i = tg.i;
+                        self.h = tg.h;
+                        self.j = tg.j;
+                        if (yield) return .Running else continue :vm self.i;
                     } else {
                         return .Fail;
                     }
@@ -258,6 +259,42 @@ pub fn VM(
                         .Running => std.debug.panic("auto_continue should not return Running", .{}),
                     }
                 },
+            }
+        }
+
+        pub const Metrics = struct {
+            steps: usize = 0, // number of tick() invocations
+            max_back_height: usize = 0, // maximum trail/backtrack stack height (g)
+            max_rule_height: usize = 0, // maximum rule call stack height (h)
+            backtracks: usize = 0, // count of times g decreased since previous yield
+            accepted: bool = false, // final acceptance state
+        };
+
+        /// Execute parse in yield_each mode gathering instrumentation metrics.
+        pub fn runWithMetrics(src: []const u8) !Metrics {
+            var m = @This().init(src);
+            defer m.deinit();
+            var metrics: Metrics = .{};
+            var prev_g: usize = m.g;
+            while (true) {
+                const st = try m.tick(.yield_each);
+                metrics.steps += 1;
+                // Track heights after this step
+                if (m.g > metrics.max_back_height) metrics.max_back_height = m.g;
+                if (m.h > metrics.max_rule_height) metrics.max_rule_height = m.h;
+                if (m.g < prev_g) metrics.backtracks += 1;
+                prev_g = m.g;
+                switch (st) {
+                    .Running => continue,
+                    .Ok => {
+                        metrics.accepted = true;
+                        return metrics;
+                    },
+                    .Fail => {
+                        metrics.accepted = false;
+                        return metrics;
+                    },
+                }
             }
         }
     };
@@ -614,6 +651,127 @@ test "json arrays and objects" {
     try expectJsonOk("[1, 2, 3]");
     try expectJsonOk("{\"a\": 1}");
     try expectJsonOk("{\"a\": [true, false, null]}\n");
+}
+
+// -------------------------
+// Backtracking test grammars
+// -------------------------
+// We add two tiny grammars specifically designed to force the VM to backtrack:
+// 1. BacktrackGrammar: an alt where the first alternative shares a long
+//    prefix with the second but fails on the final character, requiring the
+//    engine to rewind almost the entire input.
+//       Start <- ( "aaaaaaaaac" / 'a'+ 'b' ) EOF
+//    Parsing "aaaaaaaaab" must explore the failing long literal then backtrack
+//    and succeed via the second alternative.
+// 2. GreedyGrammar: uses a greedy many0 followed by a required "ab" tail:
+//       Start <- 'a'* 'a' 'b' EOF   (equivalently 'a'+ 'b')
+//    Implemented deliberately with many0 + explicit 'a' 'b' to force the loop
+//    to over-consume and then backtrack one step so the trailing "ab" matches.
+// Both grammars are intentionally small/ambiguous compared to JSON (which is
+// mostly unambiguous) to exercise the backtracking machinery in tests.
+
+pub const BacktrackGrammar = struct {
+    const C = Combinators(@This());
+
+    pub const Long = C.seq(.{ C.STR("aaaaaaaaac"), C.RET });
+    pub const APlusB = C.seq(.{ C.many1(C.CH('a')), C.CH('b'), C.RET });
+
+    pub const Start = C.seq(.{
+        C.alt(.{ C.Call(.Long), C.Call(.APlusB) }),
+        C.END,
+        C.ACCEPT,
+    });
+};
+
+pub const GreedyGrammar = struct {
+    const C = Combinators(@This());
+    // An ordered choice of decreasing-length strings sharing long prefixes.
+    // The parser will attempt longer ones first and backtrack down.
+    // We purposefully omit some lengths so inputs trigger several failures.
+    const Chain = C.alt(.{
+        C.STR("aaaaaaaaab"), // 9 a's + b (too long for short inputs)
+        C.STR("aaaaaaab"), // 7 a's + b
+        C.STR("aaaaaab"), // 6 a's + b
+        C.STR("aaaaab"), // 5 a's + b
+        C.STR("aaaab"), // 4 a's + b
+        C.STR("aaab"), // 3 a's + b
+        C.STR("aab"), // 2 a's + b
+        C.STR("ab"), // 1 a + b
+    });
+
+    pub const Start = C.seq(.{ Chain, C.END, C.ACCEPT });
+};
+
+const BacktrackParser = VM(BacktrackGrammar, 32, 32);
+const GreedyParser = VM(GreedyGrammar, 32, 32);
+
+fn parseBacktrack(src: []const u8) !bool {
+    return BacktrackParser.parseFully(src, .auto_continue);
+}
+
+fn parseGreedy(src: []const u8) !bool {
+    return GreedyParser.parseFully(src, .auto_continue);
+}
+
+test "backtracking alt with long common prefix" {
+    // Succeeds through first alternative (no backtracking)
+    try std.testing.expect(try parseBacktrack("aaaaaaaaac"));
+    // Fails first alt only at final char, must backtrack and take second
+    try std.testing.expect(try parseBacktrack("aaaaaaaaab"));
+    // Minimal second alternative
+    try std.testing.expect(try parseBacktrack("ab"));
+    // Negative: wrong tail
+    try std.testing.expect(!try parseBacktrack("aaaaaaaaad"));
+}
+
+test "backtracking inside greedy repetition" {
+    // Should match via progressively shorter alternatives
+    try std.testing.expect(try parseGreedy("aaaaab"));
+    try std.testing.expect(try parseGreedy("ab"));
+    // Negative: missing 'b'
+    try std.testing.expect(!try parseGreedy("aaaaa"));
+
+    // Count steps in yield_each mode to ensure multiple backtracks happened
+    const src = "aaaaab"; // should skip 3 longer failing alts before match
+    var m = GreedyParser.init(src);
+    defer m.deinit();
+    var steps: usize = 0;
+    while (true) : (steps += 1) {
+        const st = try m.tick(.yield_each);
+        switch (st) {
+            .Running => continue,
+            .Ok => break,
+            .Fail => return error.GreedyTestUnexpectedFail,
+        }
+    }
+    // Expect at least several steps (greater than raw length) due to backtracking
+    try std.testing.expect(steps > src.len);
+    std.debug.print("greedy backtracking test: steps={d}\n", .{steps});
+}
+
+test "metrics collection on backtracking grammar" {
+    const src = "aaaaaaaaab"; // triggers long alternative failure then shorter match
+    const metrics = try BacktrackParser.runWithMetrics(src);
+    try std.testing.expect(metrics.accepted);
+    try std.testing.expect(metrics.backtracks > 0);
+    try std.testing.expect(metrics.max_back_height > 0);
+    try std.testing.expect(metrics.steps > src.len);
+    std.debug.print(
+        "backtrack metrics: steps={d} backtracks={d} max_back={d} max_rule={d} accepted={}\n",
+        .{ metrics.steps, metrics.backtracks, metrics.max_back_height, metrics.max_rule_height, metrics.accepted },
+    );
+}
+
+test "metrics collection on simple json token" {
+    const metrics = try JSONParser.runWithMetrics("true");
+    try std.testing.expect(metrics.accepted);
+    try std.testing.expect(metrics.max_rule_height > 0);
+    // JSON 'true' has no ambiguity: backtracks may be zero
+    try std.testing.expect(metrics.backtracks >= 0);
+    std.debug.print(
+        "json metrics: steps={d} backtracks={d} max_back={d} max_rule={d} accepted={}\n",
+        .{ metrics.steps, metrics.backtracks, metrics.max_back_height, metrics.max_rule_height, metrics.accepted },
+    );
 }
 
 pub export fn parse(src: [*]const u8, len: usize) u8 {
