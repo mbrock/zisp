@@ -107,6 +107,10 @@ pub fn VM(
         g: u32 = 0,
         /// Back stack buffer
         t: [T]F align(16) = [1]F{.{}} ** T,
+    /// Memoization: rule id per call frame
+    call_rule: [R]u16 = .{0} ** R,
+    /// Memoization: start position per call frame
+    call_start: [R]u32 = .{0} ** R,
 
         pub fn init(src: []const u8) Machine {
             return .{ .s = src };
@@ -145,7 +149,31 @@ pub fn VM(
             return b;
         }
 
-        pub fn tick(self: *Machine, comptime mode: ExecMode) !Status {
+        pub const PackratCache = struct {
+            const Self = @This();
+            pub const Key = struct { rule: u16, pos: u32 };
+            pub const Entry = struct { success: bool, next_pos: u32 };
+            map: *std.AutoHashMap(Key, Entry),
+            hits: usize = 0,
+            misses: usize = 0,
+
+            pub fn get(self: *Self, rule: u16, pos: u32) ?Entry {
+                const k = Key{ .rule = rule, .pos = pos };
+                if (self.map.get(k)) |e| {
+                    self.hits += 1;
+                    return e;
+                } else {
+                    self.misses += 1;
+                    return null;
+                }
+            }
+
+            pub fn put(self: *Self, rule: u16, pos: u32, entry: Entry) void {
+                _ = self.map.put(.{ .rule = rule, .pos = pos }, entry) catch return;
+            }
+        };
+
+        pub fn tick(self: *Machine, comptime mode: ExecMode, cache: ?*PackratCache) !Status {
             const yield = mode == .yield_each;
 
             vm: switch (self.i) {
@@ -153,19 +181,28 @@ pub fn VM(
                     const I1 = I + 1;
                     self.i = I1;
                     const ci = self.peek() orelse 0;
+                    // Flag to indicate whether current instruction succeeded and continued
+                    // If not set, we trigger failure/backtrack logic below.
+                    var advanced = false;
 
                     switch (comptime O[I]) {
                         inline .Char => |c| {
                             if (ci == c) {
                                 self.j += 1;
-                                if (yield) return .Running else continue :vm I1;
+                                if (yield) return .Running else {
+                                    advanced = true;
+                                    continue :vm I1;
+                                }
                             }
                         },
 
                         inline .CharSet => |set| {
                             if (set.isSet(ci)) {
                                 self.j += 1;
-                                if (yield) return .Running else continue :vm I1;
+                                if (yield) return .Running else {
+                                    advanced = true;
+                                    continue :vm I1;
+                                }
                             }
                         },
 
@@ -173,7 +210,10 @@ pub fn VM(
                             if (self.ensure(self.j, s.len)) {
                                 if (std.mem.eql(u8, self.s[self.j .. self.j + s.len], s)) {
                                     self.j += s.len;
-                                    if (yield) return .Running else continue :vm I1;
+                                    if (yield) return .Running else {
+                                        advanced = true;
+                                        continue :vm I1;
+                                    }
                                 }
                             }
                         },
@@ -187,50 +227,109 @@ pub fn VM(
                             };
 
                             self.g += 1;
-                            if (yield) return .Running else continue :vm I1;
+                            if (yield) return .Running else {
+                                advanced = true;
+                                continue :vm I1;
+                            }
                         },
 
                         inline .CommitRel => |d| {
                             self.g -= 1;
                             const dst = (@as(usize, @intCast(@as(isize, I) + 1 + d)));
                             self.i = dst;
-                            if (yield) return .Running else continue :vm dst;
+                            if (yield) return .Running else {
+                                advanced = true;
+                                continue :vm dst;
+                            }
                         },
 
                         inline .Call => |r| {
+                            const rule_id: u16 = @intCast(@intFromEnum(r));
+                            if (cache) |pc| {
+                                if (pc.get(rule_id, self.j)) |entry| {
+                                    if (entry.success) {
+                                        // Fast-path success: skip body
+                                        self.j = entry.next_pos;
+                                        if (yield) return .Running else {
+                                            advanced = true;
+                                            continue :vm I1;
+                                        }
+                                    } else {
+                                        // Cached failure: fall through to failure logic
+                                        // (do not advance)
+                                    }
+                                }
+                            }
+                            // Normal call path (not cached or no cache)
                             self.h += 1;
                             self.r[self.h] = I1;
-                            const callee = P.rule_ip[@intCast(@intFromEnum(r))];
+                            self.call_rule[self.h] = rule_id;
+                            self.call_start[self.h] = self.j;
+                            const callee = P.rule_ip[rule_id];
                             self.i = callee;
-                            if (yield) return .Running else continue :vm callee;
+                            if (yield) return .Running else {
+                                advanced = true;
+                                continue :vm callee;
+                            }
                         },
 
                         .Ret => {
+                            // Successful rule completion: memoize success if cache provided
+                            if (cache) |pc| {
+                                const rid = self.call_rule[self.h];
+                                const spos = self.call_start[self.h];
+                                pc.put(rid, spos, .{ .success = true, .next_pos = self.j });
+                            }
                             const ret_ip = self.r[self.h];
                             self.i = ret_ip;
                             self.h -= 1;
-                            if (yield) return .Running else continue :vm ret_ip;
+                            if (yield) return .Running else {
+                                advanced = true;
+                                continue :vm ret_ip;
+                            }
                         },
 
-                        .EndInput => if (self.atEnd()) if (yield) return .Running else continue :vm I1,
+                        .EndInput => if (self.atEnd()) {
+                            if (yield) return .Running else {
+                                advanced = true;
+                                continue :vm I1;
+                            }
+                        },
                         .Fail => void,
                         .Accept => return .Ok,
                     }
 
-                    if (self.g != 0) {
-                        self.g -= 1;
-                        const tg = self.t[self.g];
-                        self.i = tg.i;
-                        self.h = tg.h;
-                        self.j = tg.j;
-                        if (yield) return .Running else continue :vm self.i;
+                    if (!advanced) {
+                        if (self.g != 0) {
+                            self.g -= 1;
+                            const prev_h = self.h;
+                            const tg = self.t[self.g];
+                            // If we popped frames (rule failures), record failures
+                            if (cache) |pc| {
+                                if (tg.h < prev_h) {
+                                    var fh = prev_h;
+                                    while (fh > tg.h) : (fh -= 1) {
+                                        const rid = self.call_rule[fh];
+                                        const spos = self.call_start[fh];
+                                        pc.put(rid, spos, .{ .success = false, .next_pos = spos });
+                                    }
+                                }
+                            }
+                            self.i = tg.i;
+                            self.h = tg.h;
+                            self.j = tg.j;
+                            if (yield) return .Running else continue :vm self.i;
+                        } else {
+                            return .Fail;
+                        }
                     } else {
-                        return .Fail;
+                        // already advanced; nothing to do
                     }
                 },
-
                 else => return error.InvalidIP,
             }
+            // Should not reach here; treat as failure
+            return .Fail;
         }
 
         pub fn parseFully(
@@ -240,34 +339,27 @@ pub fn VM(
             var m = @This().init(src);
             defer m.deinit();
             switch (mode) {
-                .yield_each => {
-                    foo: while (true) {
-                        const st = try m.tick(.yield_each);
-
-                        switch (st) {
-                            .Running => continue :foo,
-                            .Ok => return true,
-                            .Fail => return false,
-                        }
-                    }
-                },
-
-                .auto_continue => {
-                    switch (try m.tick(.auto_continue)) {
+                .yield_each => while (true) {
+                    const st = try m.tick(.yield_each, null);
+                    switch (st) {
+                        .Running => continue,
                         .Ok => return true,
                         .Fail => return false,
-                        .Running => std.debug.panic("auto_continue should not return Running", .{}),
                     }
+                },
+                .auto_continue => switch (try m.tick(.auto_continue, null)) {
+                    .Ok => return true,
+                    .Fail => return false,
+                    .Running => std.debug.panic("auto_continue should not return Running", .{}),
                 },
             }
         }
-
         pub const Metrics = struct {
-            steps: usize = 0, // number of tick() invocations
+            steps: usize = 0,           // number of tick() invocations
             max_back_height: usize = 0, // maximum trail/backtrack stack height (g)
             max_rule_height: usize = 0, // maximum rule call stack height (h)
-            backtracks: usize = 0, // count of times g decreased since previous yield
-            accepted: bool = false, // final acceptance state
+            backtracks: usize = 0,      // count of times g decreased since previous yield
+            accepted: bool = false,     // final acceptance state
         };
 
         /// Execute parse in yield_each mode gathering instrumentation metrics.
@@ -277,9 +369,35 @@ pub fn VM(
             var metrics: Metrics = .{};
             var prev_g: usize = m.g;
             while (true) {
-                const st = try m.tick(.yield_each);
+                const st = try m.tick(.yield_each, null);
                 metrics.steps += 1;
                 // Track heights after this step
+                if (m.g > metrics.max_back_height) metrics.max_back_height = m.g;
+                if (m.h > metrics.max_rule_height) metrics.max_rule_height = m.h;
+                if (m.g < prev_g) metrics.backtracks += 1;
+                prev_g = m.g;
+                switch (st) {
+                    .Running => continue,
+                    .Ok => {
+                        metrics.accepted = true;
+                        return metrics;
+                    },
+                    .Fail => {
+                        metrics.accepted = false;
+                        return metrics;
+                    },
+                }
+            }
+        }
+
+        pub fn runWithMetricsCached(src: []const u8, cache: *PackratCache) !Metrics {
+            var m = @This().init(src);
+            defer m.deinit();
+            var metrics: Metrics = .{};
+            var prev_g: usize = m.g;
+            while (true) {
+                const st = try m.tick(.yield_each, cache);
+                metrics.steps += 1;
                 if (m.g > metrics.max_back_height) metrics.max_back_height = m.g;
                 if (m.h > metrics.max_rule_height) metrics.max_rule_height = m.h;
                 if (m.g < prev_g) metrics.backtracks += 1;
@@ -737,7 +855,7 @@ test "backtracking inside greedy repetition" {
     defer m.deinit();
     var steps: usize = 0;
     while (true) : (steps += 1) {
-        const st = try m.tick(.yield_each);
+    const st = try m.tick(.yield_each, null);
         switch (st) {
             .Running => continue,
             .Ok => break,
@@ -816,12 +934,40 @@ test "packrat blowup demonstration" {
     try std.testing.expect(metrics.backtracks >= n);
 }
 
+test "packrat cache effectiveness" {
+    const gpa = std.heap.page_allocator;
+    var cache_map = std.AutoHashMap(PackratDemoParser.PackratCache.Key, PackratDemoParser.PackratCache.Entry).init(gpa);
+    defer cache_map.deinit();
+    var cache = PackratDemoParser.PackratCache{ .map = &cache_map };
+
+    const n: usize = 24; // deeper for clearer benefit
+    var buf: [n + 1]u8 = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 1) buf[i] = 'a';
+    buf[n] = 'b';
+    const input = buf[0..];
+
+    const first_cached = try PackratDemoParser.runWithMetricsCached(input, &cache);
+    const first_hits = cache.hits;
+    const first_misses = cache.misses;
+    // Second run reuses populated cache; expect more hits and fewer steps.
+    const second_cached = try PackratDemoParser.runWithMetricsCached(input, &cache);
+    std.debug.print(
+        "packrat cache effectiveness: n={d}\n  first:  steps={d} backtracks={d} hits={d} misses={d}\n  second: steps={d} backtracks={d} hits={d} misses={d}\n",
+        .{ n,
+            first_cached.steps, first_cached.backtracks, first_hits, first_misses,
+            second_cached.steps, second_cached.backtracks, cache.hits, cache.misses },
+    );
+    try std.testing.expect(second_cached.steps < first_cached.steps);
+    try std.testing.expect(cache.hits > first_hits);
+}
+
 pub export fn parse(src: [*]const u8, len: usize) u8 {
     var m = JSONParser.init(src[0..len]);
     defer m.deinit();
     defer std.debug.print("\n", .{});
     while (true) {
-        switch (m.tick(.yield_each) catch return 2) {
+    switch (m.tick(.yield_each, null) catch return 2) {
             .Ok => {
                 std.debug.print("ok", .{});
                 return 0;
@@ -849,13 +995,13 @@ test "yield mode" {
     defer m.deinit();
 
     // First tick should execute first op and return Running
-    const st1 = try m.tick(.yield_each);
+    const st1 = try m.tick(.yield_each, null);
     try std.testing.expect(st1 == .Running);
 
     // Keep ticking until we get a final result
     var count: usize = 1;
     while (true) : (count += 1) {
-        const st = try m.tick(.yield_each);
+    const st = try m.tick(.yield_each, null);
         switch (st) {
             .Running => continue,
             .Ok => break,
@@ -875,7 +1021,7 @@ test "yield mode complex" {
 
     var count: usize = 0;
     while (true) : (count += 1) {
-        const st = try m.tick(.yield_each);
+    const st = try m.tick(.yield_each, null);
         switch (st) {
             .Running => continue,
             .Ok => break,
