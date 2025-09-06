@@ -107,10 +107,10 @@ pub fn VM(
         g: u32 = 0,
         /// Back stack buffer
         t: [T]F align(16) = [1]F{.{}} ** T,
-    /// Memoization: rule id per call frame
-    call_rule: [R]u16 = .{0} ** R,
-    /// Memoization: start position per call frame
-    call_start: [R]u32 = .{0} ** R,
+        /// Memoization: rule id per call frame
+        call_rule: [R]u16 = .{0} ** R,
+        /// Memoization: start position per call frame
+        call_start: [R]u32 = .{0} ** R,
 
         pub fn init(src: []const u8) Machine {
             return .{ .s = src };
@@ -149,10 +149,11 @@ pub fn VM(
             return b;
         }
 
-        pub const PackratCache = struct {
+        pub const Packrat = struct {
             const Self = @This();
             pub const Key = struct { rule: u16, pos: u32 };
             pub const Entry = struct { success: bool, next_pos: u32 };
+            pub const Auto = std.AutoHashMap(Key, Entry);
             map: *std.AutoHashMap(Key, Entry),
             hits: usize = 0,
             misses: usize = 0,
@@ -173,7 +174,7 @@ pub fn VM(
             }
         };
 
-        pub fn tick(self: *Machine, comptime mode: ExecMode, cache: ?*PackratCache) !Status {
+        pub fn tick(self: *Machine, comptime mode: ExecMode, cache: ?*Packrat) !Status {
             const yield = mode == .yield_each;
 
             vm: switch (self.i) {
@@ -245,31 +246,33 @@ pub fn VM(
 
                         inline .Call => |r| {
                             const rule_id: u16 = @intCast(@intFromEnum(r));
-                            if (cache) |pc| {
-                                if (pc.get(rule_id, self.j)) |entry| {
-                                    if (entry.success) {
-                                        // Fast-path success: skip body
-                                        self.j = entry.next_pos;
-                                        if (yield) return .Running else {
-                                            advanced = true;
-                                            continue :vm I1;
-                                        }
-                                    } else {
-                                        // Cached failure: fall through to failure logic
-                                        // (do not advance)
+                            const entry = if (cache != null) cache.?.get(rule_id, self.j) else null;
+                            if (entry) |e| {
+                                if (e.success) {
+                                    // Fast-path success: skip body
+                                    self.j = e.next_pos;
+                                    if (yield) return .Running else {
+                                        advanced = true;
+                                        continue :vm I1;
                                     }
+                                } else {
+                                    // Cached failure: leave 'advanced' false so outer
+                                    // failure/backtrack logic runs. Do NOT push frame.
+                                    // Simply break out of this case.
+                                    // no-op: allow switch to end so advanced stays false
                                 }
-                            }
-                            // Normal call path (not cached or no cache)
-                            self.h += 1;
-                            self.r[self.h] = I1;
-                            self.call_rule[self.h] = rule_id;
-                            self.call_start[self.h] = self.j;
-                            const callee = P.rule_ip[rule_id];
-                            self.i = callee;
-                            if (yield) return .Running else {
-                                advanced = true;
-                                continue :vm callee;
+                            } else {
+                                // Normal call path (not cached or no cache)
+                                self.h += 1;
+                                self.r[self.h] = I1;
+                                self.call_rule[self.h] = rule_id;
+                                self.call_start[self.h] = self.j;
+                                const callee = P.rule_ip[rule_id];
+                                self.i = callee;
+                                if (yield) return .Running else {
+                                    advanced = true;
+                                    continue :vm callee;
+                                }
                             }
                         },
 
@@ -355,11 +358,11 @@ pub fn VM(
             }
         }
         pub const Metrics = struct {
-            steps: usize = 0,           // number of tick() invocations
+            steps: usize = 0, // number of tick() invocations
             max_back_height: usize = 0, // maximum trail/backtrack stack height (g)
             max_rule_height: usize = 0, // maximum rule call stack height (h)
-            backtracks: usize = 0,      // count of times g decreased since previous yield
-            accepted: bool = false,     // final acceptance state
+            backtracks: usize = 0, // count of times g decreased since previous yield
+            accepted: bool = false, // final acceptance state
         };
 
         /// Execute parse in yield_each mode gathering instrumentation metrics.
@@ -368,8 +371,11 @@ pub fn VM(
             defer m.deinit();
             var metrics: Metrics = .{};
             var prev_g: usize = m.g;
+            var cache_map = @This().Packrat.Auto.init(std.heap.page_allocator);
+            defer cache_map.deinit();
+            var cache = @This().Packrat{ .map = &cache_map };
             while (true) {
-                const st = try m.tick(.yield_each, null);
+                const st = try m.tick(.yield_each, &cache);
                 metrics.steps += 1;
                 // Track heights after this step
                 if (m.g > metrics.max_back_height) metrics.max_back_height = m.g;
@@ -390,7 +396,7 @@ pub fn VM(
             }
         }
 
-        pub fn runWithMetricsCached(src: []const u8, cache: *PackratCache) !Metrics {
+        pub fn runWithMetricsCached(src: []const u8, cache: *Packrat) !Metrics {
             var m = @This().init(src);
             defer m.deinit();
             var metrics: Metrics = .{};
@@ -855,7 +861,7 @@ test "backtracking inside greedy repetition" {
     defer m.deinit();
     var steps: usize = 0;
     while (true) : (steps += 1) {
-    const st = try m.tick(.yield_each, null);
+        const st = try m.tick(.yield_each, null);
         switch (st) {
             .Running => continue,
             .Ok => break,
@@ -936,9 +942,9 @@ test "packrat blowup demonstration" {
 
 test "packrat cache effectiveness" {
     const gpa = std.heap.page_allocator;
-    var cache_map = std.AutoHashMap(PackratDemoParser.PackratCache.Key, PackratDemoParser.PackratCache.Entry).init(gpa);
+    var cache_map = PackratDemoParser.Packrat.Auto.init(gpa);
     defer cache_map.deinit();
-    var cache = PackratDemoParser.PackratCache{ .map = &cache_map };
+    var cache = PackratDemoParser.Packrat{ .map = &cache_map };
 
     const n: usize = 24; // deeper for clearer benefit
     var buf: [n + 1]u8 = undefined;
@@ -954,9 +960,7 @@ test "packrat cache effectiveness" {
     const second_cached = try PackratDemoParser.runWithMetricsCached(input, &cache);
     std.debug.print(
         "packrat cache effectiveness: n={d}\n  first:  steps={d} backtracks={d} hits={d} misses={d}\n  second: steps={d} backtracks={d} hits={d} misses={d}\n",
-        .{ n,
-            first_cached.steps, first_cached.backtracks, first_hits, first_misses,
-            second_cached.steps, second_cached.backtracks, cache.hits, cache.misses },
+        .{ n, first_cached.steps, first_cached.backtracks, first_hits, first_misses, second_cached.steps, second_cached.backtracks, cache.hits, cache.misses },
     );
     try std.testing.expect(second_cached.steps < first_cached.steps);
     try std.testing.expect(cache.hits > first_hits);
@@ -967,7 +971,7 @@ pub export fn parse(src: [*]const u8, len: usize) u8 {
     defer m.deinit();
     defer std.debug.print("\n", .{});
     while (true) {
-    switch (m.tick(.yield_each, null) catch return 2) {
+        switch (m.tick(.yield_each, null) catch return 2) {
             .Ok => {
                 std.debug.print("ok", .{});
                 return 0;
@@ -1001,7 +1005,7 @@ test "yield mode" {
     // Keep ticking until we get a final result
     var count: usize = 1;
     while (true) : (count += 1) {
-    const st = try m.tick(.yield_each, null);
+        const st = try m.tick(.yield_each, null);
         switch (st) {
             .Running => continue,
             .Ok => break,
@@ -1021,7 +1025,7 @@ test "yield mode complex" {
 
     var count: usize = 0;
     while (true) : (count += 1) {
-    const st = try m.tick(.yield_each, null);
+        const st = try m.tick(.yield_each, null);
         switch (st) {
             .Running => continue,
             .Ok => break,
