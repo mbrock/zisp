@@ -80,40 +80,33 @@ pub fn VM(
 
         pub const P = ProgramFor(G);
 
-        const O = P.code;
-        const I0 = P.start_ip;
+        const code = P.code;
+        const codeinit = P.start_ip;
 
-        /// Backtrackable state record
-        pub const F = extern struct {
-            /// Code offset
-            i: u32 = 0,
-            /// Text offset
-            j: u32 = 0,
-            /// Rule stack height
-            h: u32 = 0,
-            /// Code origin
-            k: u32 = 0,
+        pub const Save = extern struct {
+            codehead: u32,
+            texthead: u32,
+            markhead: u32,
         };
 
-        /// Input string
-        s: []const u8,
-        /// Rule stack buffer
-        r: [R]u32 = .{0} ** R,
-        /// Current state
-        i: u32 = I0,
-        j: u32 = 0,
-        h: u32 = 0,
-        /// Back stack height
-        g: u32 = 0,
-        /// Back stack buffer
-        t: [T]F align(16) = [1]F{.{}} ** T,
-        /// Memoization: rule id per call frame
-        call_rule: [R]u16 = .{0} ** R,
-        /// Memoization: start position per call frame
-        call_start: [R]u32 = .{0} ** R,
+        pub const Mark = extern struct {
+            rulekind: u32,
+            texthead: u32,
+            nextcode: u32,
+        };
+
+        marklist: [R]Mark align(16) = undefined,
+        savelist: [T]Save align(16) = undefined,
+
+        codehead: u32 = codeinit,
+        texthead: u32 = 0,
+        markhead: u32 = 0,
+        savehead: u32 = 0,
+
+        text: []const u8,
 
         pub fn init(src: []const u8) Machine {
-            return .{ .s = src };
+            return .{ .text = src };
         }
 
         pub fn deinit(_: *Machine) void {}
@@ -121,45 +114,47 @@ pub fn VM(
         pub const Status = enum { Ok, Fail, Running };
 
         fn ensure(self: @This(), from: usize, n: usize) bool {
-            return from + n <= self.s.len;
+            return from + n <= self.text.len;
         }
 
         fn atEnd(self: @This()) bool {
-            return self.j >= self.s.len;
+            return self.texthead >= self.text.len;
         }
 
         fn peek(self: @This()) ?u8 {
-            if (self.j >= self.s.len) return null;
-            return self.s[self.j];
+            if (self.texthead >= self.text.len) return null;
+            return self.text[self.texthead];
         }
 
         fn lookingAt(self: @This(), c: u8) bool {
-            return self.j < self.s.len and self.s[self.j] == c;
+            return self.texthead < self.text.len and self.text[self.texthead] == c;
         }
 
         fn lookingAtMatch(self: @This(), set: CharBitset) bool {
-            if (self.j >= self.s.len) return false;
-            return set.isSet(self.s[self.j]);
+            if (self.texthead >= self.text.len) return false;
+            return set.isSet(self.text[self.texthead]);
         }
 
         fn take(self: @This()) ?u8 {
-            if (self.j >= self.s.len) return null;
-            const b = self.s[self.j];
-            self.j += 1;
+            if (self.texthead >= self.text.len) return null;
+            const b = self.text[self.texthead];
+            self.texthead += 1;
             return b;
         }
 
         pub const Packrat = struct {
             const Self = @This();
-            pub const Key = struct { rule: u16, pos: u32 };
-            pub const Entry = struct { success: bool, next_pos: u32 };
+            pub const Key = struct { rulekind: u32, texthead: u32 };
+            pub const Entry = struct { good: bool, next: u32 };
             pub const Auto = std.AutoHashMap(Key, Entry);
+
             map: *std.AutoHashMap(Key, Entry),
+
             hits: usize = 0,
             misses: usize = 0,
 
-            pub fn get(self: *Self, rule: u16, pos: u32) ?Entry {
-                const k = Key{ .rule = rule, .pos = pos };
+            pub fn get(self: *Self, rule: u32, pos: u32) ?Entry {
+                const k = Key{ .rulekind = rule, .texthead = pos };
                 if (self.map.get(k)) |e| {
                     self.hits += 1;
                     return e;
@@ -169,27 +164,27 @@ pub fn VM(
                 }
             }
 
-            pub fn put(self: *Self, rule: u16, pos: u32, entry: Entry) void {
-                _ = self.map.put(.{ .rule = rule, .pos = pos }, entry) catch return;
+            pub fn put(self: *Self, rule: u32, pos: u32, entry: Entry) void {
+                _ = self.map.put(.{ .rulekind = rule, .texthead = pos }, entry) catch return;
             }
         };
 
-        pub fn tick(self: *Machine, comptime mode: ExecMode, cache: ?*Packrat) !Status {
+        pub fn tick(self: *Machine, comptime mode: ExecMode, backpack: ?*Packrat) !Status {
             const yield = mode == .yield_each;
 
-            vm: switch (self.i) {
+            vm: switch (self.codehead) {
                 inline 0...P.code.len - 1 => |I| {
                     const I1 = I + 1;
-                    self.i = I1;
-                    const ci = self.peek() orelse 0;
+                    self.codehead = I1;
+                    const nextchar = self.peek() orelse 0;
                     // Flag to indicate whether current instruction succeeded and continued
                     // If not set, we trigger failure/backtrack logic below.
                     var advanced = false;
 
-                    switch (comptime O[I]) {
+                    switch (comptime code[I]) {
                         inline .Char => |c| {
-                            if (ci == c) {
-                                self.j += 1;
+                            if (nextchar == c) {
+                                self.texthead += 1;
                                 if (yield) return .Running else {
                                     advanced = true;
                                     continue :vm I1;
@@ -197,9 +192,9 @@ pub fn VM(
                             }
                         },
 
-                        inline .CharSet => |set| {
-                            if (set.isSet(ci)) {
-                                self.j += 1;
+                        inline .CharSet => |charmask| {
+                            if (charmask.isSet(nextchar)) {
+                                self.texthead += 1;
                                 if (yield) return .Running else {
                                     advanced = true;
                                     continue :vm I1;
@@ -208,9 +203,9 @@ pub fn VM(
                         },
 
                         inline .String => |s| {
-                            if (self.ensure(self.j, s.len)) {
-                                if (std.mem.eql(u8, self.s[self.j .. self.j + s.len], s)) {
-                                    self.j += s.len;
+                            if (self.ensure(self.texthead, s.len)) {
+                                if (std.mem.eql(u8, self.text[self.texthead .. self.texthead + s.len], s)) {
+                                    self.texthead += s.len;
                                     if (yield) return .Running else {
                                         advanced = true;
                                         continue :vm I1;
@@ -220,14 +215,13 @@ pub fn VM(
                         },
 
                         inline .ChoiceRel => |d| {
-                            self.t[self.g] = .{
-                                .h = self.h,
-                                .k = I,
-                                .i = @as(usize, @intCast(@as(isize, @intCast(I)) + 1 + d)),
-                                .j = self.j,
+                            self.savelist[self.savehead] = .{
+                                .markhead = self.markhead,
+                                .codehead = @as(usize, @intCast(@as(isize, @intCast(I)) + 1 + d)),
+                                .texthead = self.texthead,
                             };
 
-                            self.g += 1;
+                            self.savehead += 1;
                             if (yield) return .Running else {
                                 advanced = true;
                                 continue :vm I1;
@@ -235,60 +229,62 @@ pub fn VM(
                         },
 
                         inline .CommitRel => |d| {
-                            self.g -= 1;
-                            const dst = (@as(usize, @intCast(@as(isize, I) + 1 + d)));
-                            self.i = dst;
+                            self.savehead -= 1;
+                            const nextcode = (@as(usize, @intCast(@as(isize, I) + 1 + d)));
+                            self.codehead = nextcode;
                             if (yield) return .Running else {
                                 advanced = true;
-                                continue :vm dst;
+                                continue :vm nextcode;
                             }
                         },
 
                         inline .Call => |r| {
-                            const rule_id: u16 = @intCast(@intFromEnum(r));
-                            const entry = if (cache != null) cache.?.get(rule_id, self.j) else null;
-                            if (entry) |e| {
-                                if (e.success) {
-                                    // Fast-path success: skip body
-                                    self.j = e.next_pos;
+                            const rulekind: u32 = @intCast(@intFromEnum(r));
+                            const rulecode = P.rule_ip[rulekind];
+                            const memo = if (backpack != null) backpack.?.get(rulekind, self.texthead) else null;
+                            if (memo) |e| {
+                                if (e.good) {
+                                    self.texthead = e.next;
                                     if (yield) return .Running else {
                                         advanced = true;
                                         continue :vm I1;
                                     }
-                                } else {
-                                    // Cached failure: leave 'advanced' false so outer
-                                    // failure/backtrack logic runs. Do NOT push frame.
-                                    // Simply break out of this case.
-                                    // no-op: allow switch to end so advanced stays false
                                 }
                             } else {
                                 // Normal call path (not cached or no cache)
-                                self.h += 1;
-                                self.r[self.h] = I1;
-                                self.call_rule[self.h] = rule_id;
-                                self.call_start[self.h] = self.j;
-                                const callee = P.rule_ip[rule_id];
-                                self.i = callee;
+                                self.markhead += 1;
+                                self.marklist[self.markhead] = .{
+                                    .rulekind = rulekind,
+                                    .texthead = self.texthead,
+                                    .nextcode = I1,
+                                };
+
+                                self.codehead = rulecode;
+
                                 if (yield) return .Running else {
                                     advanced = true;
-                                    continue :vm callee;
+                                    continue :vm rulecode;
                                 }
                             }
                         },
 
                         .Ret => {
-                            // Successful rule completion: memoize success if cache provided
-                            if (cache) |pc| {
-                                const rid = self.call_rule[self.h];
-                                const spos = self.call_start[self.h];
-                                pc.put(rid, spos, .{ .success = true, .next_pos = self.j });
+                            if (backpack) |map| {
+                                const mark = self.marklist[self.markhead];
+                                const head = mark.texthead;
+                                map.put(mark.rulekind, head, .{
+                                    .good = true,
+                                    .next = self.texthead,
+                                });
                             }
-                            const ret_ip = self.r[self.h];
-                            self.i = ret_ip;
-                            self.h -= 1;
+
+                            const mark = self.marklist[self.markhead];
+                            self.codehead = mark.nextcode;
+                            self.markhead -= 1;
+
                             if (yield) return .Running else {
                                 advanced = true;
-                                continue :vm ret_ip;
+                                continue :vm mark.nextcode;
                             }
                         },
 
@@ -298,41 +294,44 @@ pub fn VM(
                                 continue :vm I1;
                             }
                         },
+
                         .Fail => void,
                         .Accept => return .Ok,
                     }
 
                     if (!advanced) {
-                        if (self.g != 0) {
-                            self.g -= 1;
-                            const prev_h = self.h;
-                            const tg = self.t[self.g];
-                            // If we popped frames (rule failures), record failures
-                            if (cache) |pc| {
-                                if (tg.h < prev_h) {
-                                    var fh = prev_h;
-                                    while (fh > tg.h) : (fh -= 1) {
-                                        const rid = self.call_rule[fh];
-                                        const spos = self.call_start[fh];
-                                        pc.put(rid, spos, .{ .success = false, .next_pos = spos });
-                                    }
+                        if (self.savehead != 0) {
+                            @branchHint(.likely);
+                            self.savehead -= 1;
+
+                            const failsave = self.savelist[self.savehead];
+
+                            if (backpack) |map| {
+                                // save failure result for any rules we are abandoning
+                                var i = self.markhead;
+                                while (i > failsave.markhead) : (i -= 1) {
+                                    const failmark = self.marklist[i];
+                                    map.put(failmark.rulekind, failmark.texthead, .{
+                                        .good = false,
+                                        .next = failmark.texthead,
+                                    });
                                 }
                             }
-                            self.i = tg.i;
-                            self.h = tg.h;
-                            self.j = tg.j;
-                            if (yield) return .Running else continue :vm self.i;
+
+                            self.codehead = failsave.codehead;
+                            self.markhead = failsave.markhead;
+                            self.texthead = failsave.texthead;
+
+                            if (yield) return .Running else continue :vm self.codehead;
                         } else {
                             return .Fail;
                         }
-                    } else {
-                        // already advanced; nothing to do
                     }
                 },
-                else => return error.InvalidIP,
+                else => unreachable,
             }
-            // Should not reach here; treat as failure
-            return .Fail;
+
+            unreachable;
         }
 
         pub fn parseFully(
@@ -345,7 +344,10 @@ pub fn VM(
                 .yield_each => while (true) {
                     const st = try m.tick(.yield_each, null);
                     switch (st) {
-                        .Running => continue,
+                        .Running => {
+                            @branchHint(.likely);
+                            continue;
+                        },
                         .Ok => return true,
                         .Fail => return false,
                     }
@@ -370,7 +372,7 @@ pub fn VM(
             var m = @This().init(src);
             defer m.deinit();
             var metrics: Metrics = .{};
-            var prev_g: usize = m.g;
+            var prev_g: usize = m.savehead;
             var cache_map = @This().Packrat.Auto.init(std.heap.page_allocator);
             defer cache_map.deinit();
             var cache = @This().Packrat{ .map = &cache_map };
@@ -378,12 +380,15 @@ pub fn VM(
                 const st = try m.tick(.yield_each, &cache);
                 metrics.steps += 1;
                 // Track heights after this step
-                if (m.g > metrics.max_back_height) metrics.max_back_height = m.g;
-                if (m.h > metrics.max_rule_height) metrics.max_rule_height = m.h;
-                if (m.g < prev_g) metrics.backtracks += 1;
-                prev_g = m.g;
+                if (m.savehead > metrics.max_back_height) metrics.max_back_height = m.savehead;
+                if (m.markhead > metrics.max_rule_height) metrics.max_rule_height = m.markhead;
+                if (m.savehead < prev_g) metrics.backtracks += 1;
+                prev_g = m.savehead;
                 switch (st) {
-                    .Running => continue,
+                    .Running => {
+                        @branchHint(.likely);
+                        continue;
+                    },
                     .Ok => {
                         metrics.accepted = true;
                         return metrics;
@@ -400,16 +405,19 @@ pub fn VM(
             var m = @This().init(src);
             defer m.deinit();
             var metrics: Metrics = .{};
-            var prev_g: usize = m.g;
+            var prev_g: usize = m.savehead;
             while (true) {
                 const st = try m.tick(.yield_each, cache);
                 metrics.steps += 1;
-                if (m.g > metrics.max_back_height) metrics.max_back_height = m.g;
-                if (m.h > metrics.max_rule_height) metrics.max_rule_height = m.h;
-                if (m.g < prev_g) metrics.backtracks += 1;
-                prev_g = m.g;
+                if (m.savehead > metrics.max_back_height) metrics.max_back_height = m.savehead;
+                if (m.markhead > metrics.max_rule_height) metrics.max_rule_height = m.markhead;
+                if (m.savehead < prev_g) metrics.backtracks += 1;
+                prev_g = m.savehead;
                 switch (st) {
-                    .Running => continue,
+                    .Running => {
+                        @branchHint(.likely);
+                        continue;
+                    },
                     .Ok => {
                         metrics.accepted = true;
                         return metrics;
