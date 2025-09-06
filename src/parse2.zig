@@ -774,6 +774,48 @@ test "metrics collection on simple json token" {
     );
 }
 
+// ------------------------------------------------------
+// Packrat demonstration grammar (pathological backtracking)
+// ------------------------------------------------------
+// This grammar creates a chain of many optional 'a' terminals followed by a
+// required 'b'. Input with far fewer 'a's than optional slots forces the
+// engine to explore a large combination space of which optionals are present.
+// A packrat parser would memoize each rule result at each position and avoid
+// re-parsing the overlapping suffixes, cutting the explosion.
+// Start <- ('a'?){N} 'b' END ACCEPT  (N = 12 here)
+// We test on input of 4 'a's then 'b' so the parser must try many placements.
+pub const PackratDemoGrammar = struct {
+    const C = Combinators(@This());
+    // Prefix <- 'a' Prefix / 'a'
+    // Start  <- Prefix 'b' END ACCEPT
+    // Input a^n b causes many re-parsings of the same suffix of a's when not memoized,
+    // because each recursion level, after the deeper failure at 'b', explores the
+    // shorter alternative. This is a classic exponential-style PEG backtracking pattern.
+    pub const Prefix = C.alt(.{ C.seq(.{ C.CH('a'), C.Call(.Prefix) }), C.CH('a') }) ++ C.RET;
+    pub const Start = C.seq(.{ C.Call(.Prefix), C.CH('b'), C.END, C.ACCEPT });
+};
+
+const PackratDemoParser = VM(PackratDemoGrammar, 4096, 4096);
+
+test "packrat blowup demonstration" {
+    const n: usize = 18; // adjustable depth; increase for more dramatic effect
+    var buf: [n + 1]u8 = undefined; // n 'a's + 'b'
+    var i: usize = 0;
+    while (i < n) : (i += 1) buf[i] = 'a';
+    buf[n] = 'b';
+    const input = buf[0..];
+    const metrics = try PackratDemoParser.runWithMetrics(input);
+    try std.testing.expect(metrics.accepted);
+    std.debug.print(
+        "packrat demo: n={d} steps={d} backtracks={d} max_back={d} max_rule={d}\n",
+        .{ n, metrics.steps, metrics.backtracks, metrics.max_back_height, metrics.max_rule_height },
+    );
+    // Heuristic expectations: steps should exceed n significantly (super-linear)
+    // and multiple backtracks occur roughly on order of n.
+    try std.testing.expect(metrics.steps > n * 4);
+    try std.testing.expect(metrics.backtracks >= n);
+}
+
 pub export fn parse(src: [*]const u8, len: usize) u8 {
     var m = JSONParser.init(src[0..len]);
     defer m.deinit();
