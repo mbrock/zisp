@@ -57,16 +57,29 @@ pub const ZigMiniGrammar = struct {
     const kw_return = C.text("return");
     const kw_const = C.text("const");
     const kw_var = C.text("var");
+    const kw_export = C.text("export");
+    const kw_extern = C.text("extern");
+    const kw_threadlocal = C.text("threadlocal");
+    const kw_addrspace = C.text("addrspace");
+    const kw_linksection = C.text("linksection");
+    const kw_callconv = C.text("callconv");
     const kw_if = C.text("if");
+    const kw_comptime = C.text("comptime");
+    const kw_test = C.text("test");
     const kw_else = C.text("else");
     const kw_while = C.text("while");
     const kw_for = C.text("for");
     const kw_switch = C.text("switch");
     const kw_break = C.text("break");
     const kw_continue = C.text("continue");
+    const kw_defer = C.text("defer");
+    const kw_errdefer = C.text("errdefer");
+    const kw_suspend = C.text("suspend");
+    const kw_nosuspend = C.text("nosuspend");
     const kw_struct = C.text("struct");
     const kw_union = C.text("union");
     const kw_enum = C.text("enum");
+    const kw_noinline = C.text("noinline");
     const kw_and = C.text("and");
     const kw_or = C.text("or");
     const kw_orelse = C.text("orelse");
@@ -114,6 +127,18 @@ pub const ZigMiniGrammar = struct {
         C.seq(.{ C.text("var"), ident_boundary }),
         C.seq(.{ C.text("break"), ident_boundary }),
         C.seq(.{ C.text("continue"), ident_boundary }),
+        C.seq(.{ C.text("defer"), ident_boundary }),
+        C.seq(.{ C.text("errdefer"), ident_boundary }),
+        C.seq(.{ C.text("suspend"), ident_boundary }),
+        C.seq(.{ C.text("nosuspend"), ident_boundary }),
+        C.seq(.{ C.text("comptime"), ident_boundary }),
+        C.seq(.{ C.text("test"), ident_boundary }),
+        C.seq(.{ C.text("export"), ident_boundary }),
+        C.seq(.{ C.text("extern"), ident_boundary }),
+        C.seq(.{ C.text("threadlocal"), ident_boundary }),
+        C.seq(.{ C.text("addrspace"), ident_boundary }),
+        C.seq(.{ C.text("linksection"), ident_boundary }),
+        C.seq(.{ C.text("callconv"), ident_boundary }),
         C.seq(.{ C.text("if"), ident_boundary }),
         C.seq(.{ C.text("else"), ident_boundary }),
         C.seq(.{ C.text("while"), ident_boundary }),
@@ -127,6 +152,7 @@ pub const ZigMiniGrammar = struct {
         C.seq(.{ C.text("orelse"), ident_boundary }),
         C.seq(.{ C.text("try"), ident_boundary }),
         C.seq(.{ C.text("catch"), ident_boundary }),
+        C.seq(.{ C.text("noinline"), ident_boundary }),
         C.seq(.{ C.text("error"), ident_boundary }),
         C.seq(.{ C.text("inline"), ident_boundary }),
     });
@@ -184,11 +210,19 @@ pub const ZigMiniGrammar = struct {
     const chr_plain = C.charclass(.{ ascii[' ' .. '&' + 1], ascii['(' .. '[' + 1], ascii[']' .. '~' + 1] });
     pub const CharLiteral = C.seq(.{ C.char('\''), C.anyOf(.{ chr_escape, chr_plain }), C.char('\''), C.ret });
 
+    // ABI/Visibility helpers
+    pub const LinkSection = C.seq(.{ kw_linksection, WS, lparen, WS, C.Call(.Expr), WS, rparen, C.ret });
+    pub const AddrSpace = C.seq(.{ kw_addrspace, WS, lparen, WS, C.Call(.Expr), WS, rparen, C.ret });
+    pub const CallConv = C.seq(.{ kw_callconv, WS, lparen, WS, C.Call(.Expr), WS, rparen, C.ret });
+    pub const ByteAlign = C.seq(.{ C.text("align"), WS, lparen, WS, C.Call(.Expr), WS, rparen, C.ret });
+
     // Primary <- Block / IfExpr / WhileExprE / ForExprE / SwitchExpr / ReturnExpr / BreakExpr / ContinueExpr / ContainerExpr / CallExpr / Integer / StringLiteral / CharLiteral / Identifier
     // Grouped expression
     pub const GroupedExpr = C.seq(.{ lparen, WS, C.Call(.Expr), WS, rparen, C.ret });
     // Error literal: error.Foo
     pub const ErrorLiteral = C.seq(.{ kwt_error, dot, C.Call(.Identifier), C.ret });
+    // Enum/union dot literal (contextually typed): .Name
+    pub const DotIdentifier = C.seq(.{ dot, C.Call(.Identifier), C.ret });
 
     pub const Primary = C.anyOf(.{
         C.Call(.GroupedExpr),
@@ -203,6 +237,7 @@ pub const ZigMiniGrammar = struct {
         C.Call(.ContainerExpr),
         C.Call(.BuiltinIdentifier),
         C.Call(.ErrorLiteral),
+        C.Call(.DotIdentifier),
         C.Call(.Integer),
         C.Call(.StringLiteral),
         C.Call(.CharLiteral),
@@ -597,11 +632,21 @@ pub const ZigMiniGrammar = struct {
     // LabeledForStatement <- BlockLabel? ForStatement
     pub const LabeledForStatement = C.seq(.{ C.maybe(C.Call(.BlockLabel)), WS, C.Call(.ForStatement), C.ret });
 
+    // Defer/errdefer and suspend/nosuspend
+    pub const DeferStatement = C.seq(.{ kw_defer, WS, C.Call(.BlockExprStatement), C.ret });
+    pub const ErrDeferStatement = C.seq(.{ kw_errdefer, C.maybe(C.seq(.{ WS, C.Call(.Payload) })), WS, C.Call(.BlockExprStatement), C.ret });
+    pub const NoSuspendStatement = C.seq(.{ kw_nosuspend, WS, C.Call(.BlockExprStatement), C.ret });
+    pub const SuspendStatement = C.seq(.{ kw_suspend, WS, C.Call(.BlockExprStatement), C.ret });
+
     pub const Statement = C.anyOf(.{
         C.Call(.IfStatement),
         C.Call(.LabeledWhileStatement),
         C.Call(.LabeledForStatement),
         C.Call(.SwitchExpr),
+        C.Call(.DeferStatement),
+        C.Call(.ErrDeferStatement),
+        C.Call(.NoSuspendStatement),
+        C.Call(.SuspendStatement),
         C.Call(.VarDeclExprStatement),
         C.Call(.BlockExprStatement),
     }) ++ C.ret;
@@ -616,9 +661,17 @@ pub const ZigMiniGrammar = struct {
         C.ret,
     });
 
-    // FnDecl <- 'pub'? WS 'fn' WS Identifier WS '(' WS ParamList? WS ')' WS TypeExpr? WS Block
+    // FnDecl modifiers: pub? (export | extern StringLiteral? | inline | noinline)?
+    // Fn tail attrs: ByteAlign? AddrSpace? LinkSection? CallConv?
+    // Return type remains optional in this mini grammar.
     pub const FnDecl = C.seq(.{
         C.maybe(C.seq(.{ kw_pub, WS })),
+        C.maybe(C.anyOf(.{
+            C.seq(.{ kw_export, WS }),
+            C.seq(.{ kw_extern, C.maybe(C.seq(.{ WS, C.Call(.StringLiteral) })), WS }),
+            C.seq(.{ kw_inline, WS }),
+            C.seq(.{ kw_noinline, WS }),
+        })),
         kw_fn,
         WS,
         C.Call(.Identifier),
@@ -628,26 +681,63 @@ pub const ZigMiniGrammar = struct {
         C.maybe(C.Call(.ParamList)),
         WS,
         rparen,
-        WS,
-        C.maybe(C.Call(.TypeExpr)),
+        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.ByteAlign)) })),
+        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.AddrSpace)) })),
+        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.LinkSection)) })),
+        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.CallConv)) })),
+        C.maybe(C.seq(.{ WS, C.Call(.TypeExpr) })),
         WS,
         C.Call(.Block),
         C.ret,
     });
 
-    // TopVarDecl <- 'pub'? WS VarDecl WS ';'
-    pub const TopVarDecl = C.seq(.{
-        C.maybe(C.seq(.{ kw_pub, WS })),
-        C.Call(.VarDecl),
+    // VarDeclProto: ('const'|'var') Identifier (':' TypeExpr)? ByteAlign? AddrSpace? LinkSection?
+    pub const VarDeclProto = C.seq(.{
+        C.anyOf(.{ kw_const, kw_var }),
+        WS,
+        C.Call(.Identifier),
+        C.maybe(C.seq(.{ WS, colon, WS, C.Call(.TypeExpr) })),
+        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.ByteAlign)) })),
+        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.AddrSpace)) })),
+        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.LinkSection)) })),
+        C.ret,
+    });
+
+    // GlobalVarDecl: optional initializer and semicolon
+    pub const GlobalVarDecl = C.seq(.{
+        C.Call(.VarDeclProto),
+        C.maybe(C.seq(.{ WS, equal, WS, C.Call(.Expr) })),
         WS,
         semicolon,
         C.ret,
     });
 
-    // start <- WS ((FnDecl / TopVarDecl) WS)* WS EOF
+    // TopVarDecl: 'pub'? (export|extern StringLiteral?)? threadlocal? GlobalVarDecl
+    pub const TopVarDecl = C.seq(.{
+        C.maybe(C.seq(.{ kw_pub, WS })),
+        C.maybe(C.anyOf(.{
+            C.seq(.{ kw_export, WS }),
+            C.seq(.{ kw_extern, C.maybe(C.seq(.{ WS, C.Call(.StringLiteral) })), WS }),
+        })),
+        C.maybe(C.seq(.{ kw_threadlocal, WS })),
+        C.Call(.GlobalVarDecl),
+        C.ret,
+    });
+
+    // TestDecl and ComptimeDecl
+    pub const TestDecl = C.seq(.{
+        kw_test,
+        C.maybe(C.anyOf(.{ C.seq(.{ WS, C.Call(.StringLiteral) }), C.seq(.{ WS, C.Call(.Identifier) }) })),
+        WS,
+        C.Call(.Block),
+        C.ret,
+    });
+    pub const ComptimeDecl = C.seq(.{ kw_comptime, WS, C.Call(.Block), C.ret });
+
+    // start <- WS ((FnDecl / TopVarDecl / TestDecl / ComptimeDecl) WS)* WS EOF
     pub const start = C.seq(.{
         WS,
-        C.zeroOrMany(C.seq(.{ C.anyOf(.{ C.Call(.FnDecl), C.Call(.TopVarDecl) }), WS })),
+        C.zeroOrMany(C.seq(.{ C.anyOf(.{ C.Call(.FnDecl), C.Call(.TopVarDecl), C.Call(.TestDecl), C.Call(.ComptimeDecl) }), WS })),
         WS,
         C.eof,
         C.ok,
@@ -1083,6 +1173,36 @@ test "labels: for labeled and continue label" {
     const src =
         "fn f() {\n" ++
         "  outer: for (0..10) |i| { continue :outer; }\n" ++
+        "}\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "abi: extern fn with attrs" {
+    const src =
+        "extern \"c\" fn f(a: i32) align(4) addrspace(0) linksection(\".text\") callconv(.C) void { }\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "abi: export threadlocal global with type and attrs" {
+    const src =
+        "export threadlocal const x: i32 align(16) addrspace(1) linksection(\".data\") = 0;\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "toplevel: test and comptime blocks" {
+    const src =
+        "test \"name\" { defer {} }\n" ++
+        "comptime { var a = 1; }\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "stmt: defer, errdefer, suspend, nosuspend" {
+    const src =
+        "fn f() {\n" ++
+        "  defer { }\n" ++
+        "  errdefer |e| { }\n" ++
+        "  suspend { }\n" ++
+        "  nosuspend { }\n" ++
         "}\n";
     try std.testing.expect(try parseZigMini(src));
 }
