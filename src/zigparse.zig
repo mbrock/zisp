@@ -80,6 +80,9 @@ pub const ZigMiniGrammar = struct {
     const kwt_try = C.seq(.{ C.text("try"), ident_boundary, WS });
     const kwt_catch = C.seq(.{ C.text("catch"), ident_boundary, WS });
     const kwt_inline = C.seq(.{ C.text("inline"), ident_boundary, WS });
+    // error keyword: without trailing WS (for error.Foo) and with WS (for error { ... })
+    const kwt_error = C.seq(.{ C.text("error"), ident_boundary });
+    const kwt_error_ws = C.seq(.{ C.text("error"), ident_boundary, WS });
 
     // Punctuation
     const lparen = C.char('(');
@@ -124,6 +127,8 @@ pub const ZigMiniGrammar = struct {
         C.seq(.{ C.text("orelse"), ident_boundary }),
         C.seq(.{ C.text("try"), ident_boundary }),
         C.seq(.{ C.text("catch"), ident_boundary }),
+        C.seq(.{ C.text("error"), ident_boundary }),
+        C.seq(.{ C.text("inline"), ident_boundary }),
     });
 
     pub const Identifier = C.seq(.{
@@ -141,9 +146,17 @@ pub const ZigMiniGrammar = struct {
     //   TypeCore <- TypePrefix* TypeAtom
     //   ErrorUnionType <- TypeCore (WS '!' WS TypeExpr)?
     //   TypeExpr <- ErrorUnionType
-    //   TypeAtom <- Identifier / ContainerExpr
+    //   TypeAtom <- Identifier / ContainerExpr / ErrorSetDecl
     //   TypePrefix <- '?' / '*' / ('[' WS Expr WS ']' | '[' WS ']' )
-    pub const TypeAtom = C.anyOf(.{ C.Call(.Identifier), C.Call(.ContainerExpr) }) ++ C.ret;
+    // Error set declaration: error { A, B, ... }
+    pub const IdentifierList = C.seq(.{
+        C.Call(.Identifier),
+        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.Identifier) })),
+        C.maybe(C.seq(.{ WS, comma })),
+        C.ret,
+    });
+    pub const ErrorSetDecl = C.seq(.{ kwt_error_ws, lbrace, WS, C.maybe(C.Call(.IdentifierList)), WS, rbrace, C.ret });
+    pub const TypeAtom = C.anyOf(.{ C.Call(.Identifier), C.Call(.ContainerExpr), C.Call(.ErrorSetDecl) }) ++ C.ret;
 
     const SliceStart = C.seq(.{ lbracket, WS, rbracket });
     const ArrayStart = C.seq(.{ lbracket, WS, C.Call(.Expr), WS, rbracket });
@@ -174,6 +187,8 @@ pub const ZigMiniGrammar = struct {
     // Primary <- Block / IfExpr / WhileExprE / ForExprE / SwitchExpr / ReturnExpr / BreakExpr / ContinueExpr / ContainerExpr / CallExpr / Integer / StringLiteral / CharLiteral / Identifier
     // Grouped expression
     pub const GroupedExpr = C.seq(.{ lparen, WS, C.Call(.Expr), WS, rparen, C.ret });
+    // Error literal: error.Foo
+    pub const ErrorLiteral = C.seq(.{ kwt_error, dot, C.Call(.Identifier), C.ret });
 
     pub const Primary = C.anyOf(.{
         C.Call(.GroupedExpr),
@@ -187,6 +202,7 @@ pub const ZigMiniGrammar = struct {
         C.Call(.ContinueExpr),
         C.Call(.ContainerExpr),
         C.Call(.BuiltinIdentifier),
+        C.Call(.ErrorLiteral),
         C.Call(.Integer),
         C.Call(.StringLiteral),
         C.Call(.CharLiteral),
@@ -1007,6 +1023,24 @@ test "while: continue expression with assign branch" {
         "fn f() {\n" ++
         "  while (x) : (i = i + 1) y = z;\n" ++
         "}\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "error: literal as expr" {
+    try std.testing.expect(try parseZigMini("fn f(){ const x = error.Foo; }\n"));
+}
+
+test "error: literal with catch" {
+    try std.testing.expect(try parseZigMini("fn f(){ x = y catch error.Fail; }\n"));
+}
+
+test "error: set decl in return type" {
+    const src = "fn f() error{A,B}!T { return; }\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "error: set decl in param type" {
+    const src = "fn f(e: error{ A, B, }) {}\n";
     try std.testing.expect(try parseZigMini(src));
 }
 
