@@ -875,32 +875,6 @@ test "packrat caching benefit" {
     );
 }
 
-pub export fn parse(src: [*:0]const u8, len: usize) u8 {
-    var m = JSONParser.init(src[0..len :0]);
-    defer m.deinit();
-    defer std.debug.print("\n", .{});
-    while (true) {
-        switch (m.tick(.yield_each, null) catch return 2) {
-            .Ok => {
-                std.debug.print("ok", .{});
-                return 0;
-            },
-            .Fail => {
-                std.debug.print("no", .{});
-                return 1;
-            },
-            .Running => {
-                std.debug.print(".", .{});
-                continue;
-            },
-        }
-    }
-}
-
-pub fn main() u8 {
-    const src = std.posix.getenv("SRC") orelse "";
-    return parse(@ptrCast(src), src.len);
-}
 
 test "yield mode" {
     const src = "true";
@@ -924,7 +898,6 @@ test "yield mode" {
 
     // Should have taken multiple steps
     try std.testing.expect(count > 1);
-    std.debug.print("\nParsing 'true' took {d} steps in yield mode\n", .{count});
 }
 
 test "yield mode complex" {
@@ -942,39 +915,5 @@ test "yield mode complex" {
         }
     }
 
-    std.debug.print("Parsing '[1, 2, 3]' took {d} steps in yield mode\n", .{count});
     try std.testing.expect(count > 10); // Should take many steps
-}
-
-fn printInstruction(P: type, op: P.Op) void {
-    switch (@as(P.Op, op)) {
-        .ChoiceRel => std.debug.print("^", .{}),
-        .CommitRel => std.debug.print(".", .{}),
-        .Fail => std.debug.print("F", .{}),
-        .Call => std.debug.print(">", .{}),
-        .Ret => std.debug.print("<", .{}),
-        .EndInput => std.debug.print("$", .{}),
-        .Accept => std.debug.print(".", .{}),
-        .String => |s| std.debug.print("\"{s}\"", .{s}),
-        .CharSet => |set| {
-            std.debug.print("[", .{});
-            var iter = set.iterator(.{});
-            while (iter.next()) |b| {
-                if (b == '\n') {
-                    std.debug.print("\\n", .{});
-                } else if (b == '\r') {
-                    std.debug.print("\\r", .{});
-                } else if (b == '\t') {
-                    std.debug.print("\\t", .{});
-                } else if (b == ' ') {
-                    std.debug.print("␣", .{});
-                } else if (b < 32 or b == 127) {
-                    std.debug.print("\\x{x}", .{b});
-                } else {
-                    std.debug.print("{c}", .{@as(u8, @intCast(b))});
-                }
-            }
-            std.debug.print("]", .{});
-        },
-    }
 }
