@@ -464,9 +464,9 @@ pub fn Combinators(comptime G: type) type {
         }
 
         pub inline fn seq(comptime parts: anytype) OpN(sizeSum(parts)) {
-            comptime {
-                @setEvalBranchQuota(200000);
-            }
+            @setEvalBranchQuota(2000);
+            if (parts.len < 2) @compileError("useless seq");
+
             comptime var out: OpN(sizeSum(parts)) = .{undefined} ** sizeSum(parts);
             var i: usize = 0;
 
