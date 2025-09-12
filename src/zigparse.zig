@@ -116,6 +116,18 @@ pub const ZigMiniGrammar = struct {
     const dot_question = C.text(".?");
     const backslash = C.char('\\');
 
+    // Tokenized punctuation (lexeme + trailing skip)
+    const T_LPAREN = C.seq(.{ lparen, WS });
+    const T_RPAREN = C.seq(.{ rparen, WS });
+    const T_LBRACE = C.seq(.{ lbrace, WS });
+    const T_RBRACE = C.seq(.{ rbrace, WS });
+    const T_LBRACKET = C.seq(.{ lbracket, WS });
+    const T_RBRACKET = C.seq(.{ rbracket, WS });
+    const T_COLON = C.seq(.{ colon, WS });
+    const T_COMMA = C.seq(.{ comma, WS });
+    const T_SEMI = C.seq(.{ semicolon, WS });
+    const T_EQUAL = C.seq(.{ equal, WS });
+
     // Lexical rules
     // Reserved words we currently recognize
     const ident_boundary = C.notLookahead(alnum_us); // next is not [A-Za-z0-9_]
@@ -246,7 +258,7 @@ pub const ZigMiniGrammar = struct {
 
     // Suffix ops and call/index/member chains
     // Call: '(' ExprList? ')'
-    pub const FnCallArguments = C.seq(.{ lparen, WS, C.maybe(C.Call(.ExprList)), WS, rparen, C.ret });
+    pub const FnCallArguments = C.seq(.{ T_LPAREN, C.maybe(C.Call(.ExprList)), T_RPAREN, C.ret });
     // Member access: '.' Identifier
     pub const MemberAccess = C.seq(.{ dot, C.Call(.Identifier), C.ret });
     // Deref: '.*'
@@ -256,8 +268,7 @@ pub const ZigMiniGrammar = struct {
     // Index or slice: '[' Expr ('..' (Expr? (':' Expr)? )?)? ']'
     const dots2 = C.text("..");
     pub const IndexOrSlice = C.seq(.{
-        lbracket,
-        WS,
+        T_LBRACKET,
         C.Call(.Expr),
         C.maybe(C.seq(.{
             WS,
@@ -268,8 +279,7 @@ pub const ZigMiniGrammar = struct {
                 C.maybe(C.seq(.{ WS, colon, WS, C.Call(.Expr) })),
             })),
         })),
-        WS,
-        rbracket,
+        T_RBRACKET,
         C.ret,
     });
     // One suffix piece (allow optional WS between base and suffix token)
@@ -516,7 +526,7 @@ pub const ZigMiniGrammar = struct {
     // ExprList <- Expr (WS? ',' WS? Expr)*
     pub const ExprList = C.seq(.{
         C.Call(.Expr),
-        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.Expr) })),
+        C.zeroOrMany(C.seq(.{ T_COMMA, C.Call(.Expr) })),
         C.ret,
     });
 
@@ -545,7 +555,7 @@ pub const ZigMiniGrammar = struct {
     // ParamList <- Param (WS? ',' WS? Param)*
     pub const ParamList = C.seq(.{
         C.Call(.Param),
-        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.Param) })),
+        C.zeroOrMany(C.seq(.{ T_COMMA, C.Call(.Param) })),
         C.ret,
     });
 
@@ -653,11 +663,9 @@ pub const ZigMiniGrammar = struct {
 
     // Block <- '{' WS Statement* '}'
     pub const Block = C.seq(.{
-        lbrace,
-        WS,
+        T_LBRACE,
         C.zeroOrMany(C.seq(.{ C.Call(.Statement), WS })),
-        WS,
-        rbrace,
+        T_RBRACE,
         C.ret,
     });
 
