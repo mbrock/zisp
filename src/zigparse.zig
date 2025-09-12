@@ -255,8 +255,22 @@ pub const ZigMiniGrammar = struct {
     // Expression forms
     pub const ReturnExpr = C.seq(.{ kw_return, WS, C.maybe(C.Call(.Expr)), C.ret });
 
-    pub const BreakExpr = C.seq(.{ kw_break, WS, C.maybe(C.Call(.Identifier)), C.ret });
-    pub const ContinueExpr = C.seq(.{ kw_continue, WS, C.maybe(C.Call(.Identifier)), C.ret });
+    // Labels
+    pub const BreakLabel = C.seq(.{ colon, WS, C.Call(.Identifier), C.ret });
+    pub const BlockLabel = C.seq(.{ C.Call(.Identifier), WS, colon, C.ret });
+
+    // break may have optional label and optional value expression
+    pub const BreakExpr = C.seq(.{
+        kw_break,
+        WS,
+        C.maybe(C.anyOf(.{
+            C.seq(.{ C.Call(.BreakLabel), C.maybe(C.seq(.{ WS, C.Call(.Expr) })) }),
+            C.Call(.Expr),
+        })),
+        C.ret,
+    });
+    // continue may have optional label, no value
+    pub const ContinueExpr = C.seq(.{ kw_continue, WS, C.maybe(C.Call(.BreakLabel)), C.ret });
 
     pub const IfExpr = C.seq(.{
         kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
@@ -549,7 +563,7 @@ pub const ZigMiniGrammar = struct {
     // VarDeclExprStatement <- VarDecl ';' / Expr ';'
     // Statement <- IfStatement / WhileStatement / ForStatement / SwitchExpr / VarDeclExprStatement / BlockExprStatement
 
-    pub const BlockExpr = C.seq(.{ C.Call(.Block), C.ret });
+    pub const BlockExpr = C.seq(.{ C.maybe(C.Call(.BlockLabel)), WS, C.Call(.Block), C.ret });
     pub const BlockExprStatement = C.anyOf(.{
         C.Call(.BlockExpr),
         C.seq(.{ C.Call(.AssignExpr), WS, semicolon }),
@@ -573,15 +587,20 @@ pub const ZigMiniGrammar = struct {
         C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), C.maybe(C.Call(.WhileContinueExpr)), WS, C.Call(.AssignExpr), C.anyOf(.{ C.seq(.{ WS, semicolon }), C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) }) }) }),
     }) ++ C.ret;
 
+    // LabeledWhileStatement <- BlockLabel? WhileStatement
+    pub const LabeledWhileStatement = C.seq(.{ C.maybe(C.Call(.BlockLabel)), WS, C.Call(.WhileStatement), C.ret });
+
     pub const ForStatement = C.anyOf(.{
         C.seq(.{ kw_for, WS, lparen, WS, C.Call(.ForArgumentsList), WS, rparen, WS, C.maybe(C.Call(.PtrListPayload)), WS, C.Call(.BlockExpr) }),
         C.seq(.{ kw_for, WS, lparen, WS, C.Call(.ForArgumentsList), WS, rparen, WS, C.maybe(C.Call(.PtrListPayload)), WS, C.Call(.AssignExpr), WS, semicolon }),
     }) ++ C.ret;
+    // LabeledForStatement <- BlockLabel? ForStatement
+    pub const LabeledForStatement = C.seq(.{ C.maybe(C.Call(.BlockLabel)), WS, C.Call(.ForStatement), C.ret });
 
     pub const Statement = C.anyOf(.{
         C.Call(.IfStatement),
-        C.Call(.WhileStatement),
-        C.Call(.ForStatement),
+        C.Call(.LabeledWhileStatement),
+        C.Call(.LabeledForStatement),
         C.Call(.SwitchExpr),
         C.Call(.VarDeclExprStatement),
         C.Call(.BlockExprStatement),
@@ -1041,6 +1060,30 @@ test "error: set decl in return type" {
 
 test "error: set decl in param type" {
     const src = "fn f(e: error{ A, B, }) {}\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "labels: labeled block with break value" {
+    const src =
+        "fn f() {\n" ++
+        "  blk: { break :blk 1; }\n" ++
+        "}\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "labels: while labeled and continue/break labels" {
+    const src =
+        "fn f() {\n" ++
+        "  outer: while (0) { continue :outer; break :outer; }\n" ++
+        "}\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "labels: for labeled and continue label" {
+    const src =
+        "fn f() {\n" ++
+        "  outer: for (0..10) |i| { continue :outer; }\n" ++
+        "}\n";
     try std.testing.expect(try parseZigMini(src));
 }
 
