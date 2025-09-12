@@ -31,93 +31,86 @@ const VM = pegvm.VM;
 const Combinators = pegvm.Combinators;
 const ascii = pegvm.ascii;
 
-// A very small subset of Zig’s grammar to get started.
-// Goal: accept simple fn declarations, params, basic blocks,
-// return statements, const/var decls, and simple expressions
-// (identifiers, integers, and bare calls without arguments).
 pub const ZigMiniGrammar = struct {
     const C = Combinators(@This());
 
-    // Identifiers: [A-Za-z_][A-Za-z0-9_]* (no keyword filtering for now)
     const alpha = C.charclass(.{ ascii['a' .. 'z' + 1], ascii['A' .. 'Z' + 1], "_" });
     const digit = C.charclass(ascii['0' .. '9' + 1]);
     const alnum_us = C.charclass(.{
         ascii['a' .. 'z' + 1], ascii['A' .. 'Z' + 1], ascii['0' .. '9' + 1], "_",
     });
 
-    // Whitespace/comments
-    // Simple line comments: // ... to end-of-line (ASCII only for now)
     const not_nl_ascii = C.charclass(.{ ascii[' ' .. '~' + 1], '\t', '\r' });
     const line_comment = C.text("//") ++ C.zeroOrMany(not_nl_ascii);
     const WS = C.zeroOrMany(C.anyOf(.{ C.charclass(" \t\n\r"), line_comment }));
 
-    // Word tokens (no trailing space baked in; sequences insert WS as needed)
-    const kw_fn = C.text("fn");
-    const kw_pub = C.text("pub");
-    const kw_return = C.text("return");
-    const kw_const = C.text("const");
-    const kw_var = C.text("var");
-    const kw_export = C.text("export");
-    const kw_extern = C.text("extern");
-    const kw_threadlocal = C.text("threadlocal");
-    const kw_addrspace = C.text("addrspace");
-    const kw_linksection = C.text("linksection");
-    const kw_callconv = C.text("callconv");
-    const kw_if = C.text("if");
-    const kw_comptime = C.text("comptime");
-    const kw_test = C.text("test");
-    const kw_else = C.text("else");
-    const kw_while = C.text("while");
-    const kw_for = C.text("for");
-    const kw_switch = C.text("switch");
-    const kw_break = C.text("break");
-    const kw_continue = C.text("continue");
-    const kw_defer = C.text("defer");
-    const kw_errdefer = C.text("errdefer");
-    const kw_suspend = C.text("suspend");
-    const kw_nosuspend = C.text("nosuspend");
-    const kw_struct = C.text("struct");
-    const kw_union = C.text("union");
-    const kw_enum = C.text("enum");
-    const kw_noinline = C.text("noinline");
-    const kw_and = C.text("and");
-    const kw_or = C.text("or");
-    const kw_orelse = C.text("orelse");
-    const kw_try = C.text("try");
-    const kw_catch = C.text("catch");
-    const kw_inline = C.text("inline");
-    // Keyword tokens with identifier-boundary, to match Zig tokens behavior
-    const kwt_and = C.seq(.{ C.text("and"), ident_boundary, WS });
-    const kwt_or = C.seq(.{ C.text("or"), ident_boundary, WS });
-    const kwt_orelse = C.seq(.{ C.text("orelse"), ident_boundary, WS });
-    const kwt_try = C.seq(.{ C.text("try"), ident_boundary, WS });
-    const kwt_catch = C.seq(.{ C.text("catch"), ident_boundary, WS });
-    const kwt_inline = C.seq(.{ C.text("inline"), ident_boundary, WS });
-    // error keyword: without trailing WS (for error.Foo) and with WS (for error { ... })
-    const kwt_error = C.seq(.{ C.text("error"), ident_boundary });
-    const kwt_error_ws = C.seq(.{ C.text("error"), ident_boundary, WS });
+    fn kw(name: []const u8) [14]C.Op {
+        return C.text(name) ++ ident_boundary ++ WS;
+    }
+
+    const kw_fn = kw("fn");
+    const kw_pub = kw("pub");
+    const kw_return = kw("return");
+    const kw_const = kw("const");
+    const kw_var = kw("var");
+    const kw_export = kw("export");
+    const kw_extern = kw("extern");
+    const kw_threadlocal = kw("threadlocal");
+    const kw_addrspace = kw("addrspace");
+    const kw_linksection = kw("linksection");
+    const kw_callconv = kw("callconv");
+    const kw_align = kw("align");
+    const kw_if = kw("if");
+    const kw_comptime = kw("comptime");
+    const kw_test = kw("test");
+    const kw_else = kw("else");
+    const kw_while = kw("while");
+    const kw_for = kw("for");
+    const kw_switch = kw("switch");
+    const kw_break = kw("break");
+    const kw_continue = kw("continue");
+    const kw_defer = kw("defer");
+    const kw_errdefer = kw("errdefer");
+    const kw_suspend = kw("suspend");
+    const kw_nosuspend = kw("nosuspend");
+    const kw_struct = kw("struct");
+    const kw_union = kw("union");
+    const kw_enum = kw("enum");
+    const kw_noinline = kw("noinline");
+    const kw_and = kw("and");
+    const kw_or = kw("or");
+    const kw_orelse = kw("orelse");
+    const kw_try = kw("try");
+    const kw_catch = kw("catch");
+    const kw_inline = kw("inline");
+    const kwt_and = kw("and");
+    const kwt_or = kw("or");
+    const kwt_orelse = kw("orelse");
+    const kwt_try = kw("try");
+    const kwt_catch = kw("catch");
+    const kwt_inline = kw("inline");
+    const kwt_error = kw("error");
 
     // Punctuation
-    const lparen = C.char('(');
-    const rparen = C.char(')');
-    const lbrace = C.char('{');
-    const rbrace = C.char('}');
-    const lbracket = C.char('[');
-    const rbracket = C.char(']');
-    const colon = C.char(':');
-    const comma = C.char(',');
-    const semicolon = C.char(';');
-    const equal = C.char('=');
-    const bang = C.char('!');
-    const pipe_ch = C.char('|');
-    const star_ch = C.char('*');
-    const dot = C.char('.');
-    const dot_asterisk = C.text(".*");
-    const dot_question = C.text(".?");
-    const backslash = C.char('\\');
+    const lparen = C.char('(') ++ WS;
+    const rparen = C.char(')') ++ WS;
+    const lbrace = C.char('{') ++ WS;
+    const rbrace = C.char('}') ++ WS;
+    const lbracket = C.char('[') ++ WS;
+    const rbracket = C.char(']') ++ WS;
+    const colon = C.char(':') ++ WS;
+    const comma = C.char(',') ++ WS;
+    const semicolon = C.char(';') ++ WS;
+    const equal = C.char('=') ++ WS;
+    const bang = C.char('!') ++ WS;
+    const pipe_ch = C.char('|') ++ WS;
+    const star_ch = C.char('*') ++ WS;
+    const dot = C.char('.') ++ WS;
+    const dot_asterisk = C.text(".*") ++ WS;
+    const dot_question = C.text(".?") ++ WS;
+    const backslash = C.char('\\') ++ WS;
 
-    // Tokenized punctuation (lexeme + trailing skip)
-    const T_LPAREN = C.seq(.{ lparen, WS });
+    const T_LPAREN = lparen;
     const T_RPAREN = C.seq(.{ rparen, WS });
     const T_LBRACE = C.seq(.{ lbrace, WS });
     const T_RBRACE = C.seq(.{ rbrace, WS });
@@ -127,9 +120,31 @@ pub const ZigMiniGrammar = struct {
     const T_COMMA = C.seq(.{ comma, WS });
     const T_SEMI = C.seq(.{ semicolon, WS });
     const T_EQUAL = C.seq(.{ equal, WS });
+    const T_EQUALRARROW = C.seq(.{ C.text("=>"), WS });
 
-    // Lexical rules
-    // Reserved words we currently recognize
+    const not_char = C.notLookahead;
+    const cc = C.charclass;
+    const T_PLUS = C.seq(.{ C.char('+'), not_char(cc("%+=|")), WS });
+    const T_MINUS = C.seq(.{ C.char('-'), not_char(cc("%=>|")), WS });
+    const T_ASTERISK = C.seq(.{ C.char('*'), not_char(cc("*%=|")), WS });
+    const T_SLASH = C.seq(.{ C.char('/'), not_char(cc("=")), WS });
+    const T_PERCENT = C.seq(.{ C.char('%'), not_char(cc("=")), WS });
+    const T_SHL = C.seq(.{ C.text("<<"), not_char(cc("=|")), WS });
+    const T_SHR = C.seq(.{ C.text(">>"), not_char(cc("=")), WS });
+    const T_AND = C.seq(.{ C.char('&'), not_char(cc("=")), WS });
+    const T_XOR = C.seq(.{ C.char('^'), not_char(cc("=")), WS });
+    const T_OR = C.seq(.{ C.char('|'), not_char(cc("|=")), WS });
+    const T_EQEQ = C.seq(.{ C.text("=="), WS });
+    const T_NEQ = C.seq(.{ C.text("!="), WS });
+    const T_LTE = C.seq(.{ C.text("<="), WS });
+    const T_GTE = C.seq(.{ C.text(">="), WS });
+    const T_LT = C.seq(.{ C.char('<'), not_char(cc("<=")), WS });
+    const T_GT = C.seq(.{ C.char('>'), not_char(cc(">=")), WS });
+    const T_BANG = C.seq(.{ C.char('!'), not_char(cc("=")), WS });
+    const T_TILDE = C.seq(.{ C.char('~'), WS });
+    const T_MINUSP = C.seq(.{ C.text("-%"), not_char(cc("=")), WS });
+    const T_AMP = C.seq(.{ C.char('&'), not_char(cc("=")), WS });
+
     const ident_boundary = C.notLookahead(alnum_us); // next is not [A-Za-z0-9_]
     const reserved_exact = C.anyOf(.{
         C.seq(.{ C.text("fn"), ident_boundary }),
@@ -173,67 +188,59 @@ pub const ZigMiniGrammar = struct {
         C.notLookahead(reserved_exact),
         alpha,
         C.zeroOrMany(alnum_us),
+        WS,
         C.ret,
     });
-    // Builtin identifiers: @foo
-    const at_sign = C.char('@');
-    pub const BuiltinIdentifier = C.seq(.{ at_sign, alpha, C.zeroOrMany(alnum_us), C.ret });
-    pub const Integer = C.seq(.{ C.several(digit), C.ret });
 
-    // Type expressions (expanded):
-    //   TypeCore <- TypePrefix* TypeAtom
-    //   ErrorUnionType <- TypeCore (WS '!' WS TypeExpr)?
-    //   TypeExpr <- ErrorUnionType
-    //   TypeAtom <- Identifier / ContainerExpr / ErrorSetDecl
-    //   TypePrefix <- '?' / '*' / ('[' WS Expr WS ']' | '[' WS ']' )
-    // Error set declaration: error { A, B, ... }
+    const at_sign = C.char('@');
+
+    pub const BuiltinIdentifier = C.seq(.{ at_sign, alpha, C.zeroOrMany(alnum_us), C.ret });
+    pub const Integer = C.seq(.{ C.several(digit), WS, C.ret });
+
     pub const IdentifierList = C.seq(.{
         C.Call(.Identifier),
-        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.Identifier) })),
-        C.maybe(C.seq(.{ WS, comma })),
+        C.zeroOrMany(C.seq(.{ comma, C.Call(.Identifier) })),
+        C.maybe(comma),
         C.ret,
     });
-    pub const ErrorSetDecl = C.seq(.{ kwt_error_ws, lbrace, WS, C.maybe(C.Call(.IdentifierList)), WS, rbrace, C.ret });
+
+    pub const ErrorSetDecl = C.seq(.{ kwt_error, lbrace, C.maybe(C.Call(.IdentifierList)), rbrace, C.ret });
     pub const TypeAtom = C.anyOf(.{ C.Call(.Identifier), C.Call(.ContainerExpr), C.Call(.ErrorSetDecl) }) ++ C.ret;
 
-    const SliceStart = C.seq(.{ lbracket, WS, rbracket });
-    const ArrayStart = C.seq(.{ lbracket, WS, C.Call(.Expr), WS, rbracket });
+    const SliceStart = C.seq(.{ lbracket, rbracket });
+    const ArrayStart = C.seq(.{ lbracket, C.Call(.Expr), rbracket });
     const BrackType = C.anyOf(.{ ArrayStart, SliceStart });
 
     const TypePrefix = C.anyOf(.{ C.char('?'), star: {
-            const s = C.char('*');
-            break :star s;
-        }, BrackType });
+        const s = C.char('*');
+        break :star s;
+    }, BrackType });
 
     pub const TypeCore = C.seq(.{ C.zeroOrMany(TypePrefix), C.Call(.TypeAtom), C.ret });
     pub const ErrorUnionType = C.seq(.{
         C.Call(.TypeCore),
-        C.maybe(C.seq(.{ WS, bang, WS, C.Call(.TypeExpr) })),
+        C.maybe(C.seq(.{ bang, C.Call(.TypeExpr) })),
         C.ret,
     });
     pub const TypeExpr = C.seq(.{ C.Call(.ErrorUnionType), C.ret });
 
-    // String and char literals (simplified IEC escapes)
     const str_escape = C.seq(.{ backslash, C.charclass("nr\"t\\") });
     const str_plain = C.charclass(.{ ascii[' ' .. '!' + 1], ascii['#' .. '[' + 1], ascii[']' .. '~' + 1] });
-    pub const StringLiteral = C.seq(.{ C.char('"'), C.zeroOrMany(C.anyOf(.{ str_escape, str_plain })), C.char('"'), C.ret });
+    pub const StringLiteral = C.seq(.{ C.char('"'), C.zeroOrMany(C.anyOf(.{ str_escape, str_plain })), C.char('"'), WS, C.ret });
 
     const chr_escape = C.seq(.{ backslash, C.charclass("nr't\\\"") });
     const chr_plain = C.charclass(.{ ascii[' ' .. '&' + 1], ascii['(' .. '[' + 1], ascii[']' .. '~' + 1] });
-    pub const CharLiteral = C.seq(.{ C.char('\''), C.anyOf(.{ chr_escape, chr_plain }), C.char('\''), C.ret });
+    pub const CharLiteral = C.seq(.{ C.char('\''), C.anyOf(.{ chr_escape, chr_plain }), C.char('\''), WS, C.ret });
 
-    // ABI/Visibility helpers
-    pub const LinkSection = C.seq(.{ kw_linksection, WS, lparen, WS, C.Call(.Expr), WS, rparen, C.ret });
-    pub const AddrSpace = C.seq(.{ kw_addrspace, WS, lparen, WS, C.Call(.Expr), WS, rparen, C.ret });
-    pub const CallConv = C.seq(.{ kw_callconv, WS, lparen, WS, C.Call(.Expr), WS, rparen, C.ret });
-    pub const ByteAlign = C.seq(.{ C.text("align"), WS, lparen, WS, C.Call(.Expr), WS, rparen, C.ret });
+    pub const LinkSection = C.seq(.{ kw_linksection, lparen, C.Call(.Expr), rparen, C.ret });
+    pub const AddrSpace = C.seq(.{ kw_addrspace, lparen, C.Call(.Expr), rparen, C.ret });
+    pub const CallConv = C.seq(.{ kw_callconv, lparen, C.Call(.Expr), rparen, C.ret });
+    pub const ByteAlign = C.seq(.{ kw_align, lparen, C.Call(.Expr), rparen, C.ret });
 
-    // Primary <- Block / IfExpr / WhileExprE / ForExprE / SwitchExpr / ReturnExpr / BreakExpr / ContinueExpr / ContainerExpr / CallExpr / Integer / StringLiteral / CharLiteral / Identifier
-    // Grouped expression
-    pub const GroupedExpr = C.seq(.{ lparen, WS, C.Call(.Expr), WS, rparen, C.ret });
-    // Error literal: error.Foo
+    pub const GroupedExpr = C.seq(.{ lparen, C.Call(.Expr), rparen, C.ret });
+
     pub const ErrorLiteral = C.seq(.{ kwt_error, dot, C.Call(.Identifier), C.ret });
-    // Enum/union dot literal (contextually typed): .Name
+
     pub const DotIdentifier = C.seq(.{ dot, C.Call(.Identifier), C.ret });
 
     pub const Primary = C.anyOf(.{
@@ -256,397 +263,307 @@ pub const ZigMiniGrammar = struct {
         C.Call(.Identifier),
     }) ++ C.ret;
 
-    // Suffix ops and call/index/member chains
-    // Call: '(' ExprList? ')'
     pub const FnCallArguments = C.seq(.{ T_LPAREN, C.maybe(C.Call(.ExprList)), T_RPAREN, C.ret });
-    // Member access: '.' Identifier
+
     pub const MemberAccess = C.seq(.{ dot, C.Call(.Identifier), C.ret });
-    // Deref: '.*'
-    pub const DotAsterisk = C.seq(.{ dot_asterisk, C.ret });
-    // Optional unwrap: '.?'
-    pub const DotQuestion = C.seq(.{ dot_question, C.ret });
-    // Index or slice: '[' Expr ('..' (Expr? (':' Expr)? )?)? ']'
-    const dots2 = C.text("..");
+
+    const dots2 = C.text("..") ++ WS;
     pub const IndexOrSlice = C.seq(.{
         T_LBRACKET,
         C.Call(.Expr),
         C.maybe(C.seq(.{
-            WS,
             dots2,
             C.maybe(C.seq(.{
-                WS,
                 C.maybe(C.Call(.Expr)),
-                C.maybe(C.seq(.{ WS, colon, WS, C.Call(.Expr) })),
+                C.maybe(C.seq(.{ colon, C.Call(.Expr) })),
             })),
         })),
         T_RBRACKET,
         C.ret,
     });
-    // One suffix piece (allow optional WS between base and suffix token)
+
     pub const OneSuffix = C.anyOf(.{
-        C.seq(.{ WS, C.Call(.FnCallArguments) }),
-        C.seq(.{ WS, C.Call(.IndexOrSlice) }),
-        C.seq(.{ WS, C.Call(.DotAsterisk) }),
-        C.seq(.{ WS, C.Call(.DotQuestion) }),
-        C.seq(.{ WS, C.Call(.MemberAccess) }),
+        C.Call(.FnCallArguments),
+        C.Call(.IndexOrSlice),
+        dot_asterisk,
+        dot_question,
+        C.Call(.MemberAccess),
     }) ++ C.ret;
-    // SuffixExpr <- Primary (SuffixOp / FnCallArguments)*
+
     pub const SuffixExpr = C.seq(.{
         C.Call(.Primary),
         C.zeroOrMany(C.Call(.OneSuffix)),
         C.ret,
     });
 
-    // Expression forms
-    pub const ReturnExpr = C.seq(.{ kw_return, WS, C.maybe(C.Call(.Expr)), C.ret });
+    pub const ReturnExpr = C.seq(.{ kw_return, C.maybe(C.Call(.Expr)), C.ret });
 
-    // Labels
-    pub const BreakLabel = C.seq(.{ colon, WS, C.Call(.Identifier), C.ret });
-    pub const BlockLabel = C.seq(.{ C.Call(.Identifier), WS, colon, C.ret });
+    pub const BreakLabel = C.seq(.{ colon, C.Call(.Identifier), C.ret });
+    pub const BlockLabel = C.seq(.{ C.Call(.Identifier), colon, C.ret });
 
-    // break may have optional label and optional value expression
     pub const BreakExpr = C.seq(.{
         kw_break,
-        WS,
         C.maybe(C.anyOf(.{
-            C.seq(.{ C.Call(.BreakLabel), C.maybe(C.seq(.{ WS, C.Call(.Expr) })) }),
+            C.seq(.{ C.Call(.BreakLabel), C.maybe(C.Call(.Expr)) }),
             C.Call(.Expr),
         })),
         C.ret,
     });
-    // continue may have optional label, no value
-    pub const ContinueExpr = C.seq(.{ kw_continue, WS, C.maybe(C.Call(.BreakLabel)), C.ret });
+
+    pub const ContinueExpr = C.seq(.{ kw_continue, C.maybe(C.Call(.BreakLabel)), C.ret });
 
     pub const IfExpr = C.seq(.{
-        kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
-        C.maybe(C.Call(.PtrPayload)), WS,
-        C.Call(.Expr),
-        C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Expr) })),
-        C.ret,
+        kw_if,                        lparen,        C.Call(.Expr),                                                             rparen,
+        C.maybe(C.Call(.PtrPayload)), C.Call(.Expr), C.maybe(C.seq(.{ kw_else, C.maybe(C.Call(.PtrPayload)), C.Call(.Expr) })), C.ret,
     });
 
-    // WhileContinueExpr <- ':' '(' AssignExpr ')'
-    pub const WhileContinueExpr = C.seq(.{ colon, WS, lparen, WS, C.Call(.AssignExpr), WS, rparen, C.ret });
+    pub const WhileContinueExpr = C.seq(.{ colon, lparen, C.Call(.AssignExpr), rparen, C.ret });
 
     pub const WhileExprE = C.seq(.{
-        kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
-        C.maybe(C.Call(.PtrPayload)),
-        C.maybe(C.Call(.WhileContinueExpr)), WS,
-        C.Call(.Block),
-        C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Expr) })),
+        kw_while,                     lparen,                              C.Call(.Expr),  rparen,
+        C.maybe(C.Call(.PtrPayload)), C.maybe(C.Call(.WhileContinueExpr)), C.Call(.Block), C.maybe(C.seq(.{ kw_else, C.maybe(C.Call(.PtrPayload)), C.Call(.Expr) })),
         C.ret,
     });
 
-    // ForItem <- Expr ('..' Expr?)?
     pub const ForItem = C.seq(.{
         C.Call(.Expr),
-        C.maybe(C.seq(.{ WS, C.text(".."), C.maybe(C.seq(.{ WS, C.Call(.Expr) })) })),
+        C.maybe(C.seq(.{ dots2, C.maybe(C.Call(.Expr)) })),
         C.ret,
     });
-    // ForArgumentsList <- ForItem (',' ForItem)* ','?
+
     pub const ForArgumentsList = C.seq(.{
         C.Call(.ForItem),
-        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.ForItem) })),
-        C.maybe(C.seq(.{ WS, comma })),
+        C.zeroOrMany(C.seq(.{ comma, C.Call(.ForItem) })),
+        C.maybe(comma),
         C.ret,
     });
 
     pub const ForExprE = C.seq(.{
-        kw_for, WS, lparen, WS, C.Call(.ForArgumentsList), WS, rparen, WS,
-        C.maybe(C.Call(.PtrListPayload)), WS,
-        C.Call(.Block),
-        C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrListPayload) })), WS, C.Call(.Expr) })),
-        C.ret,
+        kw_for,                           lparen,         C.Call(.ForArgumentsList),                                                     rparen,
+        C.maybe(C.Call(.PtrListPayload)), C.Call(.Block), C.maybe(C.seq(.{ kw_else, C.maybe(C.Call(.PtrListPayload)), C.Call(.Expr) })), C.ret,
     });
 
-    // Minimal switch expression
-    // SwitchItem <- Expr ('...' Expr)?
-    const dots3 = C.text("...");
+    const dots3 = C.text("...") ++ WS;
     pub const SwitchCaseItem = C.seq(.{
         C.Call(.Expr),
-        C.maybe(C.seq(.{ WS, dots3, WS, C.Call(.Expr) })),
+        C.maybe(C.seq(.{ dots3, C.Call(.Expr) })),
         C.ret,
     });
+
     pub const PtrPayload = C.seq(.{
-        pipe_ch, WS, C.maybe(star_ch), WS, C.Call(.Identifier), WS, pipe_ch, C.ret,
+        pipe_ch, C.maybe(star_ch), C.Call(.Identifier), pipe_ch, C.ret,
     });
     pub const PtrIndexPayload = C.seq(.{
-        pipe_ch, WS, C.maybe(star_ch), WS, C.Call(.Identifier),
-        C.maybe(C.seq(.{ WS, comma, WS, C.Call(.Identifier) })), WS, pipe_ch, C.ret,
+        pipe_ch,                                         C.maybe(star_ch), C.Call(.Identifier),
+        C.maybe(C.seq(.{ comma, C.Call(.Identifier) })), pipe_ch,          C.ret,
     });
+
     pub const PtrListPayload = C.seq(.{
-        pipe_ch, WS, C.maybe(star_ch), WS, C.Call(.Identifier),
-        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.maybe(star_ch), WS, C.Call(.Identifier) })),
-        C.maybe(C.seq(.{ WS, comma })), WS, pipe_ch, C.ret,
+        pipe_ch,                                                                C.maybe(star_ch), C.Call(.Identifier),
+        C.zeroOrMany(C.seq(.{ comma, C.maybe(star_ch), C.Call(.Identifier) })), C.maybe(comma),   pipe_ch,
+        C.ret,
     });
-    // Non-pointer payload: |name|
-    pub const Payload = C.seq(.{ pipe_ch, WS, C.Call(.Identifier), WS, pipe_ch, C.ret });
 
-    pub const SwitchProngElse = C.seq(.{ kw_else, WS, C.text("=>"), C.maybe(C.seq(.{ WS, C.Call(.PtrIndexPayload) })), WS, C.Call(.Expr), C.ret });
+    pub const Payload = C.seq(.{ pipe_ch, C.Call(.Identifier), pipe_ch, C.ret });
+
+    pub const SwitchProngElse = C.seq(.{ kw_else, T_EQUALRARROW, C.maybe(C.Call(.PtrIndexPayload)), C.Call(.Expr), C.ret });
     pub const SwitchProngCase = C.seq(.{
-            C.maybe(kwt_inline),
-            C.Call(.SwitchCaseItem),
-            C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.SwitchCaseItem) })),
-            WS, C.text("=>"), C.maybe(C.seq(.{ WS, C.Call(.PtrIndexPayload) })), WS,
-            C.Call(.Expr),
-            C.ret,
-        });
-    pub const SwitchProng = C.anyOf(.{ C.Call(.SwitchProngElse), C.Call(.SwitchProngCase) }) ++ C.ret;
-    pub const SwitchBody = C.seq(.{
-        lbrace, WS,
-        C.maybe(C.seq(.{ C.Call(.SwitchProng), C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.SwitchProng) })) })),
-        WS, rbrace,
-        C.ret,
-    });
-    pub const SwitchExpr = C.seq(.{
-        kw_switch, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
-        C.Call(.SwitchBody),
+        C.maybe(kwt_inline),
+        C.Call(.SwitchCaseItem),
+        C.zeroOrMany(C.seq(.{ comma, C.Call(.SwitchCaseItem) })),
+        T_EQUALRARROW,
+        C.maybe(C.Call(.PtrIndexPayload)),
+        C.Call(.Expr),
         C.ret,
     });
 
-    // Container declarations as expressions (types):
-    // Struct/Union: typed fields; Enum: bare names
-    pub const FieldDecl = C.seq(.{
-        C.Call(.Identifier), WS, colon, WS, C.Call(.TypeExpr), C.ret,
+    pub const SwitchProng = C.anyOf(.{ C.Call(.SwitchProngElse), C.Call(.SwitchProngCase) }) ++ C.ret;
+
+    pub const SwitchBody = C.seq(.{
+        lbrace,
+        C.maybe(C.seq(.{ C.Call(.SwitchProng), C.zeroOrMany(C.seq(.{ comma, C.Call(.SwitchProng) })) })),
+        rbrace,
+        C.ret,
     });
+
+    pub const SwitchExpr = C.seq(.{
+        kw_switch,           lparen, C.Call(.Expr), rparen, WS,
+        C.Call(.SwitchBody), C.ret,
+    });
+
+    pub const FieldDecl = C.seq(.{ C.Call(.Identifier), T_COLON, C.Call(.TypeExpr), C.ret });
     pub const FieldList = C.seq(.{
         C.Call(.FieldDecl),
-        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.FieldDecl) })),
-        C.maybe(C.seq(.{ WS, comma })),
+        C.zeroOrMany(C.seq(.{ comma, C.Call(.FieldDecl) })),
+        C.maybe(comma),
         C.ret,
     });
 
     pub const StructBody = C.seq(.{
-        lbrace, WS, C.maybe(C.Call(.FieldList)), WS, rbrace, C.ret,
+        lbrace, C.maybe(C.Call(.FieldList)), rbrace, C.ret,
     });
+
     pub const UnionBody = StructBody;
 
     pub const EnumFields = C.seq(.{
         C.Call(.Identifier),
-        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.Identifier) })),
-        C.maybe(C.seq(.{ WS, comma })),
+        C.zeroOrMany(C.seq(.{ comma, C.Call(.Identifier) })),
+        C.maybe(comma),
         C.ret,
     });
-    pub const EnumBody = C.seq(.{ lbrace, WS, C.maybe(C.Call(.EnumFields)), WS, rbrace, C.ret });
+
+    pub const EnumBody = C.seq(.{ lbrace, C.maybe(C.Call(.EnumFields)), rbrace, C.ret });
 
     pub const ContainerExpr = C.anyOf(.{
-        C.seq(.{ kw_struct, WS, C.Call(.StructBody) }),
-        C.seq(.{ kw_union, WS, C.Call(.UnionBody) }),
-        C.seq(.{ kw_enum, WS, C.Call(.EnumBody) }),
+        C.seq(.{ kw_struct, C.Call(.StructBody) }),
+        C.seq(.{ kw_union, C.Call(.UnionBody) }),
+        C.seq(.{ kw_enum, C.Call(.EnumBody) }),
     }) ++ C.ret;
 
-    // PrefixExpr <- ( '!' / '-' / '~' / '-%' / '&' / 'try' )* Primary
-    const uop_bang = C.char('!');
-    const uop_minus = C.char('-');
-    const uop_tilde = C.char('~');
-    const uop_minusp = C.text("-%");
-    const uop_amp = C.char('&');
     pub const PrefixExpr = C.seq(.{
-        C.zeroOrMany(C.anyOf(.{ uop_bang, uop_minus, uop_tilde, uop_minusp, uop_amp, kwt_try })),
+        C.zeroOrMany(C.anyOf(.{ T_BANG, T_MINUS, T_TILDE, T_MINUSP, T_AMP, kwt_try })),
         C.Call(.SuffixExpr),
         C.ret,
     });
 
-    // MultiplyExpr <- PrefixExpr (WS ('*' '/' '%') WS PrefixExpr)*
-    const mulop = C.charclass("*/%");
     pub const MultiplyExpr = C.seq(.{
         C.Call(.PrefixExpr),
-        C.zeroOrMany(C.seq(.{ WS, mulop, WS, C.Call(.PrefixExpr) })),
+        C.zeroOrMany(C.seq(.{ C.anyOf(.{ T_ASTERISK, T_SLASH, T_PERCENT }), C.Call(.PrefixExpr) })),
         C.ret,
     });
 
-    // AddExpr <- MultiplyExpr (WS ('+' '-') WS MultiplyExpr)*
-    const addop = C.charclass("+-");
     pub const AddExpr = C.seq(.{
         C.Call(.MultiplyExpr),
-        C.zeroOrMany(C.seq(.{ WS, addop, WS, C.Call(.MultiplyExpr) })),
+        C.zeroOrMany(C.seq(.{ C.anyOf(.{ T_PLUS, T_MINUS }), C.Call(.MultiplyExpr) })),
         C.ret,
     });
 
-    // BitShiftExpr <- AddExpr (WS ('<<' / '>>') WS AddExpr)*
-    const shl = C.text("<<");
-    const shr = C.text(">>");
     pub const BitShiftExpr = C.seq(.{
         C.Call(.AddExpr),
-        C.zeroOrMany(C.seq(.{ WS, C.anyOf(.{ shl, shr }), WS, C.Call(.AddExpr) })),
+        C.zeroOrMany(C.seq(.{ C.anyOf(.{ T_SHL, T_SHR }), C.Call(.AddExpr) })),
         C.ret,
     });
 
-    // BitwiseExpr <- BitShiftExpr (WS ( ('&' / '^' / '|' / 'orelse') / ('catch' Payload?) ) WS BitShiftExpr)*
-    const bop_and = C.char('&');
-    const bop_xor = C.char('^');
-    const bop_or = C.char('|');
     pub const BitwiseExpr = C.seq(.{
         C.Call(.BitShiftExpr),
         C.zeroOrMany(C.seq(.{
-            WS,
             C.anyOf(.{
-                bop_and,
-                bop_xor,
-                bop_or,
+                T_AND,
+                T_XOR,
+                T_OR,
                 kwt_orelse,
                 C.seq(.{ kwt_catch, C.maybe(C.Call(.Payload)) }),
             }),
-            WS,
             C.Call(.BitShiftExpr),
         })),
         C.ret,
     });
 
-    // CompareExpr <- BitwiseExpr (WS ('==' '!=' '<' '>' '<=' '>=') WS BitwiseExpr)?
-    const op_eqeq = C.text("==");
-    const op_neq = C.text("!=");
-    const op_lt = C.char('<');
-    const op_gt = C.char('>');
-    const op_lte = C.text("<=");
-    const op_gte = C.text(">=");
     pub const CompareExpr = C.seq(.{
         C.Call(.BitwiseExpr),
-        C.maybe(C.seq(.{ WS, C.anyOf(.{ op_eqeq, op_neq, op_lte, op_gte, op_lt, op_gt }), WS, C.Call(.BitwiseExpr) })),
+        C.maybe(C.seq(.{ C.anyOf(.{ T_EQEQ, T_NEQ, T_LTE, T_GTE, T_LT, T_GT }), C.Call(.BitwiseExpr) })),
         C.ret,
     });
 
-    // BoolAndExpr <- CompareExpr (WS 'and' WS CompareExpr)*
     pub const BoolAndExpr = C.seq(.{
         C.Call(.CompareExpr),
-        C.zeroOrMany(C.seq(.{ WS, kwt_and, WS, C.Call(.CompareExpr) })),
+        C.zeroOrMany(C.seq(.{ kwt_and, C.Call(.CompareExpr) })),
         C.ret,
     });
 
-    // BoolOrExpr <- BoolAndExpr (WS 'or' WS BoolAndExpr)*
     pub const BoolOrExpr = C.seq(.{
         C.Call(.BoolAndExpr),
-        C.zeroOrMany(C.seq(.{ WS, kwt_or, WS, C.Call(.BoolAndExpr) })),
+        C.zeroOrMany(C.seq(.{ kwt_or, C.Call(.BoolAndExpr) })),
         C.ret,
     });
 
-    // Expr <- BoolOrExpr
     pub const Expr = C.seq(.{ C.Call(.BoolOrExpr), C.ret });
 
-    // ExprList <- Expr (WS? ',' WS? Expr)*
     pub const ExprList = C.seq(.{
         C.Call(.Expr),
         C.zeroOrMany(C.seq(.{ T_COMMA, C.Call(.Expr) })),
         C.ret,
     });
 
-    // CallExpr <- (Identifier / BuiltinIdentifier) WS? '(' WS? ExprList? WS? ')'
     pub const CallExpr = C.seq(.{
         C.anyOf(.{ C.Call(.Identifier), C.Call(.BuiltinIdentifier) }),
-        WS,
         lparen,
-        WS,
         C.maybe(C.Call(.ExprList)),
-        WS,
         rparen,
         C.ret,
     });
 
-    // Param <- Identifier WS? ':' WS? TypeExpr
-    pub const Param = C.seq(.{
-        C.Call(.Identifier),
-        WS,
-        colon,
-        WS,
-        C.Call(.TypeExpr),
-        C.ret,
-    });
+    pub const Param = C.seq(.{ C.Call(.Identifier), T_COLON, C.Call(.TypeExpr), C.ret });
 
-    // ParamList <- Param (WS? ',' WS? Param)*
     pub const ParamList = C.seq(.{
         C.Call(.Param),
         C.zeroOrMany(C.seq(.{ T_COMMA, C.Call(.Param) })),
         C.ret,
     });
 
-    // ReturnStmt <- 'return' (WS Expr)?
-    pub const ReturnStmt = C.seq(.{
-        kw_return,
-        WS,
-        C.maybe(C.Call(.Expr)),
-        C.ret,
-    });
+    pub const ReturnStmt = C.seq(.{ kw_return, C.maybe(C.Call(.Expr)), C.ret });
 
-    // VarDecl <- ('const' / 'var') WS Identifier (WS? '=' WS? Expr)?
     pub const VarDecl = C.seq(.{
         C.anyOf(.{ kw_const, kw_var }),
-        WS,
         C.Call(.Identifier),
-        C.maybe(C.seq(.{ WS, equal, WS, C.Call(.Expr) })),
+        C.maybe(C.seq(.{ T_EQUAL, C.Call(.Expr) })),
         C.ret,
     });
 
-    // AssignExpr (simplified): either Identifier '=' Expr, or plain Expr
     pub const AssignExpr = C.anyOf(.{
-        C.seq(.{ C.Call(.Identifier), WS, equal, WS, C.Call(.Expr) }),
+        C.seq(.{ C.Call(.Identifier), T_EQUAL, C.Call(.Expr) }),
         C.Call(.Expr),
     }) ++ C.ret;
 
-    // Control flow statements (block bodies only for now)
     pub const IfStmt = C.seq(.{
-        kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
-        C.Call(.Block),
-        C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Block) })),
-        C.ret,
+        kw_if,          lparen,                                       C.Call(.Expr), rparen,
+        C.Call(.Block), C.maybe(C.seq(.{ kw_else, C.Call(.Block) })), C.ret,
     });
 
     pub const WhileStmt = C.seq(.{
-        kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
-        C.Call(.Block),
-        C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Block) })),
-        C.ret,
+        kw_while,       lparen,                                       C.Call(.Expr), rparen,
+        C.Call(.Block), C.maybe(C.seq(.{ kw_else, C.Call(.Block) })), C.ret,
     });
 
     pub const ForStmt = C.seq(.{
-        kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
-        C.Call(.Block),
-        C.ret,
+        kw_for,         lparen, C.Call(.Expr), rparen,
+        C.Call(.Block), C.ret,
     });
 
-    // Harmonized statement structure (subset of official grammar):
-    // BlockExprStatement <- BlockExpr / AssignExpr ';'
-    // VarDeclExprStatement <- VarDecl ';' / Expr ';'
-    // Statement <- IfStatement / WhileStatement / ForStatement / SwitchExpr / VarDeclExprStatement / BlockExprStatement
-
-    pub const BlockExpr = C.seq(.{ C.maybe(C.Call(.BlockLabel)), WS, C.Call(.Block), C.ret });
+    pub const BlockExpr = C.seq(.{ C.maybe(C.Call(.BlockLabel)), C.Call(.Block), C.ret });
     pub const BlockExprStatement = C.anyOf(.{
         C.Call(.BlockExpr),
-        C.seq(.{ C.Call(.AssignExpr), WS, semicolon }),
+        C.seq(.{ C.Call(.AssignExpr), semicolon }),
     }) ++ C.ret;
 
     pub const VarDeclExprStatement = C.anyOf(.{
-        C.seq(.{ C.Call(.VarDecl), WS, semicolon }),
-        C.seq(.{ C.Call(.Expr), WS, semicolon }),
+        C.seq(.{ C.Call(.VarDecl), semicolon }),
+        C.seq(.{ C.Call(.Expr), semicolon }),
     }) ++ C.ret;
 
-    // If/While/For statements with block or assign branches (subset)
     pub const IfStatement = C.anyOf(.{
-        // Block branch (optional else Statement)
-        C.seq(.{ kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), WS, C.Call(.BlockExpr), C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) })) }),
-        // Assign branch (must end with ';' or else Statement)
-        C.seq(.{ kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), WS, C.Call(.AssignExpr), C.anyOf(.{ C.seq(.{ WS, semicolon }), C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) }) }) }),
+        C.seq(.{ kw_if, lparen, C.Call(.Expr), rparen, C.maybe(C.Call(.PtrPayload)), C.Call(.BlockExpr), C.maybe(C.seq(.{ kw_else, C.maybe(C.Call(.PtrPayload)), C.Call(.Statement) })) }),
+        C.seq(.{ kw_if, lparen, C.Call(.Expr), rparen, C.maybe(C.Call(.PtrPayload)), C.Call(.AssignExpr), C.anyOf(.{ semicolon, C.seq(.{ kw_else, C.maybe(C.Call(.PtrPayload)), C.Call(.Statement) }) }) }),
     }) ++ C.ret;
 
     pub const WhileStatement = C.anyOf(.{
-        C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), C.maybe(C.Call(.WhileContinueExpr)), WS, C.Call(.BlockExpr), C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) })) }),
-        C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), C.maybe(C.Call(.WhileContinueExpr)), WS, C.Call(.AssignExpr), C.anyOf(.{ C.seq(.{ WS, semicolon }), C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) }) }) }),
+        C.seq(.{ kw_while, lparen, C.Call(.Expr), rparen, C.maybe(C.Call(.PtrPayload)), C.maybe(C.Call(.WhileContinueExpr)), C.Call(.BlockExpr), C.maybe(C.seq(.{ kw_else, C.maybe(C.Call(.PtrPayload)), C.Call(.Statement) })) }),
+        C.seq(.{ kw_while, lparen, C.Call(.Expr), rparen, C.maybe(C.Call(.PtrPayload)), C.maybe(C.Call(.WhileContinueExpr)), C.Call(.AssignExpr), C.anyOf(.{ semicolon, C.seq(.{ kw_else, C.maybe(C.Call(.PtrPayload)), C.Call(.Statement) }) }) }),
     }) ++ C.ret;
 
-    // LabeledWhileStatement <- BlockLabel? WhileStatement
-    pub const LabeledWhileStatement = C.seq(.{ C.maybe(C.Call(.BlockLabel)), WS, C.Call(.WhileStatement), C.ret });
+    pub const LabeledWhileStatement = C.seq(.{ C.maybe(C.Call(.BlockLabel)), C.Call(.WhileStatement), C.ret });
 
     pub const ForStatement = C.anyOf(.{
-        C.seq(.{ kw_for, WS, lparen, WS, C.Call(.ForArgumentsList), WS, rparen, WS, C.maybe(C.Call(.PtrListPayload)), WS, C.Call(.BlockExpr) }),
-        C.seq(.{ kw_for, WS, lparen, WS, C.Call(.ForArgumentsList), WS, rparen, WS, C.maybe(C.Call(.PtrListPayload)), WS, C.Call(.AssignExpr), WS, semicolon }),
+        C.seq(.{ kw_for, lparen, C.Call(.ForArgumentsList), rparen, C.maybe(C.Call(.PtrListPayload)), C.Call(.BlockExpr) }),
+        C.seq(.{ kw_for, lparen, C.Call(.ForArgumentsList), rparen, C.maybe(C.Call(.PtrListPayload)), C.Call(.AssignExpr), semicolon }),
     }) ++ C.ret;
-    // LabeledForStatement <- BlockLabel? ForStatement
-    pub const LabeledForStatement = C.seq(.{ C.maybe(C.Call(.BlockLabel)), WS, C.Call(.ForStatement), C.ret });
 
-    // Defer/errdefer and suspend/nosuspend
-    pub const DeferStatement = C.seq(.{ kw_defer, WS, C.Call(.BlockExprStatement), C.ret });
-    pub const ErrDeferStatement = C.seq(.{ kw_errdefer, C.maybe(C.seq(.{ WS, C.Call(.Payload) })), WS, C.Call(.BlockExprStatement), C.ret });
-    pub const NoSuspendStatement = C.seq(.{ kw_nosuspend, WS, C.Call(.BlockExprStatement), C.ret });
-    pub const SuspendStatement = C.seq(.{ kw_suspend, WS, C.Call(.BlockExprStatement), C.ret });
+    pub const LabeledForStatement = C.seq(.{ C.maybe(C.Call(.BlockLabel)), C.Call(.ForStatement), C.ret });
+
+    pub const DeferStatement = C.seq(.{ kw_defer, C.Call(.BlockExprStatement), C.ret });
+    pub const ErrDeferStatement = C.seq(.{ kw_errdefer, C.maybe(C.Call(.Payload)), C.Call(.BlockExprStatement), C.ret });
+    pub const NoSuspendStatement = C.seq(.{ kw_nosuspend, C.Call(.BlockExprStatement), C.ret });
+    pub const SuspendStatement = C.seq(.{ kw_suspend, C.Call(.BlockExprStatement), C.ret });
 
     pub const Statement = C.anyOf(.{
         C.Call(.IfStatement),
@@ -661,94 +578,76 @@ pub const ZigMiniGrammar = struct {
         C.Call(.BlockExprStatement),
     }) ++ C.ret;
 
-    // Block <- '{' WS Statement* '}'
     pub const Block = C.seq(.{
         T_LBRACE,
-        C.zeroOrMany(C.seq(.{ C.Call(.Statement), WS })),
+        C.zeroOrMany(C.Call(.Statement)),
         T_RBRACE,
         C.ret,
     });
 
-    // FnDecl modifiers: pub? (export | extern StringLiteral? | inline | noinline)?
-    // Fn tail attrs: ByteAlign? AddrSpace? LinkSection? CallConv?
-    // Return type is required; error unions handled inside TypeExpr.
     pub const FnDecl = C.seq(.{
-        C.maybe(C.seq(.{ kw_pub, WS })),
+        C.maybe(kw_pub),
         C.maybe(C.anyOf(.{
-            C.seq(.{ kw_export, WS }),
-            C.seq(.{ kw_extern, C.maybe(C.seq(.{ WS, C.Call(.StringLiteral) })), WS }),
-            C.seq(.{ kw_inline, WS }),
-            C.seq(.{ kw_noinline, WS }),
+            kw_export,
+            C.seq(.{ kw_extern, C.maybe(C.Call(.StringLiteral)) }),
+            kw_inline,
+            kw_noinline,
         })),
         kw_fn,
-        WS,
         C.Call(.Identifier),
-        WS,
         lparen,
-        WS,
         C.maybe(C.Call(.ParamList)),
-        WS,
         rparen,
-        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.ByteAlign)) })),
-        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.AddrSpace)) })),
-        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.LinkSection)) })),
-        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.CallConv)) })),
-        WS,
+        C.maybe(C.Call(.ByteAlign)),
+        C.maybe(C.Call(.AddrSpace)),
+        C.maybe(C.Call(.LinkSection)),
+        C.maybe(C.Call(.CallConv)),
         C.maybe(bang),
         C.Call(.TypeExpr),
-        WS,
         C.Call(.Block),
         C.ret,
     });
 
-    // VarDeclProto: ('const'|'var') Identifier (':' TypeExpr)? ByteAlign? AddrSpace? LinkSection?
     pub const VarDeclProto = C.seq(.{
         C.anyOf(.{ kw_const, kw_var }),
-        WS,
         C.Call(.Identifier),
-        C.maybe(C.seq(.{ WS, colon, WS, C.Call(.TypeExpr) })),
-        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.ByteAlign)) })),
-        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.AddrSpace)) })),
-        C.maybe(C.seq(.{ WS, C.maybe(C.Call(.LinkSection)) })),
+        C.maybe(C.seq(.{ colon, C.Call(.TypeExpr) })),
+        C.maybe(C.Call(.ByteAlign)),
+        C.maybe(C.Call(.AddrSpace)),
+        C.maybe(C.Call(.LinkSection)),
+
         C.ret,
     });
 
-    // GlobalVarDecl: optional initializer and semicolon
     pub const GlobalVarDecl = C.seq(.{
         C.Call(.VarDeclProto),
-        C.maybe(C.seq(.{ WS, equal, WS, C.Call(.Expr) })),
-        WS,
+        C.maybe(C.seq(.{ equal, C.Call(.Expr) })),
         semicolon,
         C.ret,
     });
 
-    // TopVarDecl: 'pub'? (export|extern StringLiteral?)? threadlocal? GlobalVarDecl
     pub const TopVarDecl = C.seq(.{
-        C.maybe(C.seq(.{ kw_pub, WS })),
+        C.maybe(kw_pub),
         C.maybe(C.anyOf(.{
-            C.seq(.{ kw_export, WS }),
-            C.seq(.{ kw_extern, C.maybe(C.seq(.{ WS, C.Call(.StringLiteral) })), WS }),
+            kw_export,
+            C.seq(.{ kw_extern, C.maybe(C.Call(.StringLiteral)) }),
         })),
-        C.maybe(C.seq(.{ kw_threadlocal, WS })),
+        C.maybe(kw_threadlocal),
         C.Call(.GlobalVarDecl),
         C.ret,
     });
 
-    // TestDecl and ComptimeDecl
     pub const TestDecl = C.seq(.{
         kw_test,
-        C.maybe(C.anyOf(.{ C.seq(.{ WS, C.Call(.StringLiteral) }), C.seq(.{ WS, C.Call(.Identifier) }) })),
-        WS,
+        C.maybe(C.anyOf(.{ C.Call(.StringLiteral), C.Call(.Identifier) })),
         C.Call(.Block),
         C.ret,
     });
-    pub const ComptimeDecl = C.seq(.{ kw_comptime, WS, C.Call(.Block), C.ret });
+    pub const ComptimeDecl = C.seq(.{ kw_comptime, C.Call(.Block), C.ret });
 
-    // start <- WS ((FnDecl / TopVarDecl / TestDecl / ComptimeDecl) WS)* WS EOF
     pub const start = C.seq(.{
         WS,
-        C.zeroOrMany(C.seq(.{ C.anyOf(.{ C.Call(.FnDecl), C.Call(.TopVarDecl), C.Call(.TestDecl), C.Call(.ComptimeDecl) }), WS })),
-        WS,
+        C.zeroOrMany(C.anyOf(.{ C.Call(.FnDecl), C.Call(.TopVarDecl), C.Call(.TestDecl), C.Call(.ComptimeDecl) })),
         C.eof,
         C.ok,
     });
