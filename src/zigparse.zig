@@ -75,6 +75,8 @@ pub const ZigMiniGrammar = struct {
     const semicolon = C.char(';');
     const equal = C.char('=');
     const bang = C.char('!');
+    const pipe_ch = C.char('|');
+    const star_ch = C.char('*');
     const backslash = C.char('\\');
 
     // Lexical rules
@@ -166,32 +168,48 @@ pub const ZigMiniGrammar = struct {
 
     pub const IfExpr = C.seq(.{
         kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
+        C.maybe(C.Call(.PtrPayload)), WS,
         C.Call(.Expr),
-        C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Expr) })),
+        C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Expr) })),
         C.ret,
     });
 
     pub const WhileExprE = C.seq(.{
         kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
+        C.maybe(C.Call(.PtrPayload)), WS,
         C.Call(.Block),
-        C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Expr) })),
+        C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Expr) })),
         C.ret,
     });
 
     pub const ForExprE = C.seq(.{
         kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
+        C.maybe(C.Call(.PtrListPayload)), WS,
         C.Call(.Block),
-        C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Expr) })),
+        C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrListPayload) })), WS, C.Call(.Expr) })),
         C.ret,
     });
 
     // Minimal switch expression
     pub const SwitchCaseItem = C.seq(.{ C.Call(.Expr), C.ret });
-    pub const SwitchProngElse = C.seq(.{ kw_else, WS, C.text("=>"), WS, C.Call(.Expr), C.ret });
+    pub const PtrPayload = C.seq(.{
+        pipe_ch, C.maybe(WS), C.maybe(star_ch), C.maybe(WS), C.Call(.Identifier), C.maybe(WS), pipe_ch, C.ret,
+    });
+    pub const PtrIndexPayload = C.seq(.{
+        pipe_ch, C.maybe(WS), C.maybe(star_ch), C.maybe(WS), C.Call(.Identifier),
+        C.maybe(C.seq(.{ C.maybe(WS), comma, C.maybe(WS), C.Call(.Identifier) })), C.maybe(WS), pipe_ch, C.ret,
+    });
+    pub const PtrListPayload = C.seq(.{
+        pipe_ch, C.maybe(WS), C.maybe(star_ch), C.maybe(WS), C.Call(.Identifier),
+        C.zeroOrMany(C.seq(.{ C.maybe(WS), comma, C.maybe(WS), C.maybe(star_ch), C.maybe(WS), C.Call(.Identifier) })),
+        C.maybe(C.seq(.{ C.maybe(WS), comma })), C.maybe(WS), pipe_ch, C.ret,
+    });
+
+    pub const SwitchProngElse = C.seq(.{ kw_else, WS, C.text("=>"), C.maybe(C.seq(.{ WS, C.Call(.PtrIndexPayload) })), WS, C.Call(.Expr), C.ret });
     pub const SwitchProngCase = C.seq(.{
             C.Call(.SwitchCaseItem),
             C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.SwitchCaseItem) })),
-            WS, C.text("=>"), WS,
+            WS, C.text("=>"), C.maybe(C.seq(.{ WS, C.Call(.PtrIndexPayload) })), WS,
             C.Call(.Expr),
             C.ret,
         });
@@ -357,19 +375,19 @@ pub const ZigMiniGrammar = struct {
     // If/While/For statements with block or assign branches (subset)
     pub const IfStatement = C.anyOf(.{
         // Block branch (optional else Statement)
-        C.seq(.{ kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.Call(.BlockExpr), C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Statement) })) }),
+        C.seq(.{ kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), WS, C.Call(.BlockExpr), C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) })) }),
         // Assign branch (must end with ';' or else Statement)
-        C.seq(.{ kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.Call(.AssignExpr), C.anyOf(.{ C.seq(.{ WS, semicolon }), C.seq(.{ WS, kw_else, WS, C.Call(.Statement) }) }) }),
+        C.seq(.{ kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), WS, C.Call(.AssignExpr), C.anyOf(.{ C.seq(.{ WS, semicolon }), C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) }) }) }),
     }) ++ C.ret;
 
     pub const WhileStatement = C.anyOf(.{
-        C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.Call(.BlockExpr), C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Statement) })) }),
-        C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.Call(.AssignExpr), C.anyOf(.{ C.seq(.{ WS, semicolon }), C.seq(.{ WS, kw_else, WS, C.Call(.Statement) }) }) }),
+        C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), WS, C.Call(.BlockExpr), C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) })) }),
+        C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), WS, C.Call(.AssignExpr), C.anyOf(.{ C.seq(.{ WS, semicolon }), C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) }) }) }),
     }) ++ C.ret;
 
     pub const ForStatement = C.anyOf(.{
-        C.seq(.{ kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.Call(.BlockExpr) }),
-        C.seq(.{ kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.Call(.AssignExpr), WS, semicolon }),
+        C.seq(.{ kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrListPayload)), WS, C.Call(.BlockExpr) }),
+        C.seq(.{ kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrListPayload)), WS, C.Call(.AssignExpr), WS, semicolon }),
     }) ++ C.ret;
 
     pub const Statement = C.anyOf(.{
@@ -696,4 +714,20 @@ test "file 053_while_assign_semicolon" {
 
 test "file 054_for_assign_semicolon" {
     try std.testing.expect(try parseFile("test/054_for_assign_semicolon.zig"));
+}
+
+test "file 055_if_payload_expr" {
+    try std.testing.expect(try parseFile("test/055_if_payload_expr.zig"));
+}
+
+test "file 056_while_payload_else_expr" {
+    try std.testing.expect(try parseFile("test/056_while_payload_else_expr.zig"));
+}
+
+test "file 057_for_payload_expr" {
+    try std.testing.expect(try parseFile("test/057_for_payload_expr.zig"));
+}
+
+test "file 058_switch_index_payload" {
+    try std.testing.expect(try parseFile("test/058_switch_index_payload.zig"));
 }
