@@ -11,7 +11,7 @@
 // [x] Payloads: if/while/for (ptr, list), switch prong index
 // [x] Harmonize stmt/expr structure with official grammar (BlockExprStatement, VarDeclExprStatement)
 // [ ] Error sets and try/catch/orelse
-// [ ] Builtins and @identifiers
+// [x] Builtins and @identifiers
 // [ ] Switch: ranges, inline prongs, complex cases
 // [ ] For/while: full argument forms, continue expressions
 // [ ] Labels and break/continue values (e.g. break :blk expr)
@@ -67,6 +67,17 @@ pub const ZigMiniGrammar = struct {
     const kw_struct = C.text("struct");
     const kw_union = C.text("union");
     const kw_enum = C.text("enum");
+    const kw_and = C.text("and");
+    const kw_or = C.text("or");
+    const kw_orelse = C.text("orelse");
+    const kw_try = C.text("try");
+    const kw_catch = C.text("catch");
+    // Keyword tokens with identifier-boundary, to match Zig tokens behavior
+    const kwt_and = C.seq(.{ C.text("and"), ident_boundary, WS });
+    const kwt_or = C.seq(.{ C.text("or"), ident_boundary, WS });
+    const kwt_orelse = C.seq(.{ C.text("orelse"), ident_boundary, WS });
+    const kwt_try = C.seq(.{ C.text("try"), ident_boundary, WS });
+    const kwt_catch = C.seq(.{ C.text("catch"), ident_boundary, WS });
 
     // Punctuation
     const lparen = C.char('(');
@@ -82,6 +93,9 @@ pub const ZigMiniGrammar = struct {
     const bang = C.char('!');
     const pipe_ch = C.char('|');
     const star_ch = C.char('*');
+    const dot = C.char('.');
+    const dot_asterisk = C.text(".*");
+    const dot_question = C.text(".?");
     const backslash = C.char('\\');
 
     // Lexical rules
@@ -103,6 +117,11 @@ pub const ZigMiniGrammar = struct {
         C.seq(.{ C.text("struct"), ident_boundary }),
         C.seq(.{ C.text("union"), ident_boundary }),
         C.seq(.{ C.text("enum"), ident_boundary }),
+        C.seq(.{ C.text("and"), ident_boundary }),
+        C.seq(.{ C.text("or"), ident_boundary }),
+        C.seq(.{ C.text("orelse"), ident_boundary }),
+        C.seq(.{ C.text("try"), ident_boundary }),
+        C.seq(.{ C.text("catch"), ident_boundary }),
     });
 
     pub const Identifier = C.seq(.{
@@ -111,6 +130,9 @@ pub const ZigMiniGrammar = struct {
         C.zeroOrMany(alnum_us),
         C.ret,
     });
+    // Builtin identifiers: @foo
+    const at_sign = C.char('@');
+    pub const BuiltinIdentifier = C.seq(.{ at_sign, alpha, C.zeroOrMany(alnum_us), C.ret });
     pub const Integer = C.seq(.{ C.several(digit), C.ret });
 
     // Type expressions (expanded):
@@ -148,7 +170,11 @@ pub const ZigMiniGrammar = struct {
     pub const CharLiteral = C.seq(.{ C.char('\''), C.anyOf(.{ chr_escape, chr_plain }), C.char('\''), C.ret });
 
     // Primary <- Block / IfExpr / WhileExprE / ForExprE / SwitchExpr / ReturnExpr / BreakExpr / ContinueExpr / ContainerExpr / CallExpr / Integer / StringLiteral / CharLiteral / Identifier
+    // Grouped expression
+    pub const GroupedExpr = C.seq(.{ lparen, WS, C.Call(.Expr), WS, rparen, C.ret });
+
     pub const Primary = C.anyOf(.{
+        C.Call(.GroupedExpr),
         C.Call(.Block),
         C.Call(.IfExpr),
         C.Call(.WhileExprE),
@@ -158,12 +184,55 @@ pub const ZigMiniGrammar = struct {
         C.Call(.BreakExpr),
         C.Call(.ContinueExpr),
         C.Call(.ContainerExpr),
-        C.Call(.CallExpr),
+        C.Call(.BuiltinIdentifier),
         C.Call(.Integer),
         C.Call(.StringLiteral),
         C.Call(.CharLiteral),
         C.Call(.Identifier),
     }) ++ C.ret;
+
+    // Suffix ops and call/index/member chains
+    // Call: '(' ExprList? ')'
+    pub const FnCallArguments = C.seq(.{ lparen, WS, C.maybe(C.Call(.ExprList)), WS, rparen, C.ret });
+    // Member access: '.' Identifier
+    pub const MemberAccess = C.seq(.{ dot, C.Call(.Identifier), C.ret });
+    // Deref: '.*'
+    pub const DotAsterisk = C.seq(.{ dot_asterisk, C.ret });
+    // Optional unwrap: '.?'
+    pub const DotQuestion = C.seq(.{ dot_question, C.ret });
+    // Index or slice: '[' Expr ('..' (Expr? (':' Expr)? )?)? ']'
+    const dots2 = C.text("..");
+    pub const IndexOrSlice = C.seq(.{
+        lbracket,
+        WS,
+        C.Call(.Expr),
+        C.maybe(C.seq(.{
+            WS,
+            dots2,
+            C.maybe(C.seq(.{
+                WS,
+                C.maybe(C.Call(.Expr)),
+                C.maybe(C.seq(.{ WS, colon, WS, C.Call(.Expr) })),
+            })),
+        })),
+        WS,
+        rbracket,
+        C.ret,
+    });
+    // One suffix piece (allow optional WS between base and suffix token)
+    pub const OneSuffix = C.anyOf(.{
+        C.seq(.{ WS, C.Call(.FnCallArguments) }),
+        C.seq(.{ WS, C.Call(.IndexOrSlice) }),
+        C.seq(.{ WS, C.Call(.DotAsterisk) }),
+        C.seq(.{ WS, C.Call(.DotQuestion) }),
+        C.seq(.{ WS, C.Call(.MemberAccess) }),
+    }) ++ C.ret;
+    // SuffixExpr <- Primary (SuffixOp / FnCallArguments)*
+    pub const SuffixExpr = C.seq(.{
+        C.Call(.Primary),
+        C.zeroOrMany(C.Call(.OneSuffix)),
+        C.ret,
+    });
 
     // Expression forms
     pub const ReturnExpr = C.seq(.{ kw_return, WS, C.maybe(C.Call(.Expr)), C.ret });
@@ -198,17 +267,19 @@ pub const ZigMiniGrammar = struct {
     // Minimal switch expression
     pub const SwitchCaseItem = C.seq(.{ C.Call(.Expr), C.ret });
     pub const PtrPayload = C.seq(.{
-        pipe_ch, C.maybe(WS), C.maybe(star_ch), C.maybe(WS), C.Call(.Identifier), C.maybe(WS), pipe_ch, C.ret,
+        pipe_ch, WS, C.maybe(star_ch), WS, C.Call(.Identifier), WS, pipe_ch, C.ret,
     });
     pub const PtrIndexPayload = C.seq(.{
-        pipe_ch, C.maybe(WS), C.maybe(star_ch), C.maybe(WS), C.Call(.Identifier),
-        C.maybe(C.seq(.{ C.maybe(WS), comma, C.maybe(WS), C.Call(.Identifier) })), C.maybe(WS), pipe_ch, C.ret,
+        pipe_ch, WS, C.maybe(star_ch), WS, C.Call(.Identifier),
+        C.maybe(C.seq(.{ WS, comma, WS, C.Call(.Identifier) })), WS, pipe_ch, C.ret,
     });
     pub const PtrListPayload = C.seq(.{
-        pipe_ch, C.maybe(WS), C.maybe(star_ch), C.maybe(WS), C.Call(.Identifier),
-        C.zeroOrMany(C.seq(.{ C.maybe(WS), comma, C.maybe(WS), C.maybe(star_ch), C.maybe(WS), C.Call(.Identifier) })),
-        C.maybe(C.seq(.{ C.maybe(WS), comma })), C.maybe(WS), pipe_ch, C.ret,
+        pipe_ch, WS, C.maybe(star_ch), WS, C.Call(.Identifier),
+        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.maybe(star_ch), WS, C.Call(.Identifier) })),
+        C.maybe(C.seq(.{ WS, comma })), WS, pipe_ch, C.ret,
     });
+    // Non-pointer payload: |name|
+    pub const Payload = C.seq(.{ pipe_ch, WS, C.Call(.Identifier), WS, pipe_ch, C.ret });
 
     pub const SwitchProngElse = C.seq(.{ kw_else, WS, C.text("=>"), C.maybe(C.seq(.{ WS, C.Call(.PtrIndexPayload) })), WS, C.Call(.Expr), C.ret });
     pub const SwitchProngCase = C.seq(.{
@@ -262,11 +333,23 @@ pub const ZigMiniGrammar = struct {
         C.seq(.{ kw_enum, WS, C.Call(.EnumBody) }),
     }) ++ C.ret;
 
-    // MultiplyExpr <- Primary (WS ('*' '/' '%') WS Primary)*
+    // PrefixExpr <- ( '!' / '-' / '~' / '-%' / '&' / 'try' )* Primary
+    const uop_bang = C.char('!');
+    const uop_minus = C.char('-');
+    const uop_tilde = C.char('~');
+    const uop_minusp = C.text("-%");
+    const uop_amp = C.char('&');
+    pub const PrefixExpr = C.seq(.{
+        C.zeroOrMany(C.anyOf(.{ uop_bang, uop_minus, uop_tilde, uop_minusp, uop_amp, kwt_try })),
+        C.Call(.SuffixExpr),
+        C.ret,
+    });
+
+    // MultiplyExpr <- PrefixExpr (WS ('*' '/' '%') WS PrefixExpr)*
     const mulop = C.charclass("*/%");
     pub const MultiplyExpr = C.seq(.{
-        C.Call(.Primary),
-        C.zeroOrMany(C.seq(.{ WS, mulop, WS, C.Call(.Primary) })),
+        C.Call(.PrefixExpr),
+        C.zeroOrMany(C.seq(.{ WS, mulop, WS, C.Call(.PrefixExpr) })),
         C.ret,
     });
 
@@ -278,8 +361,65 @@ pub const ZigMiniGrammar = struct {
         C.ret,
     });
 
-    // Expr <- AddExpr
-    pub const Expr = C.seq(.{ C.Call(.AddExpr), C.ret });
+    // BitShiftExpr <- AddExpr (WS ('<<' / '>>') WS AddExpr)*
+    const shl = C.text("<<");
+    const shr = C.text(">>");
+    pub const BitShiftExpr = C.seq(.{
+        C.Call(.AddExpr),
+        C.zeroOrMany(C.seq(.{ WS, C.anyOf(.{ shl, shr }), WS, C.Call(.AddExpr) })),
+        C.ret,
+    });
+
+    // BitwiseExpr <- BitShiftExpr (WS ( ('&' / '^' / '|' / 'orelse') / ('catch' Payload?) ) WS BitShiftExpr)*
+    const bop_and = C.char('&');
+    const bop_xor = C.char('^');
+    const bop_or = C.char('|');
+    pub const BitwiseExpr = C.seq(.{
+        C.Call(.BitShiftExpr),
+        C.zeroOrMany(C.seq(.{
+            WS,
+            C.anyOf(.{
+                bop_and,
+                bop_xor,
+                bop_or,
+                kwt_orelse,
+                C.seq(.{ kwt_catch, C.maybe(C.Call(.Payload)) }),
+            }),
+            WS,
+            C.Call(.BitShiftExpr),
+        })),
+        C.ret,
+    });
+
+    // CompareExpr <- BitwiseExpr (WS ('==' '!=' '<' '>' '<=' '>=') WS BitwiseExpr)?
+    const op_eqeq = C.text("==");
+    const op_neq = C.text("!=");
+    const op_lt = C.char('<');
+    const op_gt = C.char('>');
+    const op_lte = C.text("<=");
+    const op_gte = C.text(">=");
+    pub const CompareExpr = C.seq(.{
+        C.Call(.BitwiseExpr),
+        C.maybe(C.seq(.{ WS, C.anyOf(.{ op_eqeq, op_neq, op_lte, op_gte, op_lt, op_gt }), WS, C.Call(.BitwiseExpr) })),
+        C.ret,
+    });
+
+    // BoolAndExpr <- CompareExpr (WS 'and' WS CompareExpr)*
+    pub const BoolAndExpr = C.seq(.{
+        C.Call(.CompareExpr),
+        C.zeroOrMany(C.seq(.{ WS, kwt_and, WS, C.Call(.CompareExpr) })),
+        C.ret,
+    });
+
+    // BoolOrExpr <- BoolAndExpr (WS 'or' WS BoolAndExpr)*
+    pub const BoolOrExpr = C.seq(.{
+        C.Call(.BoolAndExpr),
+        C.zeroOrMany(C.seq(.{ WS, kwt_or, WS, C.Call(.BoolAndExpr) })),
+        C.ret,
+    });
+
+    // Expr <- BoolOrExpr
+    pub const Expr = C.seq(.{ C.Call(.BoolOrExpr), C.ret });
 
     // ExprList <- Expr (WS? ',' WS? Expr)*
     pub const ExprList = C.seq(.{
@@ -288,9 +428,9 @@ pub const ZigMiniGrammar = struct {
         C.ret,
     });
 
-    // CallExpr <- Identifier WS? '(' WS? ExprList? WS? ')'
+    // CallExpr <- (Identifier / BuiltinIdentifier) WS? '(' WS? ExprList? WS? ')'
     pub const CallExpr = C.seq(.{
-        C.Call(.Identifier),
+        C.anyOf(.{ C.Call(.Identifier), C.Call(.BuiltinIdentifier) }),
         WS,
         lparen,
         WS,
@@ -735,4 +875,61 @@ test "file 057_for_payload_expr" {
 
 test "file 058_switch_index_payload" {
     try std.testing.expect(try parseFile("test/058_switch_index_payload.zig"));
+}
+
+test "expr: catch operator basic" {
+    try std.testing.expect(try parseZigMini("fn f() { x = y catch z; }\n"));
+}
+
+test "expr: catch with payload" {
+    try std.testing.expect(try parseZigMini("fn f() { x = y catch |e| z; }\n"));
+}
+
+test "spacing: operators without spaces" {
+    try std.testing.expect(try parseZigMini("fn f(){x=1+2*3;}\n"));
+}
+
+test "spacing: catch without space before payload" {
+    try std.testing.expect(try parseZigMini("fn f(){x=y catch|e|z;}\n"));
+}
+
+test "keyword boundary: orelse not inside identifier" {
+    // This should parse as a single identifier, not as an operator.
+    try std.testing.expect(try parseZigMini("fn f(){ xorelsey; }\n"));
+}
+
+test "suffix: member access" {
+    try std.testing.expect(try parseZigMini("fn f(){ x = a.b; }\n"));
+}
+
+test "suffix: index access" {
+    try std.testing.expect(try parseZigMini("fn f(){ x = a[0]; }\n"));
+}
+
+test "suffix: slice simple" {
+    try std.testing.expect(try parseZigMini("fn f(){ x = a[0..n]; }\n"));
+}
+
+test "suffix: slice with stride" {
+    try std.testing.expect(try parseZigMini("fn f(){ x = a[0..10:2]; }\n"));
+}
+
+test "suffix: slice open end" {
+    try std.testing.expect(try parseZigMini("fn f(){ x = a[0..]; }\n"));
+}
+
+test "suffix: optional unwrap" {
+    try std.testing.expect(try parseZigMini("fn f(){ x = y.?; }\n"));
+}
+
+test "suffix: deref" {
+    try std.testing.expect(try parseZigMini("fn f(){ x = y.*; }\n"));
+}
+
+test "suffix: call chain" {
+    try std.testing.expect(try parseZigMini("fn f(){ x = a.b(1,2)[1..n].* .? .c(); }\n"));
+}
+
+test "suffix: builtin call then chain" {
+    try std.testing.expect(try parseZigMini("fn f(){ x = @foo()(1)[0].bar; }\n"));
 }
