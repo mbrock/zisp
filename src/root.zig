@@ -1,4 +1,5 @@
 comptime {
+    @setEvalBranchQuota(200000);
     _ = @import("pegvm.zig");
     _ = @import("debug_printer.zig");
     _ = @import("zigparse.zig");

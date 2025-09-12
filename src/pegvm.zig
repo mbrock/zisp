@@ -140,6 +140,9 @@ pub fn VM(
         };
 
         pub fn tick(self: *Machine, comptime mode: ExecMode, backpack: ?*Packrat) !Status {
+            comptime {
+                @setEvalBranchQuota(200000);
+            }
             const yield = mode == .yield_each;
 
             // This compiles to a big inlined jump table with an entry per IP.

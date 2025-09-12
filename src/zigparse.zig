@@ -16,6 +16,10 @@
 // [ ] Builtins and @identifiers
 // [ ] Top-level decls beyond fn (var/const, test, comptime)
 const std = @import("std");
+
+comptime {
+    @setEvalBranchQuota(200000);
+}
 const pegvm = @import("pegvm.zig");
 
 const VM = pegvm.VM;
@@ -48,6 +52,10 @@ pub const ZigMiniGrammar = struct {
     const kw_return = C.text("return");
     const kw_const = C.text("const");
     const kw_var = C.text("var");
+    const kw_if = C.text("if");
+    const kw_else = C.text("else");
+    const kw_while = C.text("while");
+    const kw_for = C.text("for");
     const kw_struct = C.text("struct");
     const kw_union = C.text("union");
     const kw_enum = C.text("enum");
@@ -75,6 +83,10 @@ pub const ZigMiniGrammar = struct {
         C.seq(.{ C.text("return"), ident_boundary }),
         C.seq(.{ C.text("const"), ident_boundary }),
         C.seq(.{ C.text("var"), ident_boundary }),
+        C.seq(.{ C.text("if"), ident_boundary }),
+        C.seq(.{ C.text("else"), ident_boundary }),
+        C.seq(.{ C.text("while"), ident_boundary }),
+        C.seq(.{ C.text("for"), ident_boundary }),
         C.seq(.{ C.text("struct"), ident_boundary }),
         C.seq(.{ C.text("union"), ident_boundary }),
         C.seq(.{ C.text("enum"), ident_boundary }),
@@ -245,8 +257,32 @@ pub const ZigMiniGrammar = struct {
         C.ret,
     });
 
-    // Statement <- AssignStmt ';' / ReturnStmt ';' / VarDecl ';' / Expr ';' / Block
+    // Control flow statements (block bodies only for now)
+    pub const IfStmt = C.seq(.{
+        kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
+        C.Call(.Block),
+        C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Block) })),
+        C.ret,
+    });
+
+    pub const WhileStmt = C.seq(.{
+        kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
+        C.Call(.Block),
+        C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Block) })),
+        C.ret,
+    });
+
+    pub const ForStmt = C.seq(.{
+        kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
+        C.Call(.Block),
+        C.ret,
+    });
+
+    // Statement <- IfStmt / WhileStmt / ForStmt / AssignStmt ';' / ReturnStmt ';' / VarDecl ';' / Expr ';' / Block
     pub const Statement = C.anyOf(.{
+        C.Call(.IfStmt),
+        C.Call(.WhileStmt),
+        C.Call(.ForStmt),
         C.seq(.{ C.Call(.AssignStmt), WS, semicolon }),
         C.seq(.{ C.Call(.ReturnStmt), WS, semicolon }),
         C.seq(.{ C.Call(.VarDecl), WS, semicolon }),
@@ -513,4 +549,24 @@ test "file 039_param_error_union" {
 
 test "file 040_nested_error_union" {
     try std.testing.expect(try parseFile("test/040_nested_error_union.zig"));
+}
+
+test "file 041_if_simple" {
+    try std.testing.expect(try parseFile("test/041_if_simple.zig"));
+}
+
+test "file 042_if_else" {
+    try std.testing.expect(try parseFile("test/042_if_else.zig"));
+}
+
+test "file 043_while_simple" {
+    try std.testing.expect(try parseFile("test/043_while_simple.zig"));
+}
+
+test "file 044_while_else" {
+    try std.testing.expect(try parseFile("test/044_while_else.zig"));
+}
+
+test "file 045_for_simple" {
+    try std.testing.expect(try parseFile("test/045_for_simple.zig"));
 }
