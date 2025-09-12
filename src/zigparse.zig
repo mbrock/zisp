@@ -8,7 +8,7 @@
 // [ ] Return types: full TypeExpr including error unions (expr!T)
 // [ ] If/while/for statements and expressions
 // [ ] ContainerDecl: minimal struct/union/enum bodies
-// [ ] String and char literals
+// [x] String and char literals
 // [ ] Error set, try/catch/orelse
 // [ ] Switch expression and prongs
 // [ ] defer/errdefer/suspend/nosuspend blocks
@@ -63,6 +63,7 @@ pub const ZigMiniGrammar = struct {
     const comma = C.char(',');
     const semicolon = C.char(';');
     const equal = C.char('=');
+    const backslash = C.char('\\');
 
     // Lexical rules
     // Reserved words we currently recognize
@@ -103,11 +104,22 @@ pub const ZigMiniGrammar = struct {
 
     pub const TypeExpr = C.seq(.{ C.zeroOrMany(TypePrefix), C.Call(.TypeAtom), C.ret });
 
-    // Primary <- CallExpr / Integer / Identifier
+    // String and char literals (simplified IEC escapes)
+    const str_escape = C.seq(.{ backslash, C.charclass("nr\"t\\") });
+    const str_plain = C.charclass(.{ ascii[' ' .. '!' + 1], ascii['#' .. '[' + 1], ascii[']' .. '~' + 1] });
+    pub const StringLiteral = C.seq(.{ C.char('"'), C.zeroOrMany(C.anyOf(.{ str_escape, str_plain })), C.char('"'), C.ret });
+
+    const chr_escape = C.seq(.{ backslash, C.charclass("nr't\\\"") });
+    const chr_plain = C.charclass(.{ ascii[' ' .. '&' + 1], ascii['(' .. '[' + 1], ascii[']' .. '~' + 1] });
+    pub const CharLiteral = C.seq(.{ C.char('\''), C.anyOf(.{ chr_escape, chr_plain }), C.char('\''), C.ret });
+
+    // Primary <- ContainerExpr / CallExpr / Integer / StringLiteral / CharLiteral / Identifier
     pub const Primary = C.anyOf(.{
         C.Call(.ContainerExpr),
         C.Call(.CallExpr),
         C.Call(.Integer),
+        C.Call(.StringLiteral),
+        C.Call(.CharLiteral),
         C.Call(.Identifier),
     }) ++ C.ret;
 
@@ -452,4 +464,32 @@ test "file 029_enum_fields" {
 
 test "file 030_nested_containers" {
     try std.testing.expect(try parseFile("test/030_nested_containers.zig"));
+}
+
+test "file 031_string_basic" {
+    try std.testing.expect(try parseFile("test/031_string_basic.zig"));
+}
+
+test "file 032_string_escapes" {
+    try std.testing.expect(try parseFile("test/032_string_escapes.zig"));
+}
+
+test "file 033_char_basic" {
+    try std.testing.expect(try parseFile("test/033_char_basic.zig"));
+}
+
+test "file 034_char_escape_quote" {
+    try std.testing.expect(try parseFile("test/034_char_escape_quote.zig"));
+}
+
+test "file 035_var_string_init" {
+    try std.testing.expect(try parseFile("test/035_var_string_init.zig"));
+}
+
+test "file 036_call_with_string_arg" {
+    try std.testing.expect(try parseFile("test/036_call_with_string_arg.zig"));
+}
+
+test "file 037_char_in_expr" {
+    try std.testing.expect(try parseFile("test/037_char_in_expr.zig"));
 }
