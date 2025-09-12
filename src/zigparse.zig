@@ -1,25 +1,3 @@
-// TODO: ZigMiniGrammar Roadmap (tracked subset)
-// [x] Comments in whitespace (// line)
-// [x] Keyword filtering for identifiers
-// [x] Call arguments and ExprList
-// [x] Assignment and arithmetic ops (+,-,*,/,%)
-// [x] TypeExpr: ?, *, []T, [N]T; error unions (A!B)
-// [x] Top-level decls: const/var (optional pub)
-// [x] Containers: struct/union/enum (simple bodies)
-// [x] Strings and char literals
-// [x] Control flow as statements and expressions: if/while/for, switch
-// [x] Payloads: if/while/for (ptr, list), switch prong index
-// [x] Harmonize stmt/expr structure with official grammar (BlockExprStatement, VarDeclExprStatement)
-// [x] Builtins and @identifiers
-// [x] Operator/precedence: full layers incl. try/orelse/catch
-// [x] Suffix ops and chains: call, member, index/slice, .*, .?
-// [ ] Switch: ranges (a...b) and inline prongs
-// [ ] For/while: full argument forms, continue expressions
-// [ ] Error sets and error literals (error.Foo, error { ... })
-// [ ] Labels and break/continue values (e.g. break :blk expr)
-// [ ] Visibility/ABI extras (extern/threadlocal/addrspace/linksection)
-// [ ] test/comptime blocks; defer/errdefer/suspend/nosuspend
-// [ ] String/char literal completeness (unicode, multiline)
 const std = @import("std");
 
 comptime {
