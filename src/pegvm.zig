@@ -155,7 +155,7 @@ pub fn VM(
                     // To avoid bounds checking, the text has a zero sentinel.
                     const nextchar = self.text[self.texthead];
 
-                    switch (comptime code[codebase]) {
+                    _ = switch (code[codebase]) {
                         inline .CharSet => |charmask| {
                             if (charmask.isSet(nextchar)) {
                                 self.texthead += 1;
@@ -257,7 +257,7 @@ pub fn VM(
 
                         .Fail => void,
                         .Accept => return .Ok,
-                    }
+                    };
 
                     if (self.savehead != 0) {
                         // Failure with a backtrack point.
@@ -514,6 +514,60 @@ pub fn Combinators(comptime G: type) type {
 
         pub inline fn maybe(comptime X: anytype) OpN(X.len + 2) {
             return anyOf(.{ X, .{} });
+        }
+
+        /// Positive lookahead: succeeds iff `inner` would succeed, consumes 0 chars.
+        /// Encoding idea:
+        ///   S = save to END            (success continues at END)
+        ///   F = save to FAIL_LABEL     (failure path)
+        ///   inner
+        ///   commit -> SUCC_TRIGGER     (pop F)
+        ///   (pad)
+        ///   SUCC_TRIGGER: fail         (restore S -> END)
+        ///   FAIL_LABEL: commit+fail    (pop S, then fail outward)
+        pub inline fn lookahead(comptime inner: anytype) OpN(inner.len + 7) {
+            const n = inner.len;
+
+            // Offsets are relative to "current index + 1".
+            const to_end = n + 6; // Choice[0] -> END (fallthrough of the whole op)
+            const to_faillbl = n + 3; // Choice[1] -> FAIL_LABEL
+            const j_succ_trig = 1; // Commit after inner -> SUCC_TRIGGER
+            const j_pop_then_fail = 0; // Commit at FAIL_LABEL: pop S then fallthrough to Fail
+
+            return op1(.{ .ChoiceRel = @intCast(to_end) }) ++ // S
+                op1(.{ .ChoiceRel = @intCast(to_faillbl) }) ++ // F
+                inner ++
+                op1(.{ .CommitRel = @intCast(j_succ_trig) }) ++ // -> SUCC_TRIGGER
+                op1(.{ .Fail = {} }) ++ // (padding, skipped)
+                op1(.{ .Fail = {} }) ++ // SUCC_TRIGGER: restore S -> END
+                op1(.{ .CommitRel = @intCast(j_pop_then_fail) }) ++ // FAIL_LABEL: pop S
+                op1(.{ .Fail = {} }); // then fail outward
+        }
+
+        /// Negative lookahead: succeeds iff `inner` would fail, consumes 0 chars.
+        /// Encoding idea:
+        ///   S = save to FAIL_LABEL     (so success of inner causes failure)
+        ///   F = save to SUCC_LABEL     (so failure of inner becomes success)
+        ///   inner
+        ///   commit -> AFTERPOP         (pop F)
+        ///   AFTERPOP: fail             (restore S -> FAIL_LABEL)
+        ///   SUCC_LABEL: commit (+1)    (pop S), skip FAIL_LABEL
+        ///   FAIL_LABEL: fail           (propagate failure)
+        pub inline fn notLookahead(comptime inner: anytype) OpN(inner.len + 6) {
+            const n = inner.len;
+
+            const to_faillbl = n + 4; // Choice[0] -> FAIL_LABEL
+            const to_succlbl = n + 2; // Choice[1] -> SUCC_LABEL
+            const j_afterpop = 0; // Commit after inner -> AFTERPOP
+            const j_skip_fail = 1; // SUCC_LABEL commit skips FAIL_LABEL
+
+            return op1(.{ .ChoiceRel = @intCast(to_faillbl) }) ++ // S
+                op1(.{ .ChoiceRel = @intCast(to_succlbl) }) ++ // F
+                inner ++
+                op1(.{ .CommitRel = @intCast(j_afterpop) }) ++ // -> AFTERPOP
+                op1(.{ .Fail = {} }) ++ // AFTERPOP: restore S -> FAIL_LABEL
+                op1(.{ .CommitRel = @intCast(j_skip_fail) }) ++ // SUCC_LABEL: pop S
+                op1(.{ .Fail = {} }); // FAIL_LABEL: propagate failure
         }
 
         pub inline fn several(comptime X: anytype) OpN(X.len + (X.len + 2)) {
@@ -906,4 +960,69 @@ test "yield mode complex" {
     }
 
     try std.testing.expect(count > 10); // Should take many steps
+}
+
+pub const KeywordGrammar = struct {
+    const C = Combinators(@This());
+    const alnum = C.charclass(.{
+        ascii['0' .. '9' + 1],
+        ascii['a' .. 'z' + 1],
+        ascii['A' .. 'Z' + 1],
+    });
+
+    pub const start = C.seq(.{
+        C.text("if"),
+        C.notLookahead(alnum),
+        C.eof,
+        C.ok,
+    });
+};
+
+const KeywordParser = VM(KeywordGrammar, 32, 32);
+
+fn parseKeyword(src: [:0]const u8) !bool {
+    return KeywordParser.parseFully(src, .auto_continue);
+}
+
+test "negative lookahead keyword" {
+    try std.testing.expect(try parseKeyword("if"));
+    try std.testing.expect(!try parseKeyword("ifelse"));
+    try std.testing.expect(!try parseKeyword("iff"));
+    try std.testing.expect(!try parseKeyword("if1"));
+}
+
+pub const EvenIntGrammar = struct {
+    const C = Combinators(@This());
+
+    const digit = C.charclass(ascii['0' .. '9' + 1]);
+    const alnum = C.charclass(.{
+        ascii['0' .. '9' + 1],
+        ascii['a' .. 'z' + 1],
+        ascii['A' .. 'Z' + 1],
+    });
+
+    const integer = C.several(digit);
+    const even_alnum = C.several(C.seq(.{ alnum, alnum }));
+    const even_alnum_full = C.seq(.{ even_alnum, C.eof });
+
+    pub const start = C.seq(.{
+        C.lookahead(even_alnum_full),
+        integer,
+        C.eof,
+        C.ok,
+    });
+};
+
+const EvenIntParser = VM(EvenIntGrammar, 32, 32);
+
+fn parseEvenInt(src: [:0]const u8) !bool {
+    return EvenIntParser.parseFully(src, .auto_continue);
+}
+
+test "positive lookahead integer and even alnum" {
+    try std.testing.expect(try parseEvenInt("42"));
+    try std.testing.expect(try parseEvenInt("1234"));
+    try std.testing.expect(!try parseEvenInt("123"));
+    try std.testing.expect(!try parseEvenInt("1a"));
+    try std.testing.expect(!try parseEvenInt("abcd"));
 }
