@@ -5,7 +5,7 @@
 // [x] Assignment (Identifier '=' Expr)
 // [ ] Basic operators and precedence (+ - * / %)
 // [x] TypeExpr beyond identifiers (pointers, arrays, optionals, slices)
-// [ ] Return types: full TypeExpr including error unions (expr!T)
+// [x] Return types: full TypeExpr including error unions (A!B)
 // [ ] If/while/for statements and expressions
 // [ ] ContainerDecl: minimal struct/union/enum bodies
 // [x] String and char literals
@@ -63,6 +63,7 @@ pub const ZigMiniGrammar = struct {
     const comma = C.char(',');
     const semicolon = C.char(';');
     const equal = C.char('=');
+    const bang = C.char('!');
     const backslash = C.char('\\');
 
     // Lexical rules
@@ -88,7 +89,9 @@ pub const ZigMiniGrammar = struct {
     pub const Integer = C.seq(.{ C.several(digit), C.ret });
 
     // Type expressions (expanded):
-    //   TypeExpr <- TypePrefix* TypeAtom
+    //   TypeCore <- TypePrefix* TypeAtom
+    //   ErrorUnionType <- TypeCore (WS '!' WS TypeExpr)?
+    //   TypeExpr <- ErrorUnionType
     //   TypeAtom <- Identifier / ContainerExpr
     //   TypePrefix <- '?' / '*' / ('[' WS Expr WS ']' | '[' WS ']' )
     pub const TypeAtom = C.anyOf(.{ C.Call(.Identifier), C.Call(.ContainerExpr) }) ++ C.ret;
@@ -102,7 +105,13 @@ pub const ZigMiniGrammar = struct {
             break :star s;
         }, BrackType });
 
-    pub const TypeExpr = C.seq(.{ C.zeroOrMany(TypePrefix), C.Call(.TypeAtom), C.ret });
+    pub const TypeCore = C.seq(.{ C.zeroOrMany(TypePrefix), C.Call(.TypeAtom), C.ret });
+    pub const ErrorUnionType = C.seq(.{
+        C.Call(.TypeCore),
+        C.maybe(C.seq(.{ WS, bang, WS, C.Call(.TypeExpr) })),
+        C.ret,
+    });
+    pub const TypeExpr = C.seq(.{ C.Call(.ErrorUnionType), C.ret });
 
     // String and char literals (simplified IEC escapes)
     const str_escape = C.seq(.{ backslash, C.charclass("nr\"t\\") });
@@ -492,4 +501,16 @@ test "file 036_call_with_string_arg" {
 
 test "file 037_char_in_expr" {
     try std.testing.expect(try parseFile("test/037_char_in_expr.zig"));
+}
+
+test "file 038_return_error_union" {
+    try std.testing.expect(try parseFile("test/038_return_error_union.zig"));
+}
+
+test "file 039_param_error_union" {
+    try std.testing.expect(try parseFile("test/039_param_error_union.zig"));
+}
+
+test "file 040_nested_error_union" {
+    try std.testing.expect(try parseFile("test/040_nested_error_union.zig"));
 }
