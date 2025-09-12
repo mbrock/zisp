@@ -72,11 +72,20 @@ pub const ZigMiniGrammar = struct {
         C.Call(.Identifier),
     }) ++ C.ret;
 
-    // CallExpr <- Identifier WS? '(' WS? ')'   (no args yet)
+    // ExprList <- Expr (WS? ',' WS? Expr)*
+    pub const ExprList = C.seq(.{
+        C.Call(.Expr),
+        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.Expr) })),
+        C.ret,
+    });
+
+    // CallExpr <- Identifier WS? '(' WS? ExprList? WS? ')'
     pub const CallExpr = C.seq(.{
         C.Call(.Identifier),
         WS,
         lparen,
+        WS,
+        C.maybe(C.Call(.ExprList)),
         WS,
         rparen,
         C.ret,
@@ -232,8 +241,7 @@ test "file 004_pub_fn_params_ret" {
 }
 
 test "file 005_call_with_args (skip)" {
-    // Not yet supported: call arguments
-    return error.SkipZigTest;
+    try std.testing.expect(try parseFile("test/005_call_with_args.zig"));
 }
 
 test "file 006_assignment (skip)" {
@@ -265,4 +273,8 @@ test "file 011_line_comments" {
 
 test "file 012_comments_between_decls" {
     try std.testing.expect(try parseFile("test/012_comments_between_decls.zig"));
+}
+
+test "file 013_nested_call" {
+    try std.testing.expect(try parseFile("test/013_nested_call.zig"));
 }
