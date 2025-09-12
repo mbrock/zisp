@@ -311,15 +311,11 @@ pub const ZigMiniGrammar = struct {
         C.ret,
     });
 
-    // AssignStmt <- Identifier WS '=' WS Expr
-    pub const AssignStmt = C.seq(.{
-        C.Call(.Identifier),
-        WS,
-        equal,
-        WS,
+    // AssignExpr (simplified): either Identifier '=' Expr, or plain Expr
+    pub const AssignExpr = C.anyOf(.{
+        C.seq(.{ C.Call(.Identifier), WS, equal, WS, C.Call(.Expr) }),
         C.Call(.Expr),
-        C.ret,
-    });
+    }) ++ C.ret;
 
     // Control flow statements (block bodies only for now)
     pub const IfStmt = C.seq(.{
@@ -342,16 +338,47 @@ pub const ZigMiniGrammar = struct {
         C.ret,
     });
 
-    // Statement <- IfStmt / WhileStmt / ForStmt / AssignStmt ';' / ReturnStmt ';' / VarDecl ';' / Expr ';' / Block
-    pub const Statement = C.anyOf(.{
-        C.Call(.IfStmt),
-        C.Call(.WhileStmt),
-        C.Call(.ForStmt),
-        C.seq(.{ C.Call(.AssignStmt), WS, semicolon }),
-        C.seq(.{ C.Call(.ReturnStmt), WS, semicolon }),
+    // Harmonized statement structure (subset of official grammar):
+    // BlockExprStatement <- BlockExpr / AssignExpr ';'
+    // VarDeclExprStatement <- VarDecl ';' / Expr ';'
+    // Statement <- IfStatement / WhileStatement / ForStatement / SwitchExpr / VarDeclExprStatement / BlockExprStatement
+
+    pub const BlockExpr = C.seq(.{ C.Call(.Block), C.ret });
+    pub const BlockExprStatement = C.anyOf(.{
+        C.Call(.BlockExpr),
+        C.seq(.{ C.Call(.AssignExpr), WS, semicolon }),
+    }) ++ C.ret;
+
+    pub const VarDeclExprStatement = C.anyOf(.{
         C.seq(.{ C.Call(.VarDecl), WS, semicolon }),
         C.seq(.{ C.Call(.Expr), WS, semicolon }),
-        C.Call(.Block),
+    }) ++ C.ret;
+
+    // If/While/For statements with block or assign branches (subset)
+    pub const IfStatement = C.anyOf(.{
+        // Block branch (optional else Statement)
+        C.seq(.{ kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.Call(.BlockExpr), C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Statement) })) }),
+        // Assign branch (must end with ';' or else Statement)
+        C.seq(.{ kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.Call(.AssignExpr), C.anyOf(.{ C.seq(.{ WS, semicolon }), C.seq(.{ WS, kw_else, WS, C.Call(.Statement) }) }) }),
+    }) ++ C.ret;
+
+    pub const WhileStatement = C.anyOf(.{
+        C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.Call(.BlockExpr), C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Statement) })) }),
+        C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.Call(.AssignExpr), C.anyOf(.{ C.seq(.{ WS, semicolon }), C.seq(.{ WS, kw_else, WS, C.Call(.Statement) }) }) }),
+    }) ++ C.ret;
+
+    pub const ForStatement = C.anyOf(.{
+        C.seq(.{ kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.Call(.BlockExpr) }),
+        C.seq(.{ kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.Call(.AssignExpr), WS, semicolon }),
+    }) ++ C.ret;
+
+    pub const Statement = C.anyOf(.{
+        C.Call(.IfStatement),
+        C.Call(.WhileStatement),
+        C.Call(.ForStatement),
+        C.Call(.SwitchExpr),
+        C.Call(.VarDeclExprStatement),
+        C.Call(.BlockExprStatement),
     }) ++ C.ret;
 
     // Block <- '{' WS Statement* '}'
@@ -653,4 +680,20 @@ test "file 049_switch_expr_minimal" {
 
 test "file 050_break_continue" {
     try std.testing.expect(try parseFile("test/050_break_continue.zig"));
+}
+
+test "file 051_switch_stmt_no_semicolon" {
+    try std.testing.expect(try parseFile("test/051_switch_stmt_no_semicolon.zig"));
+}
+
+test "file 052_if_assign_semicolon" {
+    try std.testing.expect(try parseFile("test/052_if_assign_semicolon.zig"));
+}
+
+test "file 053_while_assign_semicolon" {
+    try std.testing.expect(try parseFile("test/053_while_assign_semicolon.zig"));
+}
+
+test "file 054_for_assign_semicolon" {
+    try std.testing.expect(try parseFile("test/054_for_assign_semicolon.zig"));
 }
