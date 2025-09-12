@@ -67,9 +67,9 @@ const ExecMode = enum { auto_continue, yield_each };
 pub fn VM(
     /// Grammar type
     comptime G: type,
-    /// Back stack size
+    /// Save stack size
     comptime T: usize,
-    /// Rule stack size
+    /// Mark stack size
     comptime R: usize,
 ) type {
     return struct {
@@ -80,12 +80,14 @@ pub fn VM(
         const code = P.code;
         const codeinit = P.start_ip;
 
+        /// A frame on the backtracking stack.
         pub const Save = extern struct {
-            codehead: u32,
+            nextcode: u32,
             texthead: u32,
             markhead: u32,
         };
 
+        /// A frame on the rule call stack.
         pub const Mark = extern struct {
             rulekind: u32,
             texthead: u32,
@@ -109,22 +111,6 @@ pub fn VM(
         pub fn deinit(_: *Machine) void {}
 
         pub const Status = enum { Ok, Fail, Running };
-
-        fn lookingAt(self: @This(), c: u8) bool {
-            return self.texthead < self.text.len and self.text[self.texthead] == c;
-        }
-
-        fn lookingAtMatch(self: @This(), set: CharBitset) bool {
-            if (self.texthead >= self.text.len) return false;
-            return set.isSet(self.text[self.texthead]);
-        }
-
-        fn take(self: @This()) ?u8 {
-            if (self.texthead >= self.text.len) return null;
-            const b = self.text[self.texthead];
-            self.texthead += 1;
-            return b;
-        }
 
         pub const Packrat = struct {
             const Self = @This();
@@ -156,6 +142,9 @@ pub fn VM(
         pub fn tick(self: *Machine, comptime mode: ExecMode, backpack: ?*Packrat) !Status {
             const yield = mode == .yield_each;
 
+            // This compiles to a big inlined jump table with an entry per IP.
+            // In autocontinue mode, we keep jumping between these labels;
+            // in yield mode, we return after each step.
             vm: switch (self.codehead) {
                 inline 0...P.code.len - 1 => |codebase| {
                     const nextcode = codebase + 1;
@@ -194,7 +183,7 @@ pub fn VM(
                         inline .ChoiceRel => |d| {
                             self.savelist[self.savehead] = .{
                                 .markhead = self.markhead,
-                                .codehead = @as(usize, @intCast(@as(isize, @intCast(codebase)) + 1 + d)),
+                                .nextcode = @as(usize, @intCast(@as(isize, @intCast(codebase)) + 1 + d)),
                                 .texthead = self.texthead,
                             };
 
@@ -271,6 +260,7 @@ pub fn VM(
                     }
 
                     if (self.savehead != 0) {
+                        // Failure with a backtrack point.
                         @branchHint(.likely);
 
                         self.savehead -= 1;
@@ -288,7 +278,7 @@ pub fn VM(
                             }
                         }
 
-                        self.codehead = failsave.codehead;
+                        self.codehead = failsave.nextcode;
                         self.markhead = failsave.markhead;
                         self.texthead = failsave.texthead;
 
@@ -328,6 +318,7 @@ pub fn VM(
                 },
             }
         }
+
         pub const Metrics = struct {
             steps: usize = 0, // number of tick() invocations
             max_back_height: usize = 0, // maximum trail/backtrack stack height (g)
@@ -874,7 +865,6 @@ test "packrat caching benefit" {
         try pedometer(PackratVM, "(((x)))", .naive),
     );
 }
-
 
 test "yield mode" {
     const src = "true";
