@@ -685,7 +685,9 @@ pub const ZigMiniGrammar = struct {
         C.maybe(C.seq(.{ WS, C.maybe(C.Call(.AddrSpace)) })),
         C.maybe(C.seq(.{ WS, C.maybe(C.Call(.LinkSection)) })),
         C.maybe(C.seq(.{ WS, C.maybe(C.Call(.CallConv)) })),
-        WS, C.Call(.TypeExpr),
+        WS,
+        C.maybe(bang),
+        C.Call(.TypeExpr),
         WS,
         C.Call(.Block),
         C.ret,
@@ -1181,6 +1183,10 @@ test "abi: extern fn with attrs" {
     const src =
         "extern \"c\" fn f(a: i32) align(4) addrspace(0) linksection(\".text\") callconv(.C) void { }\n";
     try std.testing.expect(try parseZigMini(src));
+}
+
+test "fn: inferred error set return" {
+    try std.testing.expect(try parseZigMini("fn f() !u32 { return; }\n"));
 }
 
 test "abi: export threadlocal global with type and attrs" {
