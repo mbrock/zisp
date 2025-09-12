@@ -11,7 +11,7 @@ const CharBitset = std.bit_set.ArrayBitSet(u64, 256);
 pub fn ProgramFor(comptime G: type) type {
     return struct {
         const Rule = std.meta.DeclEnum(G);
-        const FirstRuleArrT = @TypeOf(@field(G, @tagName(Rule.Start)));
+        const FirstRuleArrT = @TypeOf(@field(G, @tagName(Rule.start)));
         const Op = Combinators(G).Op;
         const E = std.enums.values(Rule);
 
@@ -54,14 +54,11 @@ pub fn ProgramFor(comptime G: type) type {
             return .{ .ips = ips, .ops = ops[0..CodeSize].* };
         }
 
-        // Find Start IP from enum
-        const StartIp = rule_ip[@intCast(@intFromEnum(Rule.Start))];
-
         pub const OpT = Op;
         pub const RuleT = Rule;
         pub const rule_ip = RuleCode().ips;
         pub const code = RuleCode().ops;
-        pub const start_ip = StartIp;
+        pub const start_ip = rule_ip[@intCast(@intFromEnum(Rule.start))];
     };
 }
 
@@ -103,28 +100,15 @@ pub fn VM(
         markhead: u32 = 0,
         savehead: u32 = 0,
 
-        text: []const u8,
+        text: [:0]const u8,
 
-        pub fn init(src: []const u8) Machine {
+        pub fn init(src: [:0]const u8) Machine {
             return .{ .text = src };
         }
 
         pub fn deinit(_: *Machine) void {}
 
         pub const Status = enum { Ok, Fail, Running };
-
-        fn ensure(self: @This(), from: usize, n: usize) bool {
-            return from + n <= self.text.len;
-        }
-
-        fn atEnd(self: @This()) bool {
-            return self.texthead >= self.text.len;
-        }
-
-        fn peek(self: @This()) ?u8 {
-            if (self.texthead >= self.text.len) return null;
-            return self.text[self.texthead];
-        }
 
         fn lookingAt(self: @This(), c: u8) bool {
             return self.texthead < self.text.len and self.text[self.texthead] == c;
@@ -173,42 +157,35 @@ pub fn VM(
             const yield = mode == .yield_each;
 
             vm: switch (self.codehead) {
-                inline 0...P.code.len - 1 => |I| {
-                    const I1 = I + 1;
-                    self.codehead = I1;
-                    const nextchar = self.peek() orelse 0;
-                    // Flag to indicate whether current instruction succeeded and continued
-                    // If not set, we trigger failure/backtrack logic below.
-                    var advanced = false;
+                inline 0...P.code.len - 1 => |codebase| {
+                    const nextcode = codebase + 1;
 
-                    switch (comptime code[I]) {
-                        inline .Char => |c| {
-                            if (nextchar == c) {
-                                self.texthead += 1;
-                                if (yield) return .Running else {
-                                    advanced = true;
-                                    continue :vm I1;
-                                }
-                            }
-                        },
+                    // We usually advance; some branches overwrite this.
+                    self.codehead = nextcode;
 
+                    // To avoid bounds checking, the text has a zero sentinel.
+                    const nextchar = self.text[self.texthead];
+
+                    switch (comptime code[codebase]) {
                         inline .CharSet => |charmask| {
                             if (charmask.isSet(nextchar)) {
                                 self.texthead += 1;
                                 if (yield) return .Running else {
-                                    advanced = true;
-                                    continue :vm I1;
+                                    continue :vm nextcode;
                                 }
                             }
                         },
 
                         inline .String => |s| {
-                            if (self.ensure(self.texthead, s.len)) {
+                            if (self.texthead + s.len <= self.text.len) {
+                                @branchHint(.likely);
+
                                 if (std.mem.eql(u8, self.text[self.texthead .. self.texthead + s.len], s)) {
+                                    @branchHint(.unlikely);
                                     self.texthead += s.len;
+
                                     if (yield) return .Running else {
-                                        advanced = true;
-                                        continue :vm I1;
+                                        continue :vm nextcode;
                                     }
                                 }
                             }
@@ -217,24 +194,22 @@ pub fn VM(
                         inline .ChoiceRel => |d| {
                             self.savelist[self.savehead] = .{
                                 .markhead = self.markhead,
-                                .codehead = @as(usize, @intCast(@as(isize, @intCast(I)) + 1 + d)),
+                                .codehead = @as(usize, @intCast(@as(isize, @intCast(codebase)) + 1 + d)),
                                 .texthead = self.texthead,
                             };
 
                             self.savehead += 1;
                             if (yield) return .Running else {
-                                advanced = true;
-                                continue :vm I1;
+                                continue :vm nextcode;
                             }
                         },
 
                         inline .CommitRel => |d| {
                             self.savehead -= 1;
-                            const nextcode = (@as(usize, @intCast(@as(isize, I) + 1 + d)));
-                            self.codehead = nextcode;
+                            const skipcode = (@as(usize, @intCast(@as(isize, codebase) + 1 + d)));
+                            self.codehead = skipcode;
                             if (yield) return .Running else {
-                                advanced = true;
-                                continue :vm nextcode;
+                                continue :vm skipcode;
                             }
                         },
 
@@ -246,8 +221,7 @@ pub fn VM(
                                 if (e.good) {
                                     self.texthead = e.next;
                                     if (yield) return .Running else {
-                                        advanced = true;
-                                        continue :vm I1;
+                                        continue :vm nextcode;
                                     }
                                 }
                             } else {
@@ -256,13 +230,12 @@ pub fn VM(
                                 self.marklist[self.markhead] = .{
                                     .rulekind = rulekind,
                                     .texthead = self.texthead,
-                                    .nextcode = I1,
+                                    .nextcode = nextcode,
                                 };
 
                                 self.codehead = rulecode;
 
                                 if (yield) return .Running else {
-                                    advanced = true;
                                     continue :vm rulecode;
                                 }
                             }
@@ -283,15 +256,13 @@ pub fn VM(
                             self.markhead -= 1;
 
                             if (yield) return .Running else {
-                                advanced = true;
                                 continue :vm mark.nextcode;
                             }
                         },
 
-                        .EndInput => if (self.atEnd()) {
+                        .EndInput => if (self.texthead >= self.text.len) {
                             if (yield) return .Running else {
-                                advanced = true;
-                                continue :vm I1;
+                                continue :vm nextcode;
                             }
                         },
 
@@ -299,34 +270,32 @@ pub fn VM(
                         .Accept => return .Ok,
                     }
 
-                    if (!advanced) {
-                        if (self.savehead != 0) {
-                            @branchHint(.likely);
-                            self.savehead -= 1;
+                    if (self.savehead != 0) {
+                        @branchHint(.likely);
 
-                            const failsave = self.savelist[self.savehead];
+                        self.savehead -= 1;
+                        const failsave = self.savelist[self.savehead];
 
-                            if (backpack) |map| {
-                                // save failure result for any rules we are abandoning
-                                var i = self.markhead;
-                                while (i > failsave.markhead) : (i -= 1) {
-                                    const failmark = self.marklist[i];
-                                    map.put(failmark.rulekind, failmark.texthead, .{
-                                        .good = false,
-                                        .next = failmark.texthead,
-                                    });
-                                }
+                        if (backpack) |map| {
+                            // save failure result for any rules we are abandoning
+                            var i = self.markhead;
+                            while (i > failsave.markhead) : (i -= 1) {
+                                const failmark = self.marklist[i];
+                                map.put(failmark.rulekind, failmark.texthead, .{
+                                    .good = false,
+                                    .next = failmark.texthead,
+                                });
                             }
-
-                            self.codehead = failsave.codehead;
-                            self.markhead = failsave.markhead;
-                            self.texthead = failsave.texthead;
-
-                            if (yield) return .Running else continue :vm self.codehead;
-                        } else {
-                            return .Fail;
                         }
+
+                        self.codehead = failsave.codehead;
+                        self.markhead = failsave.markhead;
+                        self.texthead = failsave.texthead;
+
+                        if (yield) return .Running else continue :vm self.codehead;
                     }
+
+                    return .Fail;
                 },
                 else => unreachable,
             }
@@ -335,7 +304,7 @@ pub fn VM(
         }
 
         pub fn parseFully(
-            src: []const u8,
+            src: [:0]const u8,
             comptime mode: ExecMode,
         ) !bool {
             var m = @This().init(src);
@@ -368,7 +337,7 @@ pub fn VM(
         };
 
         /// Execute parse in yield_each mode gathering instrumentation metrics.
-        pub fn runWithMetrics(src: []const u8) !Metrics {
+        pub fn runWithMetrics(src: [:0]const u8) !Metrics {
             var m = @This().init(src);
             defer m.deinit();
             var metrics: Metrics = .{};
@@ -401,13 +370,13 @@ pub fn VM(
             }
         }
 
-        pub fn runWithMetricsCached(src: []const u8, cache: *Packrat) !Metrics {
+        pub fn runWithMetricsUncached(src: [:0]const u8) !Metrics {
             var m = @This().init(src);
             defer m.deinit();
             var metrics: Metrics = .{};
             var prev_g: usize = m.savehead;
             while (true) {
-                const st = try m.tick(.yield_each, cache);
+                const st = try m.tick(.yield_each, null);
                 metrics.steps += 1;
                 if (m.savehead > metrics.max_back_height) metrics.max_back_height = m.savehead;
                 if (m.markhead > metrics.max_rule_height) metrics.max_rule_height = m.markhead;
@@ -442,21 +411,17 @@ pub fn Combinators(comptime G: type) type {
             Fail: void,
             Call: Rule,
             Ret: void,
-            Char: u8,
             CharSet: CharBitset,
             String: []const u8,
             EndInput: void,
             Accept: void,
         };
 
-        pub const WS = many0(oneOf(" \t\n\r"));
-        pub const ALPHA = classRanges(.{ .{ 'a', 'z' }, .{ 'A', 'Z' } });
-        pub const ALPHANUM = classRanges(.{ .{ 'a', 'z' }, .{ 'A', 'Z' }, .{ '0', '9' } });
-        pub const IDENT = seq(.{ ALPHA, many0(ALPHANUM) });
+        pub const space = zeroOrMany(charclass(" \t\n\r"));
 
-        pub const END = op1(.{ .EndInput = {} });
-        pub const ACCEPT = op1(.{ .Accept = {} });
-        pub const RET = op1(.{ .Ret = {} });
+        pub const eof = op1(.{ .EndInput = {} });
+        pub const ok = op1(.{ .Accept = {} });
+        pub const ret = op1(.{ .Ret = {} });
 
         pub inline fn OpN(comptime n: usize) type {
             return [n]Op;
@@ -468,11 +433,11 @@ pub fn Combinators(comptime G: type) type {
             return [1]Op{o};
         }
 
-        pub inline fn CH(comptime c: u8) Op1 {
-            return op1(.{ .Char = c });
+        pub inline fn char(comptime c: u8) Op1 {
+            return text(ascii[c .. c + 1]);
         }
 
-        pub inline fn STR(comptime s: []const u8) Op1 {
+        pub inline fn text(comptime s: []const u8) Op1 {
             return op1(.{ .String = s });
         }
 
@@ -503,15 +468,15 @@ pub fn Combinators(comptime G: type) type {
             return out;
         }
 
-        pub inline fn many0(comptime X: anytype) OpN(X.len + 2) {
+        pub inline fn zeroOrMany(comptime X: anytype) OpN(X.len + 2) {
             const to_end = X.len + 1; // from ChoiceRel next to end
             const back = -@as(i16, @intCast(X.len + 2)); // from CommitRel back to ChoiceRel
             return op1(.{ .ChoiceRel = @intCast(to_end) }) ++ X ++
                 op1(.{ .CommitRel = back });
         }
 
-        pub inline fn alt(comptime parts: anytype) OpN(sizeSum(parts) + (parts.len - 1) * 2) {
-            if (parts.len < 2) @compileError("alt needs at least 2 parts");
+        pub inline fn anyOf(comptime parts: anytype) OpN(sizeSum(parts) + (parts.len - 1) * 2) {
+            if (parts.len < 2) @compileError("choose needs at least 2 parts");
 
             // Precompute lengths of each alternative
             comptime var lens: [parts.len]usize = undefined;
@@ -556,38 +521,36 @@ pub fn Combinators(comptime G: type) type {
             return out;
         }
 
-        pub inline fn opt(comptime X: anytype) OpN(X.len + 2) {
-            return alt(.{ X, .{} });
+        pub inline fn maybe(comptime X: anytype) OpN(X.len + 2) {
+            return anyOf(.{ X, .{} });
         }
 
-        // One-or-more occurrences built from many0
-        pub inline fn many1(comptime X: anytype) OpN(X.len + (X.len + 2)) {
-            return seq(.{ X, many0(X) });
+        pub inline fn several(comptime X: anytype) OpN(X.len + (X.len + 2)) {
+            return seq(.{ X, zeroOrMany(X) });
         }
 
-        // Character class from multiple ranges. Example:
-        // classRanges(.{ .{ 'a','z' }, .{ 'A','Z' }, .{ '0','9' } })
-        pub inline fn classRanges(comptime ranges: anytype) Op1 {
+        pub inline fn charclass(comptime ranges: anytype) Op1 {
             var set = CharBitset.initEmpty();
 
-            inline for (ranges) |r| {
-                set.setRangeValue(std.bit_set.Range{ .start = r[0], .end = r[1] + 1 }, true);
-            }
-
-            return op1(.{ .CharSet = set });
-        }
-
-        pub inline fn oneOf(comptime chars: []const u8) Op1 {
-            var set = CharBitset.initEmpty();
-
-            inline for (chars) |c| {
-                set.set(c);
-            }
+            for (ranges) |r|
+                switch (@TypeOf(r)) {
+                    u8, comptime_int => set.set(r),
+                    else => inline for (r) |c|
+                        set.set(c),
+                };
 
             return op1(.{ .CharSet = set });
         }
     };
 }
+
+pub const ascii = blk: {
+    var array: [128]u8 = undefined;
+    for (0..127) |i| {
+        array[i] = i;
+    }
+    break :blk array;
+};
 
 // -------------------------
 // JSON grammar (ASCII-only)
@@ -595,164 +558,125 @@ pub fn Combinators(comptime G: type) type {
 pub const JSONGrammar = struct {
     const C = Combinators(@This());
 
-    const HEX = C.classRanges(.{
-        .{ '0', '9' },
-        .{ 'A', 'F' },
-        .{ 'a', 'f' },
+    const hexdigit = C.charclass(.{
+        ascii['0' .. '9' + 1],
+        ascii['A' .. 'F' + 1],
+        ascii['a' .. 'f' + 1],
     });
 
-    // Unescaped JSON string char: any ASCII except control, '"' and '\\'
-    const UnescapedChar = C.classRanges(.{
-        .{ ' ', '!' },
-        .{ '#', '[' },
-        .{ ']', '~' },
+    // any ASCII except control, '"' and '\\'
+    const stringchar = C.charclass(.{
+        " !",
+        ascii['#' .. '[' + 1],
+        ascii[']' .. '~' + 1],
     });
 
-    // Escaped: \\" \\ \/ \b \f \n \r \t or \uXXXX
-    const SimpleEscape = C.seq(.{
-        C.CH('\\'),
-        C.oneOf("\"\\/bfnrt"),
-    });
+    const simple_escape = C.char('\\') ++ C.charclass(
+        \\"\bfnrt
+    );
 
-    const UnicodeEscape = C.seq(.{ C.STR("\\u"), HEX, HEX, HEX, HEX });
+    const uXXXX = C.text("\\u") ++ hexdigit ** 4;
 
     // String <- '"' (Unescaped / Escape)* '"'
-    pub const String = C.seq(.{
-        C.CH('"'),
-        C.many0(C.alt(.{ UnescapedChar, SimpleEscape, UnicodeEscape })),
-        C.CH('"'),
-        C.RET,
-    });
+    pub const String =
+        C.char('"') ++
+        C.zeroOrMany(C.anyOf(.{ stringchar, simple_escape, uXXXX })) ++
+        C.char('"') ++
+        C.ret;
 
     // Number per JSON (no leading zeros unless exactly 0)
     // Integer <- '-'? ( '0' / [1-9] [0-9]* )
     // Frac <- ('.' [0-9]+)?  using NUMBER for [0-9]+
     // Exp  <- ([eE] [+-]? [0-9]+)?
-    const NUMBER = C.many1(C.classRanges(.{.{ '0', '9' }}));
-    const DIGIT1_9 = C.classRanges(.{.{ '1', '9' }});
-    const SignOpt = C.opt(C.CH('-'));
-    const IntPart = C.alt(.{ C.CH('0'), C.seq(.{ DIGIT1_9, C.many0(NUMBER) }) });
-    const FracOpt = C.opt(C.seq(.{ C.CH('.'), NUMBER }));
-    const ExpOpt = C.opt(C.seq(.{ C.oneOf("eE"), C.opt(C.oneOf("+-")), NUMBER }));
-    pub const Number = C.seq(.{ SignOpt, IntPart, FracOpt, ExpOpt, C.RET });
+    const digit = C.several(C.charclass("0123456789"));
+    const nonzerodigit = C.charclass("123456789");
+    const maybe_minus = C.maybe(C.char('-'));
+    const integral = C.anyOf(.{ C.char('0'), nonzerodigit ++ C.zeroOrMany(digit) });
+    const fractional = C.maybe(C.seq(.{ C.char('.'), digit }));
+    const scientific = C.maybe(C.seq(.{ C.charclass("eE"), C.maybe(C.charclass("+-")), digit }));
+    pub const Number = C.seq(.{ maybe_minus, integral, fractional, scientific, C.ret });
 
     // Value <- Object / Array / String / Number / 'true' / 'false' / 'null'
-    pub const Value = C.alt(.{
+    pub const Value = C.anyOf(.{
         C.Call(.Object),
         C.Call(.Array),
         C.Call(.String),
         C.Call(.Number),
-        C.STR("true"),
-        C.STR("false"),
-        C.STR("null"),
-    }) ++ C.RET;
+        C.text("true"),
+        C.text("false"),
+        C.text("null"),
+    }) ++ C.ret;
 
     // Member <- String WS ':' WS Value
     pub const Member = C.seq(.{
         C.Call(.String),
-        C.WS,
-        C.CH(':'),
-        C.WS,
+        C.space,
+        C.char(':'),
+        C.space,
         C.Call(.Value),
-        C.RET,
+        C.ret,
     });
 
     // Members <- Member (WS ',' WS Member)*
     pub const Members = C.seq(.{
         C.Call(.Member),
-        C.many0(C.seq(.{ C.WS, C.CH(','), C.WS, C.Call(.Member) })),
-        C.RET,
+        C.zeroOrMany(C.seq(.{ C.space, C.char(','), C.space, C.Call(.Member) })),
+        C.ret,
     });
 
     // Object <- '{' WS Members? WS '}'
     pub const Object = C.seq(.{
-        C.CH('{'),
-        C.WS,
-        C.opt(C.Call(.Members)),
-        C.WS,
-        C.CH('}'),
-        C.RET,
+        C.char('{'),
+        C.space,
+        C.maybe(C.Call(.Members)),
+        C.space,
+        C.char('}'),
+        C.ret,
     });
 
     // Elements <- Value (WS ',' WS Value)*
     pub const Elements = C.seq(.{
         C.Call(.Value),
-        C.many0(C.seq(.{ C.WS, C.CH(','), C.WS, C.Call(.Value) })),
-        C.RET,
+        C.zeroOrMany(C.seq(.{ C.space, C.char(','), C.space, C.Call(.Value) })),
+        C.ret,
     });
 
     // Array <- '[' WS Elements? WS ']'
     pub const Array = C.seq(.{
-        C.CH('['),
-        C.WS,
-        C.opt(C.Call(.Elements)),
-        C.WS,
-        C.CH(']'),
-        C.RET,
+        C.char('['),
+        C.space,
+        C.maybe(C.Call(.Elements)),
+        C.space,
+        C.char(']'),
+        C.ret,
     });
 
-    // Start <- WS Value WS EOF
-    pub const Start = C.seq(.{
-        C.WS,
+    // start <- WS Value WS EOF
+    pub const start = C.seq(.{
+        C.space,
         C.Call(.Value),
-        C.WS,
-        C.END,
-        C.ACCEPT,
+        C.space,
+        C.eof,
+        C.ok,
     });
 };
 
 const JSONParser = VM(JSONGrammar, 32, 32);
 
-fn parseJSON(src: []const u8) !bool {
+fn parseJSON(src: [:0]const u8) !bool {
     return JSONParser.parseFully(src, .auto_continue);
 }
 
-fn expectJsonOk(src: []const u8) !void {
-    try std.testing.expect(try parseJSON(src));
+fn expectJsonOk(src: [:0]const u8) !void {
+    try std.testing.expect(try parseJSON(src[0..src.len :0]));
 }
 
-fn expectJsonFail(src: []const u8) !void {
-    try std.testing.expect(!try parseJSON(src));
+fn expectJsonFail(src: [:0]const u8) !void {
+    try std.testing.expect(!try parseJSON(src[0..src.len :0]));
 }
 
-test "show json grammar ops" {
-    const P = JSONParser.P;
-    std.debug.print("JSON grammar has {d} ops\n", .{P.code.len});
-    var i: usize = 0;
-    for (P.code) |op| {
-        switch (@as(P.Op, op)) {
-            .ChoiceRel => std.debug.print("^", .{}),
-            .CommitRel => std.debug.print(".", .{}),
-            .Fail => std.debug.print("F", .{}),
-            .Call => std.debug.print(">", .{}),
-            .Ret => std.debug.print("<", .{}),
-            .Char => |c| std.debug.print("{c}", .{c}),
-            .EndInput => std.debug.print("$", .{}),
-            .Accept => std.debug.print(".", .{}),
-            .String => |s| std.debug.print("\"{s}\"", .{s}),
-            .CharSet => |set| {
-                std.debug.print("[", .{});
-                var iter = set.iterator(.{});
-                while (iter.next()) |b| {
-                    if (b == '\n') {
-                        std.debug.print("\\n", .{});
-                    } else if (b == '\r') {
-                        std.debug.print("\\r", .{});
-                    } else if (b == '\t') {
-                        std.debug.print("\\t", .{});
-                    } else if (b == ' ') {
-                        std.debug.print("␣", .{});
-                    } else if (b < 32 or b == 127) {
-                        std.debug.print("\\x{x}", .{b});
-                    } else {
-                        std.debug.print("{c}", .{@as(u8, @intCast(b))});
-                    }
-                }
-                std.debug.print("]", .{});
-            },
-        }
-        i += 1;
-    }
+test "JSON grammar statistics" {
+    try std.testing.expectEqual(135, JSONParser.P.code.len);
 }
 
 test "json primitives" {
@@ -792,11 +716,11 @@ test "json arrays and objects" {
 // 1. BacktrackGrammar: an alt where the first alternative shares a long
 //    prefix with the second but fails on the final character, requiring the
 //    engine to rewind almost the entire input.
-//       Start <- ( "aaaaaaaaac" / 'a'+ 'b' ) EOF
+//       start <- ( "aaaaaaaaac" / 'a'+ 'b' ) EOF
 //    Parsing "aaaaaaaaab" must explore the failing long literal then backtrack
 //    and succeed via the second alternative.
 // 2. GreedyGrammar: uses a greedy many0 followed by a required "ab" tail:
-//       Start <- 'a'* 'a' 'b' EOF   (equivalently 'a'+ 'b')
+//       start <- 'a'* 'a' 'b' EOF   (equivalently 'a'+ 'b')
 //    Implemented deliberately with many0 + explicit 'a' 'b' to force the loop
 //    to over-consume and then backtrack one step so the trailing "ab" matches.
 // Both grammars are intentionally small/ambiguous compared to JSON (which is
@@ -805,13 +729,13 @@ test "json arrays and objects" {
 pub const BacktrackGrammar = struct {
     const C = Combinators(@This());
 
-    pub const Long = C.seq(.{ C.STR("aaaaaaaaac"), C.RET });
-    pub const APlusB = C.seq(.{ C.many1(C.CH('a')), C.CH('b'), C.RET });
+    pub const Long = C.seq(.{ C.text("aaaaaaaaac"), C.ret });
+    pub const APlusB = C.seq(.{ C.several(C.char('a')), C.char('b'), C.ret });
 
-    pub const Start = C.seq(.{
-        C.alt(.{ C.Call(.Long), C.Call(.APlusB) }),
-        C.END,
-        C.ACCEPT,
+    pub const start = C.seq(.{
+        C.anyOf(.{ C.Call(.Long), C.Call(.APlusB) }),
+        C.eof,
+        C.ok,
     });
 };
 
@@ -820,28 +744,28 @@ pub const GreedyGrammar = struct {
     // An ordered choice of decreasing-length strings sharing long prefixes.
     // The parser will attempt longer ones first and backtrack down.
     // We purposefully omit some lengths so inputs trigger several failures.
-    const Chain = C.alt(.{
-        C.STR("aaaaaaaaab"), // 9 a's + b (too long for short inputs)
-        C.STR("aaaaaaab"), // 7 a's + b
-        C.STR("aaaaaab"), // 6 a's + b
-        C.STR("aaaaab"), // 5 a's + b
-        C.STR("aaaab"), // 4 a's + b
-        C.STR("aaab"), // 3 a's + b
-        C.STR("aab"), // 2 a's + b
-        C.STR("ab"), // 1 a + b
+    const Chain = C.anyOf(.{
+        C.text("aaaaaaaaab"), // 9 a's + b (too long for short inputs)
+        C.text("aaaaaaab"), // 7 a's + b
+        C.text("aaaaaab"), // 6 a's + b
+        C.text("aaaaab"), // 5 a's + b
+        C.text("aaaab"), // 4 a's + b
+        C.text("aaab"), // 3 a's + b
+        C.text("aab"), // 2 a's + b
+        C.text("ab"), // 1 a + b
     });
 
-    pub const Start = C.seq(.{ Chain, C.END, C.ACCEPT });
+    pub const start = C.seq(.{ Chain, C.eof, C.ok });
 };
 
 const BacktrackParser = VM(BacktrackGrammar, 32, 32);
 const GreedyParser = VM(GreedyGrammar, 32, 32);
 
-fn parseBacktrack(src: []const u8) !bool {
+fn parseBacktrack(src: [:0]const u8) !bool {
     return BacktrackParser.parseFully(src, .auto_continue);
 }
 
-fn parseGreedy(src: []const u8) !bool {
+fn parseGreedy(src: [:0]const u8) !bool {
     return GreedyParser.parseFully(src, .auto_continue);
 }
 
@@ -857,125 +781,102 @@ test "backtracking alt with long common prefix" {
 }
 
 test "backtracking inside greedy repetition" {
-    // Should match via progressively shorter alternatives
     try std.testing.expect(try parseGreedy("aaaaab"));
     try std.testing.expect(try parseGreedy("ab"));
-    // Negative: missing 'b'
     try std.testing.expect(!try parseGreedy("aaaaa"));
 
-    // Count steps in yield_each mode to ensure multiple backtracks happened
     const src = "aaaaab"; // should skip 3 longer failing alts before match
     var m = GreedyParser.init(src);
     defer m.deinit();
-    var steps: usize = 0;
-    while (true) : (steps += 1) {
+
+    for (0..10) |_| {
         const st = try m.tick(.yield_each, null);
-        switch (st) {
-            .Running => continue,
-            .Ok => break,
-            .Fail => return error.GreedyTestUnexpectedFail,
-        }
+        try std.testing.expectEqual(.Running, st);
     }
-    // Expect at least several steps (greater than raw length) due to backtracking
-    try std.testing.expect(steps > src.len);
-    std.debug.print("greedy backtracking test: steps={d}\n", .{steps});
+
+    try std.testing.expectEqual(.Ok, try m.tick(.yield_each, null));
 }
 
 test "metrics collection on backtracking grammar" {
-    const src = "aaaaaaaaab"; // triggers long alternative failure then shorter match
-    const metrics = try BacktrackParser.runWithMetrics(src);
+    const metrics = try BacktrackParser.runWithMetrics("aaaaaaaaab");
     try std.testing.expect(metrics.accepted);
-    try std.testing.expect(metrics.backtracks > 0);
-    try std.testing.expect(metrics.max_back_height > 0);
-    try std.testing.expect(metrics.steps > src.len);
-    std.debug.print(
-        "backtrack metrics: steps={d} backtracks={d} max_back={d} max_rule={d} accepted={}\n",
-        .{ metrics.steps, metrics.backtracks, metrics.max_back_height, metrics.max_rule_height, metrics.accepted },
-    );
+    try std.testing.expectEqual(10, metrics.backtracks);
+    try std.testing.expectEqual(1, metrics.max_back_height);
+    try std.testing.expectEqual(35, metrics.steps);
 }
 
 test "metrics collection on simple json token" {
     const metrics = try JSONParser.runWithMetrics("true");
     try std.testing.expect(metrics.accepted);
-    try std.testing.expect(metrics.max_rule_height > 0);
-    // JSON 'true' has no ambiguity: backtracks may be zero
-    try std.testing.expect(metrics.backtracks >= 0);
-    std.debug.print(
-        "json metrics: steps={d} backtracks={d} max_back={d} max_rule={d} accepted={}\n",
-        .{ metrics.steps, metrics.backtracks, metrics.max_back_height, metrics.max_rule_height, metrics.accepted },
-    );
+    try std.testing.expectEqual(2, metrics.max_rule_height);
+    try std.testing.expectEqual(27, metrics.steps);
+    try std.testing.expectEqual(9, metrics.backtracks);
 }
 
-// ------------------------------------------------------
-// Packrat demonstration grammar (pathological backtracking)
-// ------------------------------------------------------
-// This grammar creates a chain of many optional 'a' terminals followed by a
-// required 'b'. Input with far fewer 'a's than optional slots forces the
-// engine to explore a large combination space of which optionals are present.
-// A packrat parser would memoize each rule result at each position and avoid
-// re-parsing the overlapping suffixes, cutting the explosion.
-// Start <- ('a'?){N} 'b' END ACCEPT  (N = 12 here)
-// We test on input of 4 'a's then 'b' so the parser must try many placements.
-pub const PackratDemoGrammar = struct {
+pub const BlowupGrammar = struct {
     const C = Combinators(@This());
-    // Prefix <- 'a' Prefix / 'a'
-    // Start  <- Prefix 'b' END ACCEPT
-    // Input a^n b causes many re-parsings of the same suffix of a's when not memoized,
-    // because each recursion level, after the deeper failure at 'b', explores the
-    // shorter alternative. This is a classic exponential-style PEG backtracking pattern.
-    pub const Prefix = C.alt(.{ C.seq(.{ C.CH('a'), C.Call(.Prefix) }), C.CH('a') }) ++ C.RET;
-    pub const Start = C.seq(.{ C.Call(.Prefix), C.CH('b'), C.END, C.ACCEPT });
+
+    /// Shout ::= ('a' Shout) / 'a'
+    pub const shout = C.anyOf(.{
+        C.seq(.{ C.char('a'), C.Call(.shout) }),
+        C.char('a'),
+    }) ++ C.ret;
+
+    /// start ::= A 'b' EOF
+    pub const start = C.seq(.{
+        C.Call(.shout),
+        C.char('b'),
+        C.eof,
+        C.ok,
+    });
 };
 
-const PackratDemoParser = VM(PackratDemoGrammar, 4096, 4096);
+const BlowupVM = VM(BlowupGrammar, 4096, 4096);
 
 test "packrat blowup demonstration" {
-    const n: usize = 18; // adjustable depth; increase for more dramatic effect
-    var buf: [n + 1]u8 = undefined; // n 'a's + 'b'
-    var i: usize = 0;
-    while (i < n) : (i += 1) buf[i] = 'a';
-    buf[n] = 'b';
-    const input = buf[0..];
-    const metrics = try PackratDemoParser.runWithMetrics(input);
+    const n: usize = 20;
+    const buf: *const [(n + 1):0]u8 = "a" ** n ++ "b";
+    const metrics = try BlowupVM.runWithMetrics(buf);
+
     try std.testing.expect(metrics.accepted);
-    std.debug.print(
-        "packrat demo: n={d} steps={d} backtracks={d} max_back={d} max_rule={d}\n",
-        .{ n, metrics.steps, metrics.backtracks, metrics.max_back_height, metrics.max_rule_height },
-    );
-    // Heuristic expectations: steps should exceed n significantly (super-linear)
-    // and multiple backtracks occur roughly on order of n.
-    try std.testing.expect(metrics.steps > n * 4);
-    try std.testing.expect(metrics.backtracks >= n);
+    try std.testing.expectEqual(107, metrics.steps);
+    try std.testing.expectEqual(21, metrics.backtracks);
 }
 
-test "packrat cache effectiveness" {
-    const gpa = std.heap.page_allocator;
-    var cache_map = PackratDemoParser.Packrat.Auto.init(gpa);
-    defer cache_map.deinit();
-    var cache = PackratDemoParser.Packrat{ .map = &cache_map };
+const PackratGrammar = struct {
+    const C = Combinators(@This());
 
-    const n: usize = 24; // deeper for clearer benefit
-    var buf: [n + 1]u8 = undefined;
-    var i: usize = 0;
-    while (i < n) : (i += 1) buf[i] = 'a';
-    buf[n] = 'b';
-    const input = buf[0..];
+    pub const start = C.anyOf(.{
+        C.Call(.x) ++ C.eof, C.Call(.x) ++ C.Call(.x) ++ C.eof,
+    }) ++ C.ok;
 
-    const first_cached = try PackratDemoParser.runWithMetricsCached(input, &cache);
-    const first_hits = cache.hits;
-    const first_misses = cache.misses;
-    // Second run reuses populated cache; expect more hits and fewer steps.
-    const second_cached = try PackratDemoParser.runWithMetricsCached(input, &cache);
-    std.debug.print(
-        "packrat cache effectiveness: n={d}\n  first:  steps={d} backtracks={d} hits={d} misses={d}\n  second: steps={d} backtracks={d} hits={d} misses={d}\n",
-        .{ n, first_cached.steps, first_cached.backtracks, first_hits, first_misses, second_cached.steps, second_cached.backtracks, cache.hits, cache.misses },
-    );
-    try std.testing.expect(second_cached.steps < first_cached.steps);
-    try std.testing.expect(cache.hits > first_hits);
+    pub const x = C.anyOf(.{
+        C.char('(') ++ C.Call(.x) ++ C.char(')'),
+        C.char('x'),
+    }) ++ C.ret;
+};
+
+fn pedometer(SomeVM: type, src: [:0]const u8, mode: enum { packrat, naive }) !usize {
+    const metrics = try switch (mode) {
+        .packrat => SomeVM.runWithMetrics(src),
+        .naive => SomeVM.runWithMetricsUncached(src),
+    };
+
+    try std.testing.expect(metrics.accepted);
+    return metrics.steps;
 }
 
-pub export fn parse(src: [*]const u8, len: usize) u8 {
-    var m = JSONParser.init(src[0..len]);
+test "packrat caching benefit" {
+    const PackratVM = VM(PackratGrammar, 32, 32);
+
+    try std.testing.expectEqual(
+        27,
+        try pedometer(PackratVM, "(((x)))", .naive),
+    );
+}
+
+pub export fn parse(src: [*:0]const u8, len: usize) u8 {
+    var m = JSONParser.init(src[0..len :0]);
     defer m.deinit();
     defer std.debug.print("\n", .{});
     while (true) {
@@ -1043,4 +944,37 @@ test "yield mode complex" {
 
     std.debug.print("Parsing '[1, 2, 3]' took {d} steps in yield mode\n", .{count});
     try std.testing.expect(count > 10); // Should take many steps
+}
+
+fn printInstruction(P: type, op: P.Op) void {
+    switch (@as(P.Op, op)) {
+        .ChoiceRel => std.debug.print("^", .{}),
+        .CommitRel => std.debug.print(".", .{}),
+        .Fail => std.debug.print("F", .{}),
+        .Call => std.debug.print(">", .{}),
+        .Ret => std.debug.print("<", .{}),
+        .EndInput => std.debug.print("$", .{}),
+        .Accept => std.debug.print(".", .{}),
+        .String => |s| std.debug.print("\"{s}\"", .{s}),
+        .CharSet => |set| {
+            std.debug.print("[", .{});
+            var iter = set.iterator(.{});
+            while (iter.next()) |b| {
+                if (b == '\n') {
+                    std.debug.print("\\n", .{});
+                } else if (b == '\r') {
+                    std.debug.print("\\r", .{});
+                } else if (b == '\t') {
+                    std.debug.print("\\t", .{});
+                } else if (b == ' ') {
+                    std.debug.print("␣", .{});
+                } else if (b < 32 or b == 127) {
+                    std.debug.print("\\x{x}", .{b});
+                } else {
+                    std.debug.print("{c}", .{@as(u8, @intCast(b))});
+                }
+            }
+            std.debug.print("]", .{});
+        },
+    }
 }
