@@ -1,20 +1,25 @@
-// TODO: ZigMiniGrammar Roadmap
-// [x] Integrate comments into whitespace (// line) and tighten spacing
+// TODO: ZigMiniGrammar Roadmap (tracked subset)
+// [x] Comments in whitespace (// line)
 // [x] Keyword filtering for identifiers
-// [x] Call arguments and ExprList (function calls with args)
-// [x] Assignment (Identifier '=' Expr)
-// [ ] Basic operators and precedence (+ - * / %)
-// [x] TypeExpr beyond identifiers (pointers, arrays, optionals, slices)
-// [x] Return types: full TypeExpr including error unions (A!B)
-// [ ] If/while/for statements and expressions
-// [ ] ContainerDecl: minimal struct/union/enum bodies
-// [x] String and char literals
-// [ ] Error set, try/catch/orelse
-// [ ] Switch expression and prongs
-// [ ] defer/errdefer/suspend/nosuspend blocks
-// [ ] Visibility/ABI: extern/export/threadlocal/addrspace/linksection
+// [x] Call arguments and ExprList
+// [x] Assignment and basic binary ops (+,-,*,/,%)
+// [x] TypeExpr: ?, *, []T, [N]T; error unions (A!B)
+// [x] Top-level decls: const/var (optional pub)
+// [x] Containers: struct/union/enum (simple bodies)
+// [x] Strings and char literals
+// [x] Control flow as statements and expressions: if/while/for, switch
+// [x] Payloads: if/while/for (ptr, list), switch prong index
+// [x] Harmonize stmt/expr structure with official grammar (BlockExprStatement, VarDeclExprStatement)
+// [ ] Error sets and try/catch/orelse
 // [ ] Builtins and @identifiers
-// [ ] Top-level decls beyond fn (var/const, test, comptime)
+// [ ] Switch: ranges, inline prongs, complex cases
+// [ ] For/while: full argument forms, continue expressions
+// [ ] Labels and break/continue values (e.g. break :blk expr)
+// [ ] Visibility/ABI extras (extern/threadlocal/addrspace/linksection)
+// [ ] test/comptime blocks
+// [ ] defer/errdefer/suspend/nosuspend
+// [ ] String/char literal completeness (unicode, multiline forms)
+// [ ] Operator/precedence completeness (bitwise, shift, compare, boolean)
 const std = @import("std");
 
 comptime {
