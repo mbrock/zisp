@@ -4,7 +4,7 @@
 // [x] Call arguments and ExprList (function calls with args)
 // [x] Assignment (Identifier '=' Expr)
 // [ ] Basic operators and precedence (+ - * / %)
-// [ ] TypeExpr beyond identifiers (pointers, arrays, optionals, slices)
+// [x] TypeExpr beyond identifiers (pointers, arrays, optionals, slices)
 // [ ] Return types: full TypeExpr including error unions (expr!T)
 // [ ] If/while/for statements and expressions
 // [ ] ContainerDecl: minimal struct/union/enum bodies
@@ -54,6 +54,8 @@ pub const ZigMiniGrammar = struct {
     const rparen = C.char(')');
     const lbrace = C.char('{');
     const rbrace = C.char('}');
+    const lbracket = C.char('[');
+    const rbracket = C.char(']');
     const colon = C.char(':');
     const comma = C.char(',');
     const semicolon = C.char(';');
@@ -78,8 +80,22 @@ pub const ZigMiniGrammar = struct {
     });
     pub const Integer = C.seq(.{ C.several(digit), C.ret });
 
-    // TypeExpr (highly simplified): just an Identifier for now
-    pub const TypeExpr = C.seq(.{ C.Call(.Identifier), C.ret });
+    // Type expressions (expanded):
+    //   TypeExpr <- TypePrefix* TypeAtom
+    //   TypeAtom <- Identifier
+    //   TypePrefix <- '?' / '*' / ('[' WS Expr WS ']' | '[' WS ']' )
+    pub const TypeAtom = C.seq(.{ C.Call(.Identifier), C.ret });
+
+    const SliceStart = C.seq(.{ lbracket, WS, rbracket });
+    const ArrayStart = C.seq(.{ lbracket, WS, C.Call(.Expr), WS, rbracket });
+    const BrackType = C.anyOf(.{ ArrayStart, SliceStart });
+
+    const TypePrefix = C.anyOf(.{ C.char('?'), star: {
+            const s = C.char('*');
+            break :star s;
+        }, BrackType });
+
+    pub const TypeExpr = C.seq(.{ C.zeroOrMany(TypePrefix), C.Call(.TypeAtom), C.ret });
 
     // Primary <- CallExpr / Integer / Identifier
     pub const Primary = C.anyOf(.{
@@ -342,4 +358,20 @@ test "file 017_mul_precedence" {
 
 test "file 018_nested_ops_calls" {
     try std.testing.expect(try parseFile("test/018_nested_ops_calls.zig"));
+}
+
+test "file 019_param_pointer" {
+    try std.testing.expect(try parseFile("test/019_param_pointer.zig"));
+}
+
+test "file 020_param_slice_array" {
+    try std.testing.expect(try parseFile("test/020_param_slice_array.zig"));
+}
+
+test "file 021_return_optional_ptr" {
+    try std.testing.expect(try parseFile("test/021_return_optional_ptr.zig"));
+}
+
+test "file 022_complex_type_prefixes" {
+    try std.testing.expect(try parseFile("test/022_complex_type_prefixes.zig"));
 }
