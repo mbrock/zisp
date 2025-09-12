@@ -202,6 +202,21 @@ pub fn VM(
                             }
                         },
 
+                        inline .CommitRewindRel => |d| {
+                            // Pop one backtrack frame, jump relative, and rewind
+                            // the text head to the saved position. Does NOT
+                            // restore markhead (unlike failure), matching CommitRel
+                            // semantics besides the rewind.
+                            self.savehead -= 1;
+                            const s = self.savelist[self.savehead];
+                            self.texthead = s.texthead;
+                            const skipcode = (@as(usize, @intCast(@as(isize, codebase) + 1 + d)));
+                            self.codehead = skipcode;
+                            if (yield) return .Running else {
+                                continue :vm skipcode;
+                            }
+                        },
+
                         inline .Call => |r| {
                             const rulekind: u32 = @intCast(@intFromEnum(r));
                             const rulecode = P.rule_ip[rulekind];
@@ -399,6 +414,9 @@ pub fn Combinators(comptime G: type) type {
         pub const Op = union(enum) {
             ChoiceRel: i16,
             CommitRel: i16,
+            // Pop backtrack frame, jump relative, and rewind texthead
+            // to the saved position from that frame.
+            CommitRewindRel: i16,
             Fail: void,
             Call: Rule,
             Ret: void,
@@ -517,57 +535,38 @@ pub fn Combinators(comptime G: type) type {
         }
 
         /// Positive lookahead: succeeds iff `inner` would succeed, consumes 0 chars.
-        /// Encoding idea:
-        ///   S = save to END            (success continues at END)
-        ///   F = save to FAIL_LABEL     (failure path)
+        /// Simpler encoding with CommitRewindRel:
+        ///   F = save to FAIL_LABEL
         ///   inner
-        ///   commit -> SUCC_TRIGGER     (pop F)
-        ///   (pad)
-        ///   SUCC_TRIGGER: fail         (restore S -> END)
-        ///   FAIL_LABEL: commit+fail    (pop S, then fail outward)
-        pub inline fn lookahead(comptime inner: anytype) OpN(inner.len + 7) {
+        ///   commit_rewind -> END   (pop F, rewind text)
+        ///   FAIL_LABEL: fail      (propagate failure)
+        pub inline fn lookahead(comptime inner: anytype) OpN(inner.len + 3) {
             const n = inner.len;
+            const to_faillbl = n + 1; // ChoiceRel -> FAIL_LABEL (at index n+2)
+            const j_to_end = 1; // CommitRewindRel from (n+1) -> END (at n+3)
 
-            // Offsets are relative to "current index + 1".
-            const to_end = n + 6; // Choice[0] -> END (fallthrough of the whole op)
-            const to_faillbl = n + 3; // Choice[1] -> FAIL_LABEL
-            const j_succ_trig = 1; // Commit after inner -> SUCC_TRIGGER
-            const j_pop_then_fail = 0; // Commit at FAIL_LABEL: pop S then fallthrough to Fail
-
-            return op1(.{ .ChoiceRel = @intCast(to_end) }) ++ // S
-                op1(.{ .ChoiceRel = @intCast(to_faillbl) }) ++ // F
+            return op1(.{ .ChoiceRel = @intCast(to_faillbl + 0) }) ++ // F
                 inner ++
-                op1(.{ .CommitRel = @intCast(j_succ_trig) }) ++ // -> SUCC_TRIGGER
-                op1(.{ .Fail = {} }) ++ // (padding, skipped)
-                op1(.{ .Fail = {} }) ++ // SUCC_TRIGGER: restore S -> END
-                op1(.{ .CommitRel = @intCast(j_pop_then_fail) }) ++ // FAIL_LABEL: pop S
-                op1(.{ .Fail = {} }); // then fail outward
+                op1(.{ .CommitRewindRel = @intCast(j_to_end) }) ++ // -> END
+                op1(.{ .Fail = {} }); // FAIL_LABEL
         }
 
         /// Negative lookahead: succeeds iff `inner` would fail, consumes 0 chars.
-        /// Encoding idea:
-        ///   S = save to FAIL_LABEL     (so success of inner causes failure)
-        ///   F = save to SUCC_LABEL     (so failure of inner becomes success)
+        /// Simpler encoding with CommitRewindRel:
+        ///   F = save to SUCC/END
         ///   inner
-        ///   commit -> AFTERPOP         (pop F)
-        ///   AFTERPOP: fail             (restore S -> FAIL_LABEL)
-        ///   SUCC_LABEL: commit (+1)    (pop S), skip FAIL_LABEL
-        ///   FAIL_LABEL: fail           (propagate failure)
-        pub inline fn notLookahead(comptime inner: anytype) OpN(inner.len + 6) {
+        ///   commit_rewind -> FAIL_LABEL  (pop F, rewind text)
+        ///   FAIL_LABEL: fail             (propagate failure)
+        ///   SUCC/END: fallthrough        (success)
+        pub inline fn notLookahead(comptime inner: anytype) OpN(inner.len + 3) {
             const n = inner.len;
+            const to_succ = n + 2; // ChoiceRel -> SUCC/END (at index n+3)
+            const j_to_fail = 0; // CommitRewindRel from (n+1) -> FAIL_LABEL (at n+2)
 
-            const to_faillbl = n + 4; // Choice[0] -> FAIL_LABEL
-            const to_succlbl = n + 2; // Choice[1] -> SUCC_LABEL
-            const j_afterpop = 0; // Commit after inner -> AFTERPOP
-            const j_skip_fail = 1; // SUCC_LABEL commit skips FAIL_LABEL
-
-            return op1(.{ .ChoiceRel = @intCast(to_faillbl) }) ++ // S
-                op1(.{ .ChoiceRel = @intCast(to_succlbl) }) ++ // F
+            return op1(.{ .ChoiceRel = @intCast(to_succ) }) ++ // F
                 inner ++
-                op1(.{ .CommitRel = @intCast(j_afterpop) }) ++ // -> AFTERPOP
-                op1(.{ .Fail = {} }) ++ // AFTERPOP: restore S -> FAIL_LABEL
-                op1(.{ .CommitRel = @intCast(j_skip_fail) }) ++ // SUCC_LABEL: pop S
-                op1(.{ .Fail = {} }); // FAIL_LABEL: propagate failure
+                op1(.{ .CommitRewindRel = @intCast(j_to_fail) }) ++ // -> FAIL_LABEL
+                op1(.{ .Fail = {} }); // FAIL_LABEL; fallthrough after this is SUCC/END
         }
 
         pub inline fn several(comptime X: anytype) OpN(X.len + (X.len + 2)) {

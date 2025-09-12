@@ -96,6 +96,7 @@ pub fn DebugPrinter(comptime Parser: type) type {
             switch (op) {
                 .ChoiceRel => |d| try self.writer.print("Choice(+{d})", .{d}),
                 .CommitRel => |d| try self.writer.print("Commit(+{d})", .{d}),
+                .CommitRewindRel => |d| try self.writer.print("CommitRewind(+{d})", .{d}),
                 .Fail => try self.writer.print("Fail", .{}),
                 .Call => |r| try self.writer.print("Call({s})", .{@tagName(r)}),
                 .Ret => try self.writer.print("Return", .{}),
