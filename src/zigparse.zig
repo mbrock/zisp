@@ -147,10 +147,10 @@ pub const ZigMiniGrammar = struct {
         C.ret,
     });
 
-    // start <- WS FnDecl* WS EOF
+    // start <- WS (FnDecl WS)* WS EOF
     pub const start = C.seq(.{
         C.space,
-        C.zeroOrMany(C.Call(.FnDecl)),
+        C.zeroOrMany(C.seq(.{ C.Call(.FnDecl), C.space })),
         C.space,
         C.eof,
         C.ok,
@@ -199,4 +199,56 @@ test "zig mini: var decl only" {
 
 test "zig mini: call expr stmt only" {
     try std.testing.expect(try parseZigMini("fn f() { f(); }\n"));
+}
+
+// File-based tests using @embedFile. Some are expected to pass with the
+// current minimal grammar; others are known-gaps and are skipped for now.
+
+fn parseFile(comptime path: []const u8) !bool {
+    const src: [:0]const u8 = @embedFile(path);
+    return parseZigMini(src);
+}
+
+test "file 001_fn_empty_block" {
+    try std.testing.expect(try parseFile("test/001_fn_empty_block.zig"));
+}
+
+test "file 002_return_semicolon" {
+    try std.testing.expect(try parseFile("test/002_return_semicolon.zig"));
+}
+
+test "file 003_var_const_and_call" {
+    try std.testing.expect(try parseFile("test/003_var_const_and_call.zig"));
+}
+
+test "file 004_pub_fn_params_ret" {
+    try std.testing.expect(try parseFile("test/004_pub_fn_params_ret.zig"));
+}
+
+test "file 005_call_with_args (skip)" {
+    // Not yet supported: call arguments
+    return error.SkipZigTest;
+}
+
+test "file 006_assignment (skip)" {
+    // Not yet supported: assignment operators
+    return error.SkipZigTest;
+}
+
+test "file 007_param_without_type (skip)" {
+    // Not supported: param without type
+    return error.SkipZigTest;
+}
+
+test "file 008_toplevel_var (skip)" {
+    // Not supported: top-level const/var declarations
+    return error.SkipZigTest;
+}
+
+test "file 009_nested_blocks" {
+    try std.testing.expect(try parseFile("test/009_nested_blocks.zig"));
+}
+
+test "file 010_two_functions" {
+    try std.testing.expect(try parseFile("test/010_two_functions.zig"));
 }
