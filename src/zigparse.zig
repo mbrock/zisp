@@ -2,7 +2,7 @@
 // [x] Comments in whitespace (// line)
 // [x] Keyword filtering for identifiers
 // [x] Call arguments and ExprList
-// [x] Assignment and basic binary ops (+,-,*,/,%)
+// [x] Assignment and arithmetic ops (+,-,*,/,%)
 // [x] TypeExpr: ?, *, []T, [N]T; error unions (A!B)
 // [x] Top-level decls: const/var (optional pub)
 // [x] Containers: struct/union/enum (simple bodies)
@@ -10,16 +10,16 @@
 // [x] Control flow as statements and expressions: if/while/for, switch
 // [x] Payloads: if/while/for (ptr, list), switch prong index
 // [x] Harmonize stmt/expr structure with official grammar (BlockExprStatement, VarDeclExprStatement)
-// [ ] Error sets and try/catch/orelse
 // [x] Builtins and @identifiers
-// [ ] Switch: ranges, inline prongs, complex cases
+// [x] Operator/precedence: full layers incl. try/orelse/catch
+// [x] Suffix ops and chains: call, member, index/slice, .*, .?
+// [ ] Switch: ranges (a...b) and inline prongs
 // [ ] For/while: full argument forms, continue expressions
+// [ ] Error sets and error literals (error.Foo, error { ... })
 // [ ] Labels and break/continue values (e.g. break :blk expr)
 // [ ] Visibility/ABI extras (extern/threadlocal/addrspace/linksection)
-// [ ] test/comptime blocks
-// [ ] defer/errdefer/suspend/nosuspend
-// [ ] String/char literal completeness (unicode, multiline forms)
-// [ ] Operator/precedence completeness (bitwise, shift, compare, boolean)
+// [ ] test/comptime blocks; defer/errdefer/suspend/nosuspend
+// [ ] String/char literal completeness (unicode, multiline)
 const std = @import("std");
 
 comptime {
@@ -72,12 +72,14 @@ pub const ZigMiniGrammar = struct {
     const kw_orelse = C.text("orelse");
     const kw_try = C.text("try");
     const kw_catch = C.text("catch");
+    const kw_inline = C.text("inline");
     // Keyword tokens with identifier-boundary, to match Zig tokens behavior
     const kwt_and = C.seq(.{ C.text("and"), ident_boundary, WS });
     const kwt_or = C.seq(.{ C.text("or"), ident_boundary, WS });
     const kwt_orelse = C.seq(.{ C.text("orelse"), ident_boundary, WS });
     const kwt_try = C.seq(.{ C.text("try"), ident_boundary, WS });
     const kwt_catch = C.seq(.{ C.text("catch"), ident_boundary, WS });
+    const kwt_inline = C.seq(.{ C.text("inline"), ident_boundary, WS });
 
     // Punctuation
     const lparen = C.char('(');
@@ -248,16 +250,34 @@ pub const ZigMiniGrammar = struct {
         C.ret,
     });
 
+    // WhileContinueExpr <- ':' '(' AssignExpr ')'
+    pub const WhileContinueExpr = C.seq(.{ colon, WS, lparen, WS, C.Call(.AssignExpr), WS, rparen, C.ret });
+
     pub const WhileExprE = C.seq(.{
         kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
-        C.maybe(C.Call(.PtrPayload)), WS,
+        C.maybe(C.Call(.PtrPayload)),
+        C.maybe(C.Call(.WhileContinueExpr)), WS,
         C.Call(.Block),
         C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Expr) })),
         C.ret,
     });
 
+    // ForItem <- Expr ('..' Expr?)?
+    pub const ForItem = C.seq(.{
+        C.Call(.Expr),
+        C.maybe(C.seq(.{ WS, C.text(".."), C.maybe(C.seq(.{ WS, C.Call(.Expr) })) })),
+        C.ret,
+    });
+    // ForArgumentsList <- ForItem (',' ForItem)* ','?
+    pub const ForArgumentsList = C.seq(.{
+        C.Call(.ForItem),
+        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.ForItem) })),
+        C.maybe(C.seq(.{ WS, comma })),
+        C.ret,
+    });
+
     pub const ForExprE = C.seq(.{
-        kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
+        kw_for, WS, lparen, WS, C.Call(.ForArgumentsList), WS, rparen, WS,
         C.maybe(C.Call(.PtrListPayload)), WS,
         C.Call(.Block),
         C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrListPayload) })), WS, C.Call(.Expr) })),
@@ -265,7 +285,13 @@ pub const ZigMiniGrammar = struct {
     });
 
     // Minimal switch expression
-    pub const SwitchCaseItem = C.seq(.{ C.Call(.Expr), C.ret });
+    // SwitchItem <- Expr ('...' Expr)?
+    const dots3 = C.text("...");
+    pub const SwitchCaseItem = C.seq(.{
+        C.Call(.Expr),
+        C.maybe(C.seq(.{ WS, dots3, WS, C.Call(.Expr) })),
+        C.ret,
+    });
     pub const PtrPayload = C.seq(.{
         pipe_ch, WS, C.maybe(star_ch), WS, C.Call(.Identifier), WS, pipe_ch, C.ret,
     });
@@ -283,6 +309,7 @@ pub const ZigMiniGrammar = struct {
 
     pub const SwitchProngElse = C.seq(.{ kw_else, WS, C.text("=>"), C.maybe(C.seq(.{ WS, C.Call(.PtrIndexPayload) })), WS, C.Call(.Expr), C.ret });
     pub const SwitchProngCase = C.seq(.{
+            C.maybe(kwt_inline),
             C.Call(.SwitchCaseItem),
             C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.SwitchCaseItem) })),
             WS, C.text("=>"), C.maybe(C.seq(.{ WS, C.Call(.PtrIndexPayload) })), WS,
@@ -526,13 +553,13 @@ pub const ZigMiniGrammar = struct {
     }) ++ C.ret;
 
     pub const WhileStatement = C.anyOf(.{
-        C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), WS, C.Call(.BlockExpr), C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) })) }),
-        C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), WS, C.Call(.AssignExpr), C.anyOf(.{ C.seq(.{ WS, semicolon }), C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) }) }) }),
+        C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), C.maybe(C.Call(.WhileContinueExpr)), WS, C.Call(.BlockExpr), C.maybe(C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) })) }),
+        C.seq(.{ kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrPayload)), C.maybe(C.Call(.WhileContinueExpr)), WS, C.Call(.AssignExpr), C.anyOf(.{ C.seq(.{ WS, semicolon }), C.seq(.{ WS, kw_else, C.maybe(C.seq(.{ WS, C.Call(.PtrPayload) })), WS, C.Call(.Statement) }) }) }),
     }) ++ C.ret;
 
     pub const ForStatement = C.anyOf(.{
-        C.seq(.{ kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrListPayload)), WS, C.Call(.BlockExpr) }),
-        C.seq(.{ kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS, C.maybe(C.Call(.PtrListPayload)), WS, C.Call(.AssignExpr), WS, semicolon }),
+        C.seq(.{ kw_for, WS, lparen, WS, C.Call(.ForArgumentsList), WS, rparen, WS, C.maybe(C.Call(.PtrListPayload)), WS, C.Call(.BlockExpr) }),
+        C.seq(.{ kw_for, WS, lparen, WS, C.Call(.ForArgumentsList), WS, rparen, WS, C.maybe(C.Call(.PtrListPayload)), WS, C.Call(.AssignExpr), WS, semicolon }),
     }) ++ C.ret;
 
     pub const Statement = C.anyOf(.{
@@ -932,4 +959,71 @@ test "suffix: call chain" {
 
 test "suffix: builtin call then chain" {
     try std.testing.expect(try parseZigMini("fn f(){ x = @foo()(1)[0].bar; }\n"));
+}
+
+test "switch: range prong" {
+    const src =
+        "fn f() {\n" ++
+        "  const x = 0;\n" ++
+        "  switch (x) { 0...9 => 1, else => 0 }\n" ++
+        "}\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "for: range single item and payload" {
+    const src =
+        "fn f() {\n" ++
+        "  for (0..10) |i| { }\n" ++
+        "}\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "for: multiple items with payload list" {
+    const src =
+        "fn f() {\n" ++
+        "  for (0..10, 0..n,) |i, j| { }\n" ++
+        "}\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "for: open-ended range item" {
+    const src =
+        "fn f() {\n" ++
+        "  for (0..) |i| { }\n" ++
+        "}\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "while: continue expression with block" {
+    const src =
+        "fn f() {\n" ++
+        "  while (x) : (i = i + 1) { break; }\n" ++
+        "}\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "while: continue expression with assign branch" {
+    const src =
+        "fn f() {\n" ++
+        "  while (x) : (i = i + 1) y = z;\n" ++
+        "}\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "switch: inline prong single item" {
+    const src =
+        "fn f() {\n" ++
+        "  const x = 0;\n" ++
+        "  switch (x) { inline 1 => 2, else => 3 }\n" ++
+        "}\n";
+    try std.testing.expect(try parseZigMini(src));
+}
+
+test "switch: multiple items with range" {
+    const src =
+        "fn f() {\n" ++
+        "  const x = 0;\n" ++
+        "  switch (x) { 0, 2...4, 9 => 1, else => 0 }\n" ++
+        "}\n";
+    try std.testing.expect(try parseZigMini(src));
 }
