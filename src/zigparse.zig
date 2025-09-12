@@ -35,7 +35,13 @@ pub const ZigMiniGrammar = struct {
         ascii['a' .. 'z' + 1], ascii['A' .. 'Z' + 1], ascii['0' .. '9' + 1], "_",
     });
 
-    // Word tokens (no trailing space baked in; sequences insert C.space as needed)
+    // Whitespace/comments
+    // Simple line comments: // ... to end-of-line (ASCII only for now)
+    const not_nl_ascii = C.charclass(.{ ascii[' ' .. '~' + 1], '\t', '\r' });
+    const line_comment = C.text("//") ++ C.zeroOrMany(not_nl_ascii);
+    const WS = C.zeroOrMany(C.anyOf(.{ C.charclass(" \t\n\r"), line_comment }));
+
+    // Word tokens (no trailing space baked in; sequences insert WS as needed)
     const kw_fn = C.text("fn");
     const kw_pub = C.text("pub");
     const kw_return = C.text("return");
@@ -69,9 +75,9 @@ pub const ZigMiniGrammar = struct {
     // CallExpr <- Identifier WS? '(' WS? ')'   (no args yet)
     pub const CallExpr = C.seq(.{
         C.Call(.Identifier),
-        C.space,
+        WS,
         lparen,
-        C.space,
+        WS,
         rparen,
         C.ret,
     });
@@ -79,9 +85,9 @@ pub const ZigMiniGrammar = struct {
     // Param <- Identifier WS? ':' WS? TypeExpr
     pub const Param = C.seq(.{
         C.Call(.Identifier),
-        C.space,
+        WS,
         colon,
-        C.space,
+        WS,
         C.Call(.TypeExpr),
         C.ret,
     });
@@ -89,14 +95,14 @@ pub const ZigMiniGrammar = struct {
     // ParamList <- Param (WS? ',' WS? Param)*
     pub const ParamList = C.seq(.{
         C.Call(.Param),
-        C.zeroOrMany(C.seq(.{ C.space, comma, C.space, C.Call(.Param) })),
+        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.Param) })),
         C.ret,
     });
 
     // ReturnStmt <- 'return' (WS Expr)?
     pub const ReturnStmt = C.seq(.{
         kw_return,
-        C.space,
+        WS,
         C.maybe(C.Call(.Expr)),
         C.ret,
     });
@@ -104,54 +110,54 @@ pub const ZigMiniGrammar = struct {
     // VarDecl <- ('const' / 'var') WS Identifier (WS? '=' WS? Expr)?
     pub const VarDecl = C.seq(.{
         C.anyOf(.{ kw_const, kw_var }),
-        C.space,
+        WS,
         C.Call(.Identifier),
-        C.maybe(C.seq(.{ C.space, equal, C.space, C.Call(.Expr) })),
+        C.maybe(C.seq(.{ WS, equal, WS, C.Call(.Expr) })),
         C.ret,
     });
 
     // Statement <- ReturnStmt ';' / VarDecl ';' / Expr ';' / Block
     pub const Statement = C.anyOf(.{
-        C.seq(.{ C.Call(.ReturnStmt), C.space, semicolon }),
-        C.seq(.{ C.Call(.VarDecl), C.space, semicolon }),
-        C.seq(.{ C.Call(.Expr), C.space, semicolon }),
+        C.seq(.{ C.Call(.ReturnStmt), WS, semicolon }),
+        C.seq(.{ C.Call(.VarDecl), WS, semicolon }),
+        C.seq(.{ C.Call(.Expr), WS, semicolon }),
         C.Call(.Block),
     }) ++ C.ret;
 
     // Block <- '{' WS Statement* '}'
     pub const Block = C.seq(.{
         lbrace,
-        C.space,
-        C.zeroOrMany(C.seq(.{ C.Call(.Statement), C.space })),
-        C.space,
+        WS,
+        C.zeroOrMany(C.seq(.{ C.Call(.Statement), WS })),
+        WS,
         rbrace,
         C.ret,
     });
 
     // FnDecl <- 'pub'? WS 'fn' WS Identifier WS '(' WS ParamList? WS ')' WS TypeExpr? WS Block
     pub const FnDecl = C.seq(.{
-        C.maybe(C.seq(.{ kw_pub, C.space })),
+        C.maybe(C.seq(.{ kw_pub, WS })),
         kw_fn,
-        C.space,
+        WS,
         C.Call(.Identifier),
-        C.space,
+        WS,
         lparen,
-        C.space,
+        WS,
         C.maybe(C.Call(.ParamList)),
-        C.space,
+        WS,
         rparen,
-        C.space,
+        WS,
         C.maybe(C.Call(.TypeExpr)),
-        C.space,
+        WS,
         C.Call(.Block),
         C.ret,
     });
 
     // start <- WS (FnDecl WS)* WS EOF
     pub const start = C.seq(.{
-        C.space,
-        C.zeroOrMany(C.seq(.{ C.Call(.FnDecl), C.space })),
-        C.space,
+        WS,
+        C.zeroOrMany(C.seq(.{ C.Call(.FnDecl), WS })),
+        WS,
         C.eof,
         C.ok,
     });
@@ -251,4 +257,12 @@ test "file 009_nested_blocks" {
 
 test "file 010_two_functions" {
     try std.testing.expect(try parseFile("test/010_two_functions.zig"));
+}
+
+test "file 011_line_comments" {
+    try std.testing.expect(try parseFile("test/011_line_comments.zig"));
+}
+
+test "file 012_comments_between_decls" {
+    try std.testing.expect(try parseFile("test/012_comments_between_decls.zig"));
 }
