@@ -1,2 +1,1 @@
-fn f(a: E!T) {}
-
+fn f(a: E!T) void {}

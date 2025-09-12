@@ -1,2 +1,1 @@
-fn returnValue() {}
-
+fn returnValue() void {}

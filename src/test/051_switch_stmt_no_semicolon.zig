@@ -1,2 +1,1 @@
-fn f() { switch (0) { else => 0 } }
-
+fn f() void { switch (0) { else => 0 } }

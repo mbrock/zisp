@@ -1,2 +1,1 @@
-fn f() { for (1) { x = 1; } }
-
+fn f() void { for (1) { x = 1; } }

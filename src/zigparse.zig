@@ -663,7 +663,7 @@ pub const ZigMiniGrammar = struct {
 
     // FnDecl modifiers: pub? (export | extern StringLiteral? | inline | noinline)?
     // Fn tail attrs: ByteAlign? AddrSpace? LinkSection? CallConv?
-    // Return type remains optional in this mini grammar.
+    // Return type is required; error unions handled inside TypeExpr.
     pub const FnDecl = C.seq(.{
         C.maybe(C.seq(.{ kw_pub, WS })),
         C.maybe(C.anyOf(.{
@@ -685,7 +685,7 @@ pub const ZigMiniGrammar = struct {
         C.maybe(C.seq(.{ WS, C.maybe(C.Call(.AddrSpace)) })),
         C.maybe(C.seq(.{ WS, C.maybe(C.Call(.LinkSection)) })),
         C.maybe(C.seq(.{ WS, C.maybe(C.Call(.CallConv)) })),
-        C.maybe(C.seq(.{ WS, C.Call(.TypeExpr) })),
+        WS, C.Call(.TypeExpr),
         WS,
         C.Call(.Block),
         C.ret,
@@ -756,7 +756,7 @@ test "zig mini: empty program" {
 
 test "zig mini: fn without params and no return type" {
     try std.testing.expect(try parseZigMini(
-        "fn main() { return; }\n",
+        "fn main() void { return; }\n",
     ));
 }
 
@@ -768,7 +768,7 @@ test "zig mini: pub fn with params and return type identifier" {
 
 test "zig mini: var/const decls and simple expr statement" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  const x = 42;\n" ++
         "  var y = 7;\n" ++
         "  f();\n" ++
@@ -777,15 +777,15 @@ test "zig mini: var/const decls and simple expr statement" {
 }
 
 test "zig mini: const decl only" {
-    try std.testing.expect(try parseZigMini("fn f() { const x = 42; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { const x = 42; }\n"));
 }
 
 test "zig mini: var decl only" {
-    try std.testing.expect(try parseZigMini("fn f() { var y = 7; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { var y = 7; }\n"));
 }
 
 test "zig mini: call expr stmt only" {
-    try std.testing.expect(try parseZigMini("fn f() { f(); }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { f(); }\n"));
 }
 
 // File-based tests using @embedFile. Some are expected to pass with the
@@ -1030,65 +1030,65 @@ test "file 058_switch_index_payload" {
 }
 
 test "expr: catch operator basic" {
-    try std.testing.expect(try parseZigMini("fn f() { x = y catch z; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { x = y catch z; }\n"));
 }
 
 test "expr: catch with payload" {
-    try std.testing.expect(try parseZigMini("fn f() { x = y catch |e| z; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { x = y catch |e| z; }\n"));
 }
 
 test "spacing: operators without spaces" {
-    try std.testing.expect(try parseZigMini("fn f(){x=1+2*3;}\n"));
+    try std.testing.expect(try parseZigMini("fn f() void {x=1+2*3;}\n"));
 }
 
 test "spacing: catch without space before payload" {
-    try std.testing.expect(try parseZigMini("fn f(){x=y catch|e|z;}\n"));
+    try std.testing.expect(try parseZigMini("fn f() void {x=y catch|e|z;}\n"));
 }
 
 test "keyword boundary: orelse not inside identifier" {
     // This should parse as a single identifier, not as an operator.
-    try std.testing.expect(try parseZigMini("fn f(){ xorelsey; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { xorelsey; }\n"));
 }
 
 test "suffix: member access" {
-    try std.testing.expect(try parseZigMini("fn f(){ x = a.b; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { x = a.b; }\n"));
 }
 
 test "suffix: index access" {
-    try std.testing.expect(try parseZigMini("fn f(){ x = a[0]; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { x = a[0]; }\n"));
 }
 
 test "suffix: slice simple" {
-    try std.testing.expect(try parseZigMini("fn f(){ x = a[0..n]; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { x = a[0..n]; }\n"));
 }
 
 test "suffix: slice with stride" {
-    try std.testing.expect(try parseZigMini("fn f(){ x = a[0..10:2]; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { x = a[0..10:2]; }\n"));
 }
 
 test "suffix: slice open end" {
-    try std.testing.expect(try parseZigMini("fn f(){ x = a[0..]; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { x = a[0..]; }\n"));
 }
 
 test "suffix: optional unwrap" {
-    try std.testing.expect(try parseZigMini("fn f(){ x = y.?; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { x = y.?; }\n"));
 }
 
 test "suffix: deref" {
-    try std.testing.expect(try parseZigMini("fn f(){ x = y.*; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { x = y.*; }\n"));
 }
 
 test "suffix: call chain" {
-    try std.testing.expect(try parseZigMini("fn f(){ x = a.b(1,2)[1..n].* .? .c(); }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { x = a.b(1,2)[1..n].* .? .c(); }\n"));
 }
 
 test "suffix: builtin call then chain" {
-    try std.testing.expect(try parseZigMini("fn f(){ x = @foo()(1)[0].bar; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { x = @foo()(1)[0].bar; }\n"));
 }
 
 test "switch: range prong" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  const x = 0;\n" ++
         "  switch (x) { 0...9 => 1, else => 0 }\n" ++
         "}\n";
@@ -1097,7 +1097,7 @@ test "switch: range prong" {
 
 test "for: range single item and payload" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  for (0..10) |i| { }\n" ++
         "}\n";
     try std.testing.expect(try parseZigMini(src));
@@ -1105,7 +1105,7 @@ test "for: range single item and payload" {
 
 test "for: multiple items with payload list" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  for (0..10, 0..n,) |i, j| { }\n" ++
         "}\n";
     try std.testing.expect(try parseZigMini(src));
@@ -1113,7 +1113,7 @@ test "for: multiple items with payload list" {
 
 test "for: open-ended range item" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  for (0..) |i| { }\n" ++
         "}\n";
     try std.testing.expect(try parseZigMini(src));
@@ -1121,7 +1121,7 @@ test "for: open-ended range item" {
 
 test "while: continue expression with block" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  while (x) : (i = i + 1) { break; }\n" ++
         "}\n";
     try std.testing.expect(try parseZigMini(src));
@@ -1129,18 +1129,18 @@ test "while: continue expression with block" {
 
 test "while: continue expression with assign branch" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  while (x) : (i = i + 1) y = z;\n" ++
         "}\n";
     try std.testing.expect(try parseZigMini(src));
 }
 
 test "error: literal as expr" {
-    try std.testing.expect(try parseZigMini("fn f(){ const x = error.Foo; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { const x = error.Foo; }\n"));
 }
 
 test "error: literal with catch" {
-    try std.testing.expect(try parseZigMini("fn f(){ x = y catch error.Fail; }\n"));
+    try std.testing.expect(try parseZigMini("fn f() void { x = y catch error.Fail; }\n"));
 }
 
 test "error: set decl in return type" {
@@ -1149,13 +1149,13 @@ test "error: set decl in return type" {
 }
 
 test "error: set decl in param type" {
-    const src = "fn f(e: error{ A, B, }) {}\n";
+    const src = "fn f(e: error{ A, B, }) void {}\n";
     try std.testing.expect(try parseZigMini(src));
 }
 
 test "labels: labeled block with break value" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  blk: { break :blk 1; }\n" ++
         "}\n";
     try std.testing.expect(try parseZigMini(src));
@@ -1163,7 +1163,7 @@ test "labels: labeled block with break value" {
 
 test "labels: while labeled and continue/break labels" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  outer: while (0) { continue :outer; break :outer; }\n" ++
         "}\n";
     try std.testing.expect(try parseZigMini(src));
@@ -1171,7 +1171,7 @@ test "labels: while labeled and continue/break labels" {
 
 test "labels: for labeled and continue label" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  outer: for (0..10) |i| { continue :outer; }\n" ++
         "}\n";
     try std.testing.expect(try parseZigMini(src));
@@ -1198,7 +1198,7 @@ test "toplevel: test and comptime blocks" {
 
 test "stmt: defer, errdefer, suspend, nosuspend" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  defer { }\n" ++
         "  errdefer |e| { }\n" ++
         "  suspend { }\n" ++
@@ -1209,7 +1209,7 @@ test "stmt: defer, errdefer, suspend, nosuspend" {
 
 test "switch: inline prong single item" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  const x = 0;\n" ++
         "  switch (x) { inline 1 => 2, else => 3 }\n" ++
         "}\n";
@@ -1218,7 +1218,7 @@ test "switch: inline prong single item" {
 
 test "switch: multiple items with range" {
     const src =
-        "fn f() {\n" ++
+        "fn f() void {\n" ++
         "  const x = 0;\n" ++
         "  switch (x) { 0, 2...4, 9 => 1, else => 0 }\n" ++
         "}\n";

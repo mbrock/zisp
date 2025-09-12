@@ -1,2 +1,1 @@
-fn fn() {}
-
+fn fn() void {}

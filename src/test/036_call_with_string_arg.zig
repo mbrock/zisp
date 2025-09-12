@@ -1,3 +1,2 @@
-fn f() { g("x"); }
-fn g(a: i32) {}
-
+fn f() void { g("x"); }
+fn g(a: i32) void {}

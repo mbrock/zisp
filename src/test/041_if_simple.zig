@@ -1,2 +1,1 @@
-fn f() { if (1) { return; } }
-
+fn f() void { if (1) { return; } }

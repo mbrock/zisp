@@ -1,6 +1,5 @@
-fn a() {}
+fn a() void {}
 // spacing comment
-fn b() { // inline
+fn b() void { // inline
   // body comment
 }
-

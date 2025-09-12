@@ -1,2 +1,1 @@
-fn f() { var s = "hi"; }
-
+fn f() void { var s = "hi"; }

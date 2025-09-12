@@ -1,1 +1,1 @@
-fn f() { { var y = 7; } }
+fn f() void { { var y = 7; } }

@@ -1,2 +1,1 @@
-fn f() { while (1) { break; continue; } }
-
+fn f() void { while (1) { break; continue; } }

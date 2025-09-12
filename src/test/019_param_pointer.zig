@@ -1,2 +1,1 @@
-fn f(p: *T) {}
-
+fn f(p: *T) void {}
