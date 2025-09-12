@@ -56,6 +56,9 @@ pub const ZigMiniGrammar = struct {
     const kw_else = C.text("else");
     const kw_while = C.text("while");
     const kw_for = C.text("for");
+    const kw_switch = C.text("switch");
+    const kw_break = C.text("break");
+    const kw_continue = C.text("continue");
     const kw_struct = C.text("struct");
     const kw_union = C.text("union");
     const kw_enum = C.text("enum");
@@ -83,10 +86,13 @@ pub const ZigMiniGrammar = struct {
         C.seq(.{ C.text("return"), ident_boundary }),
         C.seq(.{ C.text("const"), ident_boundary }),
         C.seq(.{ C.text("var"), ident_boundary }),
+        C.seq(.{ C.text("break"), ident_boundary }),
+        C.seq(.{ C.text("continue"), ident_boundary }),
         C.seq(.{ C.text("if"), ident_boundary }),
         C.seq(.{ C.text("else"), ident_boundary }),
         C.seq(.{ C.text("while"), ident_boundary }),
         C.seq(.{ C.text("for"), ident_boundary }),
+        C.seq(.{ C.text("switch"), ident_boundary }),
         C.seq(.{ C.text("struct"), ident_boundary }),
         C.seq(.{ C.text("union"), ident_boundary }),
         C.seq(.{ C.text("enum"), ident_boundary }),
@@ -134,8 +140,16 @@ pub const ZigMiniGrammar = struct {
     const chr_plain = C.charclass(.{ ascii[' ' .. '&' + 1], ascii['(' .. '[' + 1], ascii[']' .. '~' + 1] });
     pub const CharLiteral = C.seq(.{ C.char('\''), C.anyOf(.{ chr_escape, chr_plain }), C.char('\''), C.ret });
 
-    // Primary <- ContainerExpr / CallExpr / Integer / StringLiteral / CharLiteral / Identifier
+    // Primary <- Block / IfExpr / WhileExprE / ForExprE / SwitchExpr / ReturnExpr / BreakExpr / ContinueExpr / ContainerExpr / CallExpr / Integer / StringLiteral / CharLiteral / Identifier
     pub const Primary = C.anyOf(.{
+        C.Call(.Block),
+        C.Call(.IfExpr),
+        C.Call(.WhileExprE),
+        C.Call(.ForExprE),
+        C.Call(.SwitchExpr),
+        C.Call(.ReturnExpr),
+        C.Call(.BreakExpr),
+        C.Call(.ContinueExpr),
         C.Call(.ContainerExpr),
         C.Call(.CallExpr),
         C.Call(.Integer),
@@ -143,6 +157,56 @@ pub const ZigMiniGrammar = struct {
         C.Call(.CharLiteral),
         C.Call(.Identifier),
     }) ++ C.ret;
+
+    // Expression forms
+    pub const ReturnExpr = C.seq(.{ kw_return, WS, C.maybe(C.Call(.Expr)), C.ret });
+
+    pub const BreakExpr = C.seq(.{ kw_break, WS, C.maybe(C.Call(.Identifier)), C.ret });
+    pub const ContinueExpr = C.seq(.{ kw_continue, WS, C.maybe(C.Call(.Identifier)), C.ret });
+
+    pub const IfExpr = C.seq(.{
+        kw_if, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
+        C.Call(.Expr),
+        C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Expr) })),
+        C.ret,
+    });
+
+    pub const WhileExprE = C.seq(.{
+        kw_while, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
+        C.Call(.Block),
+        C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Expr) })),
+        C.ret,
+    });
+
+    pub const ForExprE = C.seq(.{
+        kw_for, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
+        C.Call(.Block),
+        C.maybe(C.seq(.{ WS, kw_else, WS, C.Call(.Expr) })),
+        C.ret,
+    });
+
+    // Minimal switch expression
+    pub const SwitchCaseItem = C.seq(.{ C.Call(.Expr), C.ret });
+    pub const SwitchProngElse = C.seq(.{ kw_else, WS, C.text("=>"), WS, C.Call(.Expr), C.ret });
+    pub const SwitchProngCase = C.seq(.{
+            C.Call(.SwitchCaseItem),
+            C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.SwitchCaseItem) })),
+            WS, C.text("=>"), WS,
+            C.Call(.Expr),
+            C.ret,
+        });
+    pub const SwitchProng = C.anyOf(.{ C.Call(.SwitchProngElse), C.Call(.SwitchProngCase) }) ++ C.ret;
+    pub const SwitchBody = C.seq(.{
+        lbrace, WS,
+        C.maybe(C.seq(.{ C.Call(.SwitchProng), C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.SwitchProng) })) })),
+        WS, rbrace,
+        C.ret,
+    });
+    pub const SwitchExpr = C.seq(.{
+        kw_switch, WS, lparen, WS, C.Call(.Expr), WS, rparen, WS,
+        C.Call(.SwitchBody),
+        C.ret,
+    });
 
     // Container declarations as expressions (types):
     // Struct/Union: typed fields; Enum: bare names
@@ -569,4 +633,24 @@ test "file 044_while_else" {
 
 test "file 045_for_simple" {
     try std.testing.expect(try parseFile("test/045_for_simple.zig"));
+}
+
+test "file 046_if_expr_value" {
+    try std.testing.expect(try parseFile("test/046_if_expr_value.zig"));
+}
+
+test "file 047_while_expr_else" {
+    try std.testing.expect(try parseFile("test/047_while_expr_else.zig"));
+}
+
+test "file 048_for_expr_else" {
+    try std.testing.expect(try parseFile("test/048_for_expr_else.zig"));
+}
+
+test "file 049_switch_expr_minimal" {
+    try std.testing.expect(try parseFile("test/049_switch_expr_minimal.zig"));
+}
+
+test "file 050_break_continue" {
+    try std.testing.expect(try parseFile("test/050_break_continue.zig"));
 }
