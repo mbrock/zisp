@@ -128,7 +128,7 @@ test "debug printer basic" {
     var buf: [1024]u8 = undefined;
     var stream = std.Io.Writer.Discarding.init(&buf);
 
-    const result = try debugParse(JSONParser, text, stream.writer().any());
+    const result = try debugParse(JSONParser, text, &stream.writer);
     try std.testing.expect(result);
 }
 
@@ -139,6 +139,6 @@ test "debug printer complex" {
     var buf: [4096]u8 = undefined;
     var stream = std.Io.Writer.Discarding.init(&buf);
 
-    const result = try debugParse(JSONParser, text, stream.writer().any());
+    const result = try debugParse(JSONParser, text, &stream.writer);
     try std.testing.expect(result);
 }
