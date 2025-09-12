@@ -224,10 +224,19 @@ pub const ZigMiniGrammar = struct {
         C.ret,
     });
 
-    // start <- WS (FnDecl WS)* WS EOF
+    // TopVarDecl <- 'pub'? WS VarDecl WS ';'
+    pub const TopVarDecl = C.seq(.{
+        C.maybe(C.seq(.{ kw_pub, WS })),
+        C.Call(.VarDecl),
+        WS,
+        semicolon,
+        C.ret,
+    });
+
+    // start <- WS ((FnDecl / TopVarDecl) WS)* WS EOF
     pub const start = C.seq(.{
         WS,
-        C.zeroOrMany(C.seq(.{ C.Call(.FnDecl), WS })),
+        C.zeroOrMany(C.seq(.{ C.anyOf(.{ C.Call(.FnDecl), C.Call(.TopVarDecl) }), WS })),
         WS,
         C.eof,
         C.ok,
@@ -315,9 +324,8 @@ test "file 007_param_without_type (skip)" {
     return error.SkipZigTest;
 }
 
-test "file 008_toplevel_var (skip)" {
-    // Not supported: top-level const/var declarations
-    return error.SkipZigTest;
+test "file 008_toplevel_var" {
+    try std.testing.expect(try parseFile("test/008_toplevel_var.zig"));
 }
 
 test "file 009_nested_blocks" {
@@ -374,4 +382,12 @@ test "file 021_return_optional_ptr" {
 
 test "file 022_complex_type_prefixes" {
     try std.testing.expect(try parseFile("test/022_complex_type_prefixes.zig"));
+}
+
+test "file 023_toplevel_pub_var" {
+    try std.testing.expect(try parseFile("test/023_toplevel_pub_var.zig"));
+}
+
+test "file 024_mixed_toplevel" {
+    try std.testing.expect(try parseFile("test/024_mixed_toplevel.zig"));
 }
