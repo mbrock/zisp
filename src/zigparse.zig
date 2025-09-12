@@ -2,7 +2,8 @@
 // [x] Integrate comments into whitespace (// line) and tighten spacing
 // [x] Keyword filtering for identifiers
 // [x] Call arguments and ExprList (function calls with args)
-// [ ] Basic operators and precedence (+ - * / %, assignment)
+// [x] Assignment (Identifier '=' Expr)
+// [ ] Basic operators and precedence (+ - * / %)
 // [ ] TypeExpr beyond identifiers (pointers, arrays, optionals, slices)
 // [ ] Return types: full TypeExpr including error unions (expr!T)
 // [ ] If/while/for statements and expressions
@@ -80,12 +81,31 @@ pub const ZigMiniGrammar = struct {
     // TypeExpr (highly simplified): just an Identifier for now
     pub const TypeExpr = C.seq(.{ C.Call(.Identifier), C.ret });
 
-    // Expr <- CallExpr / Integer / Identifier
-    pub const Expr = C.anyOf(.{
+    // Primary <- CallExpr / Integer / Identifier
+    pub const Primary = C.anyOf(.{
         C.Call(.CallExpr),
         C.Call(.Integer),
         C.Call(.Identifier),
     }) ++ C.ret;
+
+    // MultiplyExpr <- Primary (WS ('*' '/' '%') WS Primary)*
+    const mulop = C.charclass("*/%");
+    pub const MultiplyExpr = C.seq(.{
+        C.Call(.Primary),
+        C.zeroOrMany(C.seq(.{ WS, mulop, WS, C.Call(.Primary) })),
+        C.ret,
+    });
+
+    // AddExpr <- MultiplyExpr (WS ('+' '-') WS MultiplyExpr)*
+    const addop = C.charclass("+-");
+    pub const AddExpr = C.seq(.{
+        C.Call(.MultiplyExpr),
+        C.zeroOrMany(C.seq(.{ WS, addop, WS, C.Call(.MultiplyExpr) })),
+        C.ret,
+    });
+
+    // Expr <- AddExpr
+    pub const Expr = C.seq(.{ C.Call(.AddExpr), C.ret });
 
     // ExprList <- Expr (WS? ',' WS? Expr)*
     pub const ExprList = C.seq(.{
@@ -310,4 +330,16 @@ test "file 014_keyword_as_identifier should fail" {
 
 test "file 015_keyword_prefix_allowed" {
     try std.testing.expect(try parseFile("test/015_keyword_prefix_allowed.zig"));
+}
+
+test "file 016_addition" {
+    try std.testing.expect(try parseFile("test/016_addition.zig"));
+}
+
+test "file 017_mul_precedence" {
+    try std.testing.expect(try parseFile("test/017_mul_precedence.zig"));
+}
+
+test "file 018_nested_ops_calls" {
+    try std.testing.expect(try parseFile("test/018_nested_ops_calls.zig"));
 }
