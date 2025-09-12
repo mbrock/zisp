@@ -1,7 +1,7 @@
 // TODO: ZigMiniGrammar Roadmap
-// [ ] Integrate comments into whitespace (// line, multiline) and tighten spacing
-// [ ] Keyword filtering for identifiers
-// [ ] Call arguments and ExprList (function calls with args)
+// [x] Integrate comments into whitespace (// line) and tighten spacing
+// [x] Keyword filtering for identifiers
+// [x] Call arguments and ExprList (function calls with args)
 // [ ] Basic operators and precedence (+ - * / %, assignment)
 // [ ] TypeExpr beyond identifiers (pointers, arrays, optionals, slices)
 // [ ] Return types: full TypeExpr including error unions (expr!T)
@@ -59,7 +59,22 @@ pub const ZigMiniGrammar = struct {
     const equal = C.char('=');
 
     // Lexical rules
-    pub const Identifier = C.seq(.{ alpha, C.zeroOrMany(alnum_us), C.ret });
+    // Reserved words we currently recognize
+    const ident_boundary = C.notLookahead(alnum_us); // next is not [A-Za-z0-9_]
+    const reserved_exact = C.anyOf(.{
+        C.seq(.{ C.text("fn"), ident_boundary }),
+        C.seq(.{ C.text("pub"), ident_boundary }),
+        C.seq(.{ C.text("return"), ident_boundary }),
+        C.seq(.{ C.text("const"), ident_boundary }),
+        C.seq(.{ C.text("var"), ident_boundary }),
+    });
+
+    pub const Identifier = C.seq(.{
+        C.notLookahead(reserved_exact),
+        alpha,
+        C.zeroOrMany(alnum_us),
+        C.ret,
+    });
     pub const Integer = C.seq(.{ C.several(digit), C.ret });
 
     // TypeExpr (highly simplified): just an Identifier for now
@@ -277,4 +292,12 @@ test "file 012_comments_between_decls" {
 
 test "file 013_nested_call" {
     try std.testing.expect(try parseFile("test/013_nested_call.zig"));
+}
+
+test "file 014_keyword_as_identifier should fail" {
+    try std.testing.expect(!try parseFile("test/014_keyword_as_identifier.zig"));
+}
+
+test "file 015_keyword_prefix_allowed" {
+    try std.testing.expect(try parseFile("test/015_keyword_prefix_allowed.zig"));
 }
