@@ -140,8 +140,19 @@ pub const ZigMiniGrammar = struct {
         C.ret,
     });
 
-    // Statement <- ReturnStmt ';' / VarDecl ';' / Expr ';' / Block
+    // AssignStmt <- Identifier WS '=' WS Expr
+    pub const AssignStmt = C.seq(.{
+        C.Call(.Identifier),
+        WS,
+        equal,
+        WS,
+        C.Call(.Expr),
+        C.ret,
+    });
+
+    // Statement <- AssignStmt ';' / ReturnStmt ';' / VarDecl ';' / Expr ';' / Block
     pub const Statement = C.anyOf(.{
+        C.seq(.{ C.Call(.AssignStmt), WS, semicolon }),
         C.seq(.{ C.Call(.ReturnStmt), WS, semicolon }),
         C.seq(.{ C.Call(.VarDecl), WS, semicolon }),
         C.seq(.{ C.Call(.Expr), WS, semicolon }),
@@ -259,9 +270,8 @@ test "file 005_call_with_args (skip)" {
     try std.testing.expect(try parseFile("test/005_call_with_args.zig"));
 }
 
-test "file 006_assignment (skip)" {
-    // Not yet supported: assignment operators
-    return error.SkipZigTest;
+test "file 006_assignment" {
+    try std.testing.expect(try parseFile("test/006_assignment.zig"));
 }
 
 test "file 007_param_without_type (skip)" {
