@@ -1,0 +1,2 @@
+const U = union { };
+

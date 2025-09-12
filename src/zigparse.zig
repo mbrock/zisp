@@ -48,6 +48,9 @@ pub const ZigMiniGrammar = struct {
     const kw_return = C.text("return");
     const kw_const = C.text("const");
     const kw_var = C.text("var");
+    const kw_struct = C.text("struct");
+    const kw_union = C.text("union");
+    const kw_enum = C.text("enum");
 
     // Punctuation
     const lparen = C.char('(');
@@ -70,6 +73,9 @@ pub const ZigMiniGrammar = struct {
         C.seq(.{ C.text("return"), ident_boundary }),
         C.seq(.{ C.text("const"), ident_boundary }),
         C.seq(.{ C.text("var"), ident_boundary }),
+        C.seq(.{ C.text("struct"), ident_boundary }),
+        C.seq(.{ C.text("union"), ident_boundary }),
+        C.seq(.{ C.text("enum"), ident_boundary }),
     });
 
     pub const Identifier = C.seq(.{
@@ -82,9 +88,9 @@ pub const ZigMiniGrammar = struct {
 
     // Type expressions (expanded):
     //   TypeExpr <- TypePrefix* TypeAtom
-    //   TypeAtom <- Identifier
+    //   TypeAtom <- Identifier / ContainerExpr
     //   TypePrefix <- '?' / '*' / ('[' WS Expr WS ']' | '[' WS ']' )
-    pub const TypeAtom = C.seq(.{ C.Call(.Identifier), C.ret });
+    pub const TypeAtom = C.anyOf(.{ C.Call(.Identifier), C.Call(.ContainerExpr) }) ++ C.ret;
 
     const SliceStart = C.seq(.{ lbracket, WS, rbracket });
     const ArrayStart = C.seq(.{ lbracket, WS, C.Call(.Expr), WS, rbracket });
@@ -99,9 +105,41 @@ pub const ZigMiniGrammar = struct {
 
     // Primary <- CallExpr / Integer / Identifier
     pub const Primary = C.anyOf(.{
+        C.Call(.ContainerExpr),
         C.Call(.CallExpr),
         C.Call(.Integer),
         C.Call(.Identifier),
+    }) ++ C.ret;
+
+    // Container declarations as expressions (types):
+    // Struct/Union: typed fields; Enum: bare names
+    pub const FieldDecl = C.seq(.{
+        C.Call(.Identifier), WS, colon, WS, C.Call(.TypeExpr), C.ret,
+    });
+    pub const FieldList = C.seq(.{
+        C.Call(.FieldDecl),
+        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.FieldDecl) })),
+        C.maybe(C.seq(.{ WS, comma })),
+        C.ret,
+    });
+
+    pub const StructBody = C.seq(.{
+        lbrace, WS, C.maybe(C.Call(.FieldList)), WS, rbrace, C.ret,
+    });
+    pub const UnionBody = StructBody;
+
+    pub const EnumFields = C.seq(.{
+        C.Call(.Identifier),
+        C.zeroOrMany(C.seq(.{ WS, comma, WS, C.Call(.Identifier) })),
+        C.maybe(C.seq(.{ WS, comma })),
+        C.ret,
+    });
+    pub const EnumBody = C.seq(.{ lbrace, WS, C.maybe(C.Call(.EnumFields)), WS, rbrace, C.ret });
+
+    pub const ContainerExpr = C.anyOf(.{
+        C.seq(.{ kw_struct, WS, C.Call(.StructBody) }),
+        C.seq(.{ kw_union, WS, C.Call(.UnionBody) }),
+        C.seq(.{ kw_enum, WS, C.Call(.EnumBody) }),
     }) ++ C.ret;
 
     // MultiplyExpr <- Primary (WS ('*' '/' '%') WS Primary)*
@@ -390,4 +428,28 @@ test "file 023_toplevel_pub_var" {
 
 test "file 024_mixed_toplevel" {
     try std.testing.expect(try parseFile("test/024_mixed_toplevel.zig"));
+}
+
+test "file 025_struct_empty" {
+    try std.testing.expect(try parseFile("test/025_struct_empty.zig"));
+}
+
+test "file 026_union_empty" {
+    try std.testing.expect(try parseFile("test/026_union_empty.zig"));
+}
+
+test "file 027_enum_empty" {
+    try std.testing.expect(try parseFile("test/027_enum_empty.zig"));
+}
+
+test "file 028_struct_fields_simple" {
+    try std.testing.expect(try parseFile("test/028_struct_fields_simple.zig"));
+}
+
+test "file 029_enum_fields" {
+    try std.testing.expect(try parseFile("test/029_enum_fields.zig"));
+}
+
+test "file 030_nested_containers" {
+    try std.testing.expect(try parseFile("test/030_nested_containers.zig"));
 }
