@@ -301,6 +301,20 @@ pub fn VM(
                             }
                         },
 
+                        inline .PartialCommit => |d| {
+                            // Update the current backtrack frame's position without removing it.
+                            // Used for repetitions to reuse the same frame.
+                            if (self.savehead > 0) {
+                                self.savelist[self.savehead - 1].texthead = self.texthead;
+                                self.savelist[self.savehead - 1].nodehead = self.nodes.items.len;
+                            }
+                            const skipcode = (@as(usize, @intCast(@as(isize, codebase) + 1 + d)));
+                            self.codehead = skipcode;
+                            if (yield) return .Running else {
+                                continue :vm skipcode;
+                            }
+                        },
+
                         inline .Call => |r| {
                             const rulekind: u32 = @intCast(@intFromEnum(r));
                             const rulecode = P.rule_ip[rulekind];
@@ -636,6 +650,9 @@ pub fn Combinators(comptime G: type) type {
             // Pop backtrack frame, jump relative, and rewind texthead
             // to the saved position from that frame.
             CommitRewindRel: i16,
+            // Update the current backtrack frame's position without removing it.
+            // Used for repetitions to reuse the same frame.
+            PartialCommit: i16,
             Fail: void,
             Call: Rule,
             Ret: void,
@@ -723,9 +740,9 @@ pub fn Combinators(comptime G: type) type {
 
         pub inline fn star(comptime X: anytype) OpN(X.len + 2) {
             const to_end = X.len + 1; // from ChoiceRel next to end
-            const back = -@as(i16, @intCast(X.len + 2)); // from CommitRel back to ChoiceRel
+            const back = -@as(i16, @intCast(X.len + 1)); // from PartialCommit back to X
             return op1(.{ .ChoiceRel = @intCast(to_end) }) ++ X ++
-                op1(.{ .CommitRel = back });
+                op1(.{ .PartialCommit = back });
         }
 
         pub inline fn anyOf(comptime parts: anytype) OpN(sizeSum(parts) + (parts.len - 1) * 2) {
@@ -1091,9 +1108,9 @@ test "backtracking inside greedy repetition" {
 test "metrics collection on backtracking grammar" {
     const metrics = try BacktrackParser.runWithMetrics(std.testing.allocator, "aaaaaaaaab");
     try std.testing.expect(metrics.accepted);
-    try std.testing.expectEqual(10, metrics.backtracks);
+    try std.testing.expectEqual(2, metrics.backtracks);
     try std.testing.expectEqual(1, metrics.max_back_height);
-    try std.testing.expectEqual(35, metrics.steps);
+    try std.testing.expectEqual(27, metrics.steps);
 }
 
 test "metrics collection on simple json token" {

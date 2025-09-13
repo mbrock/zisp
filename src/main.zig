@@ -38,7 +38,7 @@ pub fn main() !void {
     const saves = try allocator.alloc(Parser.Save, save_stack_size);
     defer allocator.free(saves);
 
-    std.debug.print("Creating VM on heap with stacks: marks={}, saves={}...\n", .{mark_stack_size, save_stack_size});
+    std.debug.print("Creating VM on heap with stacks: marks={}, saves={}...\n", .{ mark_stack_size, save_stack_size });
     var vm = try allocator.create(Parser);
     defer allocator.destroy(vm);
     std.debug.print("Initializing VM...\n", .{});
@@ -80,7 +80,7 @@ pub fn main() !void {
         std.debug.print("\nAST ({} nodes total):\n", .{vm.nodes.items.len});
         for (0..vm.nodes.items.len) |i| {
             const n = vm.nodes.items[i];
-            std.debug.print("Node {}: {s} (children: first={?}, next={?})\n", .{i, @tagName(n.tag), n.first_child, n.next_sibling});
+            std.debug.print("Node {}: {s} (children: first={?}, next={?})\n", .{ i, @tagName(n.tag), n.first_child, n.next_sibling });
         }
         std.debug.print("\nTree:\n", .{});
         printNode(vm, 0, 0);
@@ -92,8 +92,7 @@ fn printNode(vm: anytype, idx: u32, depth: usize) void {
     for (0..depth) |_| std.debug.print("  ", .{});
     std.debug.print("{s}", .{@tagName(node.tag)});
     switch (node.tag) {
-        .Identifier, .Integer =>
-            std.debug.print(" {s}", .{vm.text[node.start..node.end]}),
+        .Identifier, .Integer => std.debug.print(" {s}", .{vm.text[node.start..node.end]}),
         else => {},
     }
     std.debug.print("\n", .{});
@@ -161,9 +160,6 @@ fn dumpPegCodeToFiles(allocator: std.mem.Allocator, outdir: []const u8) !void {
             var buffer: [4096]u8 = undefined;
             var file_writer = file.writer(&buffer);
 
-            try file_writer.interface.print("=== Rule: {s} @ {} ===\n", .{ rule_name, rule_ip });
-            try file_writer.interface.print("Size: {} instructions\n\n", .{end_ip - rule_ip});
-
             // Dump instructions for this rule
             var ip = rule_ip;
             while (ip < end_ip) : (ip += 1) {
@@ -208,7 +204,7 @@ fn dumpPegCode(writer: *std.Io.Writer) !void {
     while (ip < P.code.len) : (ip += 1) {
         // Check if this IP starts a rule
         if (ip_to_rule[ip]) |rule_name| {
-            try writer.print("\n=== Rule: {s} @ {} ===\n", .{ rule_name, ip });
+            try writer.print("\n&{s}:\n", .{rule_name});
         }
 
         try dumpInstruction(writer, ip, P.code[ip]);
@@ -217,54 +213,96 @@ fn dumpPegCode(writer: *std.Io.Writer) !void {
     try writer.print("\n=== End of bytecode ===\n", .{});
 }
 
+fn bump(value: u32, delta: i32) u32 {
+    if (delta >= 0) {
+        return value + @abs(delta);
+    } else {
+        return value - @abs(delta);
+    }
+}
+
 fn dumpInstruction(writer: *std.Io.Writer, ip: u32, op: anytype) !void {
     // Print instruction address
-    try writer.print("{:>4}: ", .{ip});
+    try writer.print("  0x{x}    ", .{ip});
 
     switch (op) {
         .ChoiceRel => |offset| {
-            const target = @as(i32, @intCast(ip)) + offset;
-            try writer.print("CHOICE      +{} (→ {})\n", .{ offset, target });
+            const target = bump(ip, offset);
+            try writer.print("RESCUE  0x{x:0>4}  Δ{d}\n", .{ target, offset });
         },
         .CommitRel => |offset| {
-            const target = @as(i32, @intCast(ip)) + offset;
-            try writer.print("COMMIT      +{} (→ {})\n", .{ offset, target });
+            const target = bump(ip, offset);
+            try writer.print("COMMIT  0x{x:0>4}  Δ{d}\n", .{ target, offset });
         },
         .CommitRewindRel => |offset| {
-            const target = @as(i32, @intCast(ip)) + offset;
-            try writer.print("COMMITRW    +{} (→ {})\n", .{ offset, target });
+            const target = bump(ip, offset);
+            try writer.print("REWIND  0x{x:0>4}  Δ{d}\n", .{ target, offset });
+        },
+        .PartialCommit => |offset| {
+            const target = bump(ip, offset);
+            try writer.print("UPDATE  0x{x:0>4}  Δ{d}\n", .{ target, offset });
         },
         .Call => |rule| {
             const Parser = zisp.parse.VM(zisp.zigmini.ZigMiniGrammar);
             const P = Parser.P;
             const rule_ip = P.rule_ip[@intFromEnum(rule)];
-            try writer.print("CALL        {s} (→ {})\n", .{ @tagName(rule), rule_ip });
+            try writer.print("INVOKE  0x{x:0>4}  &{t}\n", .{ rule_ip, rule });
         },
         .Ret => {
             try writer.print("RETURN\n", .{});
         },
         .Fail => {
-            try writer.print("FAIL\n", .{});
+            try writer.print("REJECT\n", .{});
         },
         .String => |s| {
-            try writer.print("STRING      \"{s}\"\n", .{s});
+            try writer.print("DEMAND  \"{s}\"\n", .{s});
         },
         .CharSet => |cs| {
-            try writer.print("CHARSET     ", .{});
+            try writer.print("DEMAND  [", .{});
             // Print character set ranges
+
+            var start_c: u8 = 0;
+            var last_c: u8 = 255;
+            var first = true;
             for (0..256) |c| {
-                if (cs.isSet(@intCast(c))) {
+                if (last_c < 255 and c == last_c + 1) {
+                    if (cs.isSet(c)) {
+                        last_c = @intCast(c);
+                        continue;
+                    } else {
+                        if (start_c != last_c) {
+                            try writer.print("–", .{});
+                            if (last_c >= 32 and last_c < 127) {
+                                try writer.print("{c}", .{@as(u8, @intCast(last_c))});
+                            } else {
+                                try writer.print("\\x{x}", .{last_c});
+                            }
+                        }
+
+                        last_c = 255;
+                        continue;
+                    }
+                }
+
+                if (cs.isSet(c)) {
+                    start_c = @intCast(c);
+                    last_c = @intCast(c);
+                    if (!first) {
+                        try writer.writeAll(" ");
+                    }
+                    first = false;
+
                     if (c >= 32 and c < 127) {
                         try writer.print("{c}", .{@as(u8, @intCast(c))});
                     } else {
-                        try writer.print("\\x{x:0>2}", .{c});
+                        try writer.print("\\x{x}", .{c});
                     }
                 }
             }
-            try writer.print("\n", .{});
+            try writer.print("]\n", .{});
         },
         .EndInput => {
-            try writer.print("ENDINPUT\n", .{});
+            try writer.print("NOMORE\n", .{});
         },
         .Accept => {
             try writer.print("ACCEPT\n", .{});
