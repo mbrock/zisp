@@ -10,7 +10,552 @@ const Combinators = pegvm.Combinators;
 const ascii = pegvm.ascii;
 
 pub const ZigMiniGrammar = struct {
+    // It's very important that some rules have explicit [N]Op return types.
+    // In fact, the compiler usually crashes without them.
+    //
+    // The byte offset to each rule must be clear to the compiler,
+    // since we take their addresses.
+    //
+    // By putting the main recursion targets above the rules that call them,
+    // sized explicitly, we can use type inference for the others.
+
     const C = Combinators(@This());
+    const Op = C.Op;
+    const one = C.call;
+    const opt = C.opt;
+    const star = C.star;
+    const alt = C.anyOf;
+
+    fn rule(x: anytype) [x.len + 1]Op {
+        return x ++ C.ret;
+    }
+
+    pub const Statement: [29]Op = rule(
+        alt(.{
+            one(&IfStatement),
+            one(&LabeledWhileStatement),
+            one(&LabeledForStatement),
+            one(&SwitchExpr),
+            one(&DeferStatement),
+            one(&ErrDeferStatement),
+            one(&NoSuspendStatement),
+            one(&SuspendStatement),
+            one(&VarDeclExprStatement),
+            one(&BlockExprStatement),
+        }),
+    );
+
+    pub const Block: [24]Op = rule(
+        @"{" ++ star(one(&Statement)) ++ @"}",
+    );
+
+    pub const Expr: [19]Op = rule(
+        one(&BoolAndExpr) ++
+            star(@"or" ++ one(&BoolAndExpr)),
+    );
+
+    pub const TypeAtom: [8]Op = rule(
+        alt(.{
+            one(&Identifier),
+            one(&ContainerExpr),
+            one(&ErrorSetDecl),
+        }),
+    );
+
+    pub const TypeExpr: [19]Op =
+        rule(one(&TypeCore) ++ opt(@"!" ++ one(&TypeExpr)));
+
+    pub const Identifier =
+        rule(C.shun(reserved_exact) ++ alpha ++ star(alnum_us) ++ skip);
+
+    pub const BuiltinIdentifier =
+        rule(C.char('@') ++ alpha ++ star(alnum_us));
+
+    pub const Integer =
+        rule(C.several(digit) ++ skip);
+
+    pub const IdentifierList = rule(
+        one(&Identifier) ++
+            star(@"," ++ one(&Identifier)) ++
+            opt(@","),
+    );
+
+    pub const ErrorSetDecl =
+        rule(@"error" ++ @"{" ++ opt(one(&IdentifierList)) ++ @"}");
+
+    pub const AssignExpr = rule(
+        alt(.{
+            one(&Identifier) ++ @"=" ++ one(&Expr),
+            one(&Expr),
+        }),
+    );
+
+    pub const ExprList = rule(
+        one(&Expr) ++
+            star(@"," ++ one(&Expr)),
+    );
+
+    pub const ArrayStart =
+        rule(@"[" ++ one(&Expr) ++ @"]");
+
+    pub const TypePrefix = rule(
+        alt(.{
+            @"?",
+            @"*",
+            one(&ArrayStart),
+            @"[" ++ @"]",
+        }),
+    );
+
+    pub const TypeCore =
+        rule(star(one(&TypePrefix)) ++ one(&TypeAtom));
+
+    pub const FieldDecl = rule(
+        one(&Identifier) ++ @":" ++ one(&TypeExpr),
+    );
+
+    pub const FieldList = rule(
+        one(&FieldDecl) ++
+            star(C.seq(.{ @",", one(&FieldDecl) })) ++
+            opt(@","),
+    );
+
+    pub const StructBody = rule(
+        @"{" ++ opt(one(&FieldList)) ++ @"}",
+    );
+
+    pub const EnumFields = rule(
+        one(&Identifier) ++
+            star(C.seq(.{ @",", one(&Identifier) })) ++
+            opt(@","),
+    );
+
+    pub const EnumBody = rule(
+        @"{" ++ opt(one(&EnumFields)) ++ @"}",
+    );
+
+    pub const ContainerExpr = rule(
+        alt(.{
+            C.seq(.{ @"struct", one(&StructBody) }),
+            C.seq(.{ @"union", one(&StructBody) }),
+            C.seq(.{ @"enum", one(&EnumBody) }),
+        }),
+    );
+
+    pub const ParenExpr =
+        rule(@"(" ++ one(&Expr) ++ @")");
+
+    pub const LinkSection =
+        rule(@"linksection" ++ one(&ParenExpr));
+    pub const AddrSpace =
+        rule(@"addrspace" ++ one(&ParenExpr));
+    pub const CallConv =
+        rule(@"callconv" ++ one(&ParenExpr));
+    pub const ByteAlign =
+        rule(@"align" ++ one(&ParenExpr));
+
+    pub const ErrorLiteral =
+        rule(@"error" ++ @"." ++ one(&Identifier));
+
+    pub const DotIdentifier =
+        rule(@"." ++ one(&Identifier));
+
+    pub const CharLiteral = rule(
+        C.char('\'') ++
+            alt(.{ chr_escape, chr_plain }) ++
+            C.char('\'') ++
+            skip,
+    );
+
+    pub const StringLiteral = rule(
+        C.char('"') ++
+            star(alt(.{ str_escape, str_plain })) ++
+            C.char('"') ++
+            skip,
+    );
+
+    pub const Primary: [50]Op = rule(
+        alt(.{
+            one(&ParenExpr),
+            one(&Block),
+            one(&IfExpr),
+            one(&WhileExprE),
+            one(&ForExprE),
+            one(&SwitchExpr),
+            one(&ReturnExpr),
+            one(&BreakExpr),
+            one(&ContinueExpr),
+            one(&ContainerExpr),
+            one(&BuiltinIdentifier),
+            one(&ErrorLiteral),
+            one(&DotIdentifier),
+            one(&Integer),
+            one(&StringLiteral),
+            one(&CharLiteral),
+            one(&Identifier),
+        }),
+    );
+
+    pub const FnCallArguments =
+        rule(@"(" ++ opt(one(&ExprList)) ++ @")");
+
+    pub const MemberAccess = rule(@"." ++ one(&Identifier));
+
+    const sliceSuffix =
+        @".." ++ opt(one(&Expr)) ++ opt(@":" ++ one(&Expr));
+
+    pub const IndexOrSlice = rule(
+        @"[" ++ one(&Expr) ++ opt(sliceSuffix) ++ @"]",
+    );
+
+    pub const OneSuffix = rule(
+        alt(.{
+            one(&FnCallArguments),
+            one(&IndexOrSlice),
+            @".*",
+            @".?",
+            one(&MemberAccess),
+        }),
+    );
+
+    pub const SuffixExpr = rule(
+        one(&Primary) ++ star(one(&OneSuffix)),
+    );
+
+    pub const ReturnExpr =
+        rule(@"return" ++ opt(one(&Expr)));
+
+    pub const LabelRef =
+        rule(@":" ++ one(&Identifier));
+    pub const LabelDef =
+        rule(one(&Identifier) ++ @":");
+
+    pub const BreakExpr = rule(
+        @"break" ++ opt(one(&LabelRef)) ++ opt(one(&Expr)),
+    );
+
+    pub const ContinueExpr =
+        rule(@"continue" ++ opt(one(&LabelRef)));
+
+    pub const PtrPayload = rule(
+        @"|" ++ opt(@"*") ++ one(&Identifier) ++ @"|",
+    );
+
+    pub const PtrIndexPayload = rule(
+        @"|" ++
+            opt(@"*") ++ one(&Identifier) ++
+            opt(@"," ++ one(&Identifier)) ++
+            @"|",
+    );
+
+    pub const PtrListPayload = rule(
+        @"|" ++
+            opt(@"*") ++ one(&Identifier) ++
+            star(@"," ++ opt(@"*") ++ one(&Identifier)) ++
+            opt(@",") ++
+            @"|",
+    );
+
+    pub const Payload =
+        rule(@"|" ++ one(&Identifier) ++ @"|");
+
+    pub const PayloadExpr = rule(
+        opt(one(&PtrPayload)) ++ one(&Expr),
+    );
+
+    pub const IfExpr = rule(
+        @"if" ++ @"(" ++ one(&Expr) ++ @")" ++
+            one(&PayloadExpr) ++
+            @"else" ++ one(&Expr),
+    );
+
+    pub const WhileContinueExpr =
+        rule(@":" ++ @"(" ++ one(&AssignExpr) ++ @")");
+
+    pub const WhileExprE = rule(
+        @"while" ++ one(&ParenExpr) ++
+            opt(one(&PtrPayload)) ++
+            opt(one(&WhileContinueExpr)) ++
+            one(&Block) ++
+            opt(@"else" ++ one(&Expr)),
+    );
+
+    pub const ForItem = rule(
+        one(&Expr) ++ opt(@".." ++ opt(one(&Expr))),
+    );
+
+    pub const ForArgumentsList = rule(
+        one(&ForItem) ++
+            star(@"," ++ one(&ForItem)) ++
+            opt(@","),
+    );
+
+    pub const ForExprE = rule(
+        @"for" ++ @"(" ++ one(&ForArgumentsList) ++ @")" ++
+            opt(one(&PtrListPayload)) ++
+            one(&Block) ++
+            opt(@"else" ++ one(&Expr)),
+    );
+
+    pub const CaseItem = rule(
+        one(&Expr) ++ opt(@"..." ++ one(&Expr)),
+    );
+
+    pub const ElseProng = rule(
+        @"else" ++ @"=>" ++ opt(one(&PtrIndexPayload)) ++ one(&Expr),
+    );
+
+    pub const CaseProng = rule(
+        opt(@"inline") ++
+            one(&CaseItem) ++
+            star(@"," ++ one(&CaseItem)) ++
+            @"=>" ++
+            opt(one(&PtrIndexPayload)) ++
+            one(&Expr),
+    );
+
+    pub const Prong = rule(
+        alt(.{
+            one(&ElseProng),
+            one(&CaseProng),
+        }),
+    );
+
+    pub const SwitchBody = rule(
+        @"{" ++
+            opt(one(&Prong) ++
+                star(@"," ++ one(&Prong))) ++
+            @"}",
+    );
+
+    pub const SwitchExpr = rule(
+        @"switch" ++ one(&ParenExpr) ++ one(&SwitchBody),
+    );
+
+    pub const PrefixExpr = rule(
+        star(alt(.{ @"!", @"-", @"~", @"-%", @"&", @"try" })) ++
+            one(&SuffixExpr),
+    );
+
+    pub const MultiplyExpr = rule(
+        one(&PrefixExpr) ++
+            star(alt(.{ @"*", @"/", @"%" }) ++ one(&PrefixExpr)),
+    );
+
+    pub const AddExpr = rule(
+        one(&MultiplyExpr) ++ star(
+            alt(.{ @"+", @"-" }) ++ one(&MultiplyExpr),
+        ),
+    );
+
+    pub const BitShiftExpr = rule(
+        one(&AddExpr) ++ star(
+            alt(.{ @"<<", @">>" }) ++ one(&AddExpr),
+        ),
+    );
+
+    pub const BitwiseExpr = rule(
+        one(&BitShiftExpr) ++
+            star(
+                alt(.{
+                    @"&",
+                    @"^",
+                    @"|",
+                    @"orelse",
+                    @"catch" ++ opt(one(&Payload)),
+                }) ++
+                    one(&BitShiftExpr),
+            ),
+    );
+
+    pub const CompareExpr = rule(
+        one(&BitwiseExpr) ++
+            opt(
+                alt(.{ @"==", @"!=", @"<=", @">=", @"<", @">" }) ++
+                    one(&BitwiseExpr),
+            ),
+    );
+
+    pub const BoolAndExpr = rule(
+        one(&CompareExpr) ++
+            star(@"and" ++ one(&CompareExpr)),
+    );
+
+    pub const CallExpr = rule(
+        alt(.{ one(&Identifier), one(&BuiltinIdentifier) }) ++
+            @"(" ++
+            opt(one(&ExprList)) ++
+            @")",
+    );
+
+    pub const Param = rule(
+        one(&Identifier) ++ @":" ++ one(&TypeExpr),
+    );
+
+    pub const ParamList = rule(
+        one(&Param) ++
+            star(@"," ++ one(&Param)),
+    );
+
+    pub const ReturnStmt = rule(
+        @"return" ++ opt(one(&Expr)),
+    );
+
+    pub const VarDecl = rule(
+        alt(.{ @"const", @"var" }) ++
+            one(&Identifier) ++
+            opt(@"=" ++ one(&Expr)),
+    );
+
+    pub const BlockExpr = rule(
+        opt(one(&LabelDef)) ++ one(&Block),
+    );
+
+    pub const BlockExprStatement = rule(
+        alt(.{
+            one(&BlockExpr),
+            one(&AssignExpr) ++ @";",
+        }),
+    );
+
+    pub const VarDeclExprStatement = rule(
+        alt(.{
+            one(&VarDecl) ++ @";",
+            one(&Expr) ++ @";",
+        }),
+    );
+
+    pub const Else = rule(
+        @"else" ++ opt(one(&PtrPayload)) ++ one(&Statement),
+    );
+
+    pub const IfStatement = rule(
+        @"if" ++ @"(" ++ one(&Expr) ++ @")" ++ opt(one(&PtrPayload)) ++ alt(.{
+            one(&BlockExpr) ++ opt(one(&Else)),
+            one(&AssignExpr) ++ alt(.{ @";", one(&Else) }),
+        }),
+    );
+
+    pub const WhileStatement = rule(
+        @"while" ++ @"(" ++ one(&Expr) ++ @")" ++
+            opt(one(&PtrPayload)) ++
+            opt(one(&WhileContinueExpr)) ++
+            alt(.{
+                one(&BlockExpr) ++ opt(one(&Else)),
+                one(&AssignExpr) ++ alt(.{ @";", one(&Else) }),
+            }),
+    );
+
+    pub const LabeledWhileStatement = rule(
+        opt(one(&LabelDef)) ++ one(&WhileStatement),
+    );
+
+    pub const ForStatement = rule(
+        @"for" ++ @"(" ++ one(&ForArgumentsList) ++ @")" ++
+            opt(one(&PtrListPayload)) ++
+            alt(.{
+                one(&BlockExpr),
+                one(&AssignExpr) ++ @";",
+            }),
+    );
+
+    pub const LabeledForStatement = rule(
+        opt(one(&LabelDef)) ++ one(&ForStatement),
+    );
+
+    pub const DeferStatement = rule(
+        @"defer" ++ one(&BlockExprStatement),
+    );
+    pub const ErrDeferStatement = rule(
+        @"errdefer" ++ opt(one(&Payload)) ++ one(&BlockExprStatement),
+    );
+    pub const NoSuspendStatement = rule(
+        @"nosuspend" ++ one(&BlockExprStatement),
+    );
+    pub const SuspendStatement = rule(
+        @"suspend" ++ one(&BlockExprStatement),
+    );
+
+    pub const FnDecl = rule(
+        opt(@"pub") ++
+            opt(alt(.{
+                @"export",
+                @"extern" ++ opt(one(&StringLiteral)),
+                @"inline",
+                @"noinline",
+            })) ++
+            @"fn" ++
+            one(&Identifier) ++
+            @"(" ++
+            opt(one(&ParamList)) ++
+            @")" ++
+            opt(one(&ByteAlign)) ++
+            opt(one(&AddrSpace)) ++
+            opt(one(&LinkSection)) ++
+            opt(one(&CallConv)) ++
+            opt(@"!") ++
+            one(&TypeExpr) ++
+            one(&Block),
+    );
+
+    pub const VarDeclProto = rule(
+        alt(.{ @"const", @"var" }) ++
+            one(&Identifier) ++
+            opt(@":" ++ one(&TypeExpr)) ++
+            opt(one(&ByteAlign)) ++
+            opt(one(&AddrSpace)) ++
+            opt(one(&LinkSection)),
+    );
+
+    pub const GlobalVarDecl = rule(
+        one(&VarDeclProto) ++
+            opt(@"=" ++ one(&Expr)) ++
+            @";",
+    );
+
+    pub const TopVarDecl = rule(
+        opt(@"pub") ++
+            opt(alt(.{
+                @"export",
+                @"extern" ++ opt(one(&StringLiteral)),
+            })) ++
+            opt(@"threadlocal") ++
+            one(&GlobalVarDecl),
+    );
+
+    pub const TestDecl = rule(
+        @"test" ++
+            opt(alt(.{
+                one(&StringLiteral),
+                one(&Identifier),
+            })) ++
+            one(&Block),
+    );
+
+    pub const ComptimeDecl = rule(
+        @"comptime" ++ one(&Block),
+    );
+
+    pub const start = rule(
+        skip ++
+            star(alt(.{
+                one(&FnDecl),
+                one(&TopVarDecl),
+                one(&TestDecl),
+                one(&ComptimeDecl),
+            })) ++
+            C.eof ++
+            C.ok,
+    );
+
+    const chr_escape =
+        @"\\" ++ C.charclass("nr't\\\"");
+    const chr_plain =
+        C.charclass(.{
+            ascii[' ' .. '&' + 1],
+            ascii['(' .. '[' + 1],
+            ascii[']' .. '~' + 1],
+        });
 
     const alpha =
         C.charclass(.{ ascii['a' .. 'z' + 1], ascii['A' .. 'Z' + 1], "_" });
@@ -22,14 +567,22 @@ pub const ZigMiniGrammar = struct {
         });
     const not_nl_ascii =
         C.charclass(.{ ascii[' ' .. '~' + 1], '\t', '\r' });
+    const str_escape =
+        @"\\" ++ C.charclass("nr\"t\\");
+    const str_plain =
+        C.charclass(.{
+            ascii[' ' .. '!' + 1],
+            ascii['#' .. '[' + 1],
+            ascii[']' .. '~' + 1],
+        });
 
     const line_comment =
-        C.text("//") ++ C.star(not_nl_ascii);
+        C.text("//") ++ star(not_nl_ascii);
 
-    const skip: [9]C.Op =
-        C.star(C.anyOf(.{ C.charclass(" \t\n\r"), line_comment }));
+    const skip: [9]Op =
+        star(alt(.{ C.charclass(" \t\n\r"), line_comment }));
 
-    fn kw(name: []const u8) [14]C.Op {
+    fn kw(name: []const u8) [14]Op {
         return C.text(name) ++ ident_boundary ++ skip;
     }
 
@@ -70,7 +623,7 @@ pub const ZigMiniGrammar = struct {
     const @"catch" = kw("catch");
     const @"error" = kw("error");
 
-    fn op(s: []const u8, neg: []const u8) [if (neg.len == 0) 10 else 14]C.Op {
+    fn op(s: []const u8, neg: []const u8) [if (neg.len == 0) 10 else 14]Op {
         if (neg.len == 0) {
             return C.text(s) ++ skip;
         } else {
@@ -118,11 +671,11 @@ pub const ZigMiniGrammar = struct {
 
     const ident_boundary = C.shun(alnum_us); // next is not [A-Za-z0-9_]
 
-    fn ident(name: []const u8) [5]C.Op {
+    fn ident(name: []const u8) [5]Op {
         return C.text(name) ++ ident_boundary;
     }
 
-    const reserved_exact = C.anyOf(.{
+    const reserved_exact = alt(.{
         ident("fn"),
         ident("pub"),
         ident("return"),
@@ -158,531 +711,6 @@ pub const ZigMiniGrammar = struct {
         ident("noinline"),
         ident("error"),
         ident("inline"),
-    });
-
-    fn rule(x: anytype) [x.len + 1]C.Op {
-        return x ++ C.ret;
-    }
-
-    pub const Identifier =
-        rule(C.shun(reserved_exact) ++ alpha ++ C.star(alnum_us) ++ skip);
-
-    pub const BuiltinIdentifier =
-        rule(C.char('@') ++ alpha ++ C.star(alnum_us));
-
-    pub const Integer =
-        rule(C.several(digit) ++ skip);
-
-    pub const IdentifierList = rule(
-        C.call(&Identifier) ++
-            C.star(@"," ++ C.call(&Identifier)) ++
-            C.opt(@","),
-    );
-
-    pub const ErrorSetDecl =
-        rule(@"error" ++ @"{" ++ C.opt(C.call(&IdentifierList)) ++ @"}");
-
-    pub const TypeAtom: [8]C.Op = rule(
-        C.anyOf(.{
-            C.call(&Identifier),
-            C.call(&ContainerExpr),
-            C.call(&ErrorSetDecl),
-        }),
-    );
-
-    pub const ArrayStart: [22]C.Op =
-        rule(@"[" ++ C.call(&Expr) ++ @"]");
-
-    pub const TypePrefix = rule(
-        C.anyOf(.{
-            @"?",
-            @"*",
-            C.call(&ArrayStart),
-            @"[" ++ @"]",
-        }),
-    );
-
-    pub const TypeCore =
-        rule(C.star(C.call(&TypePrefix)) ++ C.call(&TypeAtom));
-
-    pub const TypeExpr: [19]C.Op =
-        rule(C.call(&TypeCore) ++ C.opt(@"!" ++ C.call(&TypeExpr)));
-
-    const str_escape =
-        @"\\" ++ C.charclass("nr\"t\\");
-    const str_plain =
-        C.charclass(.{
-            ascii[' ' .. '!' + 1],
-            ascii['#' .. '[' + 1],
-            ascii[']' .. '~' + 1],
-        });
-
-    pub const StringLiteral = rule(
-        C.char('"') ++
-            C.star(C.anyOf(.{ str_escape, str_plain })) ++
-            C.char('"') ++
-            skip,
-    );
-
-    const chr_escape =
-        @"\\" ++ C.charclass("nr't\\\"");
-    const chr_plain =
-        C.charclass(.{
-            ascii[' ' .. '&' + 1],
-            ascii['(' .. '[' + 1],
-            ascii[']' .. '~' + 1],
-        });
-
-    pub const CharLiteral = rule(
-        C.char('\'') ++
-            C.anyOf(.{ chr_escape, chr_plain }) ++
-            C.char('\'') ++
-            skip,
-    );
-
-    pub const ExprInParens: [22]C.Op =
-        rule(@"(" ++ C.call(&Expr) ++ @")");
-
-    pub const LinkSection =
-        rule(@"linksection" ++ C.call(&ExprInParens));
-    pub const AddrSpace =
-        rule(@"addrspace" ++ C.call(&ExprInParens));
-    pub const CallConv =
-        rule(@"callconv" ++ C.call(&ExprInParens));
-    pub const ByteAlign =
-        rule(@"align" ++ C.call(&ExprInParens));
-
-    pub const ErrorLiteral =
-        rule(@"error" ++ @"." ++ C.call(&Identifier));
-
-    pub const DotIdentifier =
-        rule(@"." ++ C.call(&Identifier));
-
-    pub const Primary: [50]C.Op = rule(
-        C.anyOf(.{
-            C.call(&ExprInParens),
-            C.call(&Block),
-            C.call(&IfExpr),
-            C.call(&WhileExprE),
-            C.call(&ForExprE),
-            C.call(&SwitchExpr),
-            C.call(&ReturnExpr),
-            C.call(&BreakExpr),
-            C.call(&ContinueExpr),
-            C.call(&ContainerExpr),
-            C.call(&BuiltinIdentifier),
-            C.call(&ErrorLiteral),
-            C.call(&DotIdentifier),
-            C.call(&Integer),
-            C.call(&StringLiteral),
-            C.call(&CharLiteral),
-            C.call(&Identifier),
-        }),
-    );
-
-    pub const FnCallArguments: [24]C.Op =
-        rule(@"(" ++ C.opt(C.call(&ExprList)) ++ @")");
-
-    pub const MemberAccess = rule(@"." ++ C.call(&Identifier));
-
-    const sliceSuffix =
-        @".." ++ C.opt(C.call(&Expr)) ++ C.opt(@":" ++ C.call(&Expr));
-
-    pub const IndexOrSlice: [54]C.Op = rule(
-        @"[" ++ C.call(&Expr) ++ C.opt(sliceSuffix) ++ @"]",
-    );
-
-    pub const OneSuffix = rule(
-        C.anyOf(.{
-            C.call(&FnCallArguments),
-            C.call(&IndexOrSlice),
-            @".*",
-            @".?",
-            C.call(&MemberAccess),
-        }),
-    );
-
-    pub const SuffixExpr = rule(
-        C.call(&Primary) ++ C.star(C.call(&OneSuffix)),
-    );
-
-    pub const ReturnExpr: [18]C.Op =
-        rule(@"return" ++ C.opt(C.call(&Expr)));
-
-    pub const LabelRef =
-        rule(@":" ++ C.call(&Identifier));
-    pub const LabelDef =
-        rule(C.call(&Identifier) ++ @":");
-
-    pub const BreakExpr: [21]C.Op = rule(
-        @"break" ++ C.opt(C.call(&LabelRef)) ++ C.opt(C.call(&Expr)),
-    );
-
-    pub const ContinueExpr =
-        rule(@"continue" ++ C.opt(C.call(&LabelRef)));
-
-    const payloadExpr =
-        C.opt(C.call(&PtrPayload)) ++ C.call(&Expr);
-    const elseExpr =
-        @"else" ++ payloadExpr;
-
-    pub const IfExpr: [58]C.Op = rule(
-        @"if" ++ @"(" ++ C.call(&Expr) ++ @")" ++
-            payloadExpr ++
-            elseExpr,
-    );
-
-    pub const WhileContinueExpr: [32]C.Op =
-        rule(@":" ++ @"(" ++ C.call(&AssignExpr) ++ @")");
-
-    pub const WhileExprE: [43]C.Op = rule(
-        @"while" ++ C.call(&ExprInParens) ++
-            C.opt(C.call(&PtrPayload)) ++
-            C.opt(C.call(&WhileContinueExpr)) ++
-            C.call(&Block) ++
-            C.opt(elseExpr),
-    );
-
-    pub const ForItem: [21]C.Op = rule(
-        C.call(&Expr) ++ C.opt(@".." ++ C.opt(C.call(&Expr))),
-    );
-
-    pub const ForArgumentsList = rule(
-        C.call(&ForItem) ++
-            C.star(@"," ++ C.call(&ForItem)) ++
-            C.opt(@","),
-    );
-
-    pub const ForExprE: [60]C.Op = rule(
-        @"for" ++ @"(" ++ C.call(&ForArgumentsList) ++ @")" ++
-            C.opt(C.call(&PtrListPayload)) ++
-            C.call(&Block) ++
-            C.opt(elseExpr),
-    );
-
-    pub const CaseItem: [15]C.Op = rule(
-        C.call(&Expr) ++ C.opt(@"..." ++ C.call(&Expr)),
-    );
-
-    pub const PtrPayload = rule(
-        @"|" ++ C.opt(@"*") ++ C.call(&Identifier) ++ @"|",
-    );
-
-    pub const PtrIndexPayload = rule(
-        @"|" ++
-            C.opt(@"*") ++ C.call(&Identifier) ++
-            C.opt(@"," ++ C.call(&Identifier)) ++
-            @"|",
-    );
-
-    pub const PtrListPayload = rule(
-        @"|" ++
-            C.opt(@"*") ++ C.call(&Identifier) ++
-            C.star(@"," ++ C.opt(@"*") ++ C.call(&Identifier)) ++
-            C.opt(@",") ++
-            @"|",
-    );
-
-    pub const Payload =
-        rule(@"|" ++ C.call(&Identifier) ++ @"|");
-
-    pub const ElseProng: [29]C.Op = rule(
-        @"else" ++ @"=>" ++ C.opt(C.call(&PtrIndexPayload)) ++ C.call(&Expr),
-    );
-
-    pub const CaseProng: [45]C.Op = rule(
-        C.opt(@"inline") ++
-            C.call(&CaseItem) ++
-            C.star(@"," ++ C.call(&CaseItem)) ++
-            @"=>" ++
-            C.opt(C.call(&PtrIndexPayload)) ++
-            C.call(&Expr),
-    );
-
-    pub const Prong = rule(
-        C.anyOf(.{
-            C.call(&ElseProng),
-            C.call(&CaseProng),
-        }),
-    );
-
-    pub const SwitchBody = rule(
-        @"{" ++
-            C.opt(C.call(&Prong) ++
-                C.star(@"," ++ C.call(&Prong))) ++
-            @"}",
-    );
-
-    pub const SwitchExpr: [17]C.Op = rule(
-        @"switch" ++ C.call(&ExprInParens) ++ C.call(&SwitchBody),
-    );
-
-    pub const FieldDecl = rule(
-        C.call(&Identifier) ++ @":" ++ C.call(&TypeExpr),
-    );
-
-    pub const FieldList = rule(
-        C.call(&FieldDecl) ++
-            C.star(C.seq(.{ @",", C.call(&FieldDecl) })) ++
-            C.opt(@","),
-    );
-
-    pub const StructBody = rule(
-        @"{" ++ C.opt(C.call(&FieldList)) ++ @"}",
-    );
-
-    pub const UnionBody = StructBody;
-
-    pub const EnumFields = rule(
-        C.call(&Identifier) ++
-            C.star(C.seq(.{ @",", C.call(&Identifier) })) ++
-            C.opt(@","),
-    );
-
-    pub const EnumBody = rule(
-        @"{" ++ C.opt(C.call(&EnumFields)) ++ @"}",
-    );
-
-    pub const ContainerExpr = rule(
-        C.anyOf(.{
-            C.seq(.{ @"struct", C.call(&StructBody) }),
-            C.seq(.{ @"union", C.call(&UnionBody) }),
-            C.seq(.{ @"enum", C.call(&EnumBody) }),
-        }),
-    );
-
-    pub const PrefixExpr = rule(
-        C.star(C.anyOf(.{ @"!", @"-", @"~", @"-%", @"&", @"try" })) ++
-            C.call(&SuffixExpr),
-    );
-
-    pub const MultiplyExpr = rule(
-        C.call(&PrefixExpr) ++
-            C.star(C.anyOf(.{ @"*", @"/", @"%" }) ++ C.call(&PrefixExpr)),
-    );
-
-    pub const AddExpr = rule(
-        C.call(&MultiplyExpr) ++ C.star(
-            C.anyOf(.{ @"+", @"-" }) ++ C.call(&MultiplyExpr),
-        ),
-    );
-
-    pub const BitShiftExpr = rule(
-        C.call(&AddExpr) ++ C.star(
-            C.anyOf(.{ @"<<", @">>" }) ++ C.call(&AddExpr),
-        ),
-    );
-
-    pub const BitwiseExpr = rule(
-        C.call(&BitShiftExpr) ++
-            C.star(
-                C.anyOf(.{
-                    @"&",
-                    @"^",
-                    @"|",
-                    @"orelse",
-                    @"catch" ++ C.opt(C.call(&Payload)),
-                }) ++
-                    C.call(&BitShiftExpr),
-            ),
-    );
-
-    pub const CompareExpr = rule(
-        C.call(&BitwiseExpr) ++
-            C.opt(
-                C.anyOf(.{ @"==", @"!=", @"<=", @">=", @"<", @">" }) ++
-                    C.call(&BitwiseExpr),
-            ),
-    );
-
-    pub const BoolAndExpr = rule(
-        C.call(&CompareExpr) ++
-            C.star(@"and" ++ C.call(&CompareExpr)),
-    );
-
-    pub const Expr = rule(
-        C.call(&BoolAndExpr) ++
-            C.star(@"or" ++ C.call(&BoolAndExpr)),
-    );
-
-    pub const ExprList = rule(
-        C.call(&Expr) ++
-            C.star(@"," ++ C.call(&Expr)),
-    );
-
-    pub const CallExpr = rule(
-        C.anyOf(.{ C.call(&Identifier), C.call(&BuiltinIdentifier) }) ++
-            @"(" ++
-            C.opt(C.call(&ExprList)) ++
-            @")",
-    );
-
-    pub const Param = rule(
-        C.call(&Identifier) ++ @":" ++ C.call(&TypeExpr),
-    );
-
-    pub const ParamList = rule(
-        C.call(&Param) ++
-            C.star(@"," ++ C.call(&Param)),
-    );
-
-    pub const ReturnStmt = rule(
-        @"return" ++ C.opt(C.call(&Expr)),
-    );
-
-    // ok continue from here, claude! turn the C.seq(.{ a, b, ..., C.ret }) into rule(a ++ b ++ ...),
-    // also changing inner C.seq(...) into simple ++ forms
-
-    pub const VarDecl = C.seq(.{
-        C.anyOf(.{ @"const", @"var" }),
-        C.call(&Identifier),
-        C.opt(C.seq(.{ @"=", C.call(&Expr) })),
-        C.ret,
-    });
-
-    pub const AssignExpr = C.anyOf(.{
-        C.seq(.{ C.call(&Identifier), @"=", C.call(&Expr) }),
-        C.call(&Expr),
-    }) ++ C.ret;
-
-    pub const Block: [24]C.Op =
-        @"{" ++ C.star(C.call(&Statement)) ++ @"}" ++ C.ret;
-
-    pub const BlockExpr = C.seq(.{ C.opt(C.call(&LabelDef)), C.call(&Block), C.ret });
-    pub const BlockExprStatement = C.anyOf(.{
-        C.call(&BlockExpr),
-        C.seq(.{ C.call(&AssignExpr), @";" }),
-    }) ++ C.ret;
-
-    pub const VarDeclExprStatement = C.anyOf(.{
-        C.seq(.{ C.call(&VarDecl), @";" }),
-        C.seq(.{ C.call(&Expr), @";" }),
-    }) ++ C.ret;
-
-    pub const Else =
-        @"else" ++ C.opt(C.call(&PtrPayload)) ++ C.callRule(.Statement) ++ C.ret;
-
-    pub const IfStatement =
-        @"if" ++ @"(" ++ C.call(&Expr) ++ @")" ++ C.opt(C.call(&PtrPayload)) ++ C.anyOf(.{
-            C.call(&BlockExpr) ++ C.opt(C.call(&Else)),
-            C.call(&AssignExpr) ++ C.anyOf(.{ @";", C.call(&Else) }),
-        }) ++ C.ret;
-
-    pub const WhileStatement =
-        @"while" ++ @"(" ++ C.call(&Expr) ++ @")" ++
-        C.opt(C.call(&PtrPayload)) ++
-        C.opt(C.call(&WhileContinueExpr)) ++
-        C.anyOf(.{
-            C.call(&BlockExpr) ++ C.opt(C.call(&Else)),
-            C.call(&AssignExpr) ++ C.anyOf(.{ @";", C.call(&Else) }),
-        }) ++ C.ret;
-
-    pub const LabeledWhileStatement =
-        C.opt(C.call(&LabelDef)) ++ C.call(&WhileStatement) ++ C.ret;
-
-    pub const ForStatement =
-        @"for" ++ @"(" ++ C.call(&ForArgumentsList) ++ @")" ++
-        C.opt(C.call(&PtrListPayload)) ++
-        C.anyOf(.{
-            C.call(&BlockExpr),
-            C.call(&AssignExpr) ++ @";",
-        }) ++ C.ret;
-
-    pub const LabeledForStatement =
-        C.opt(C.call(&LabelDef)) ++ C.call(&ForStatement) ++ C.ret;
-
-    pub const DeferStatement =
-        @"defer" ++ C.call(&BlockExprStatement) ++ C.ret;
-    pub const ErrDeferStatement =
-        @"errdefer" ++ C.opt(C.call(&Payload)) ++ C.call(&BlockExprStatement) ++ C.ret;
-    pub const NoSuspendStatement =
-        @"nosuspend" ++ C.call(&BlockExprStatement) ++ C.ret;
-    pub const SuspendStatement =
-        @"suspend" ++ C.call(&BlockExprStatement) ++ C.ret;
-
-    pub const Statement: [29]C.Op = C.anyOf(.{
-        C.call(&IfStatement),
-        C.call(&LabeledWhileStatement),
-        C.call(&LabeledForStatement),
-        C.call(&SwitchExpr),
-        C.call(&DeferStatement),
-        C.call(&ErrDeferStatement),
-        C.call(&NoSuspendStatement),
-        C.call(&SuspendStatement),
-        C.call(&VarDeclExprStatement),
-        C.call(&BlockExprStatement),
-    }) ++ C.ret;
-
-    pub const FnDecl = C.seq(.{
-        C.opt(@"pub"),
-        C.opt(C.anyOf(.{
-            @"export",
-            C.seq(.{ @"extern", C.opt(C.callRule(.StringLiteral)) }),
-            @"inline",
-            @"noinline",
-        })),
-        @"fn",
-        C.callRule(.Identifier),
-        @"(",
-        C.opt(C.callRule(.ParamList)),
-        @")",
-        C.opt(C.callRule(.ByteAlign)),
-        C.opt(C.callRule(.AddrSpace)),
-        C.opt(C.callRule(.LinkSection)),
-        C.opt(C.callRule(.CallConv)),
-        C.opt(@"!"),
-        C.callRule(.TypeExpr),
-        C.call(&Block),
-        C.ret,
-    });
-
-    pub const VarDeclProto = C.seq(.{
-        C.anyOf(.{ @"const", @"var" }),
-        C.callRule(.Identifier),
-        C.opt(C.seq(.{ @":", C.callRule(.TypeExpr) })),
-        C.opt(C.callRule(.ByteAlign)),
-        C.opt(C.callRule(.AddrSpace)),
-        C.opt(C.callRule(.LinkSection)),
-        C.ret,
-    });
-
-    pub const GlobalVarDecl = C.seq(.{
-        C.callRule(.VarDeclProto),
-        C.opt(@"=" ++ C.callRule(.Expr)),
-        @";",
-        C.ret,
-    });
-
-    pub const TopVarDecl = C.seq(.{
-        C.opt(@"pub"),
-        C.opt(C.anyOf(.{
-            @"export",
-            @"extern" ++ C.opt(C.callRule(.StringLiteral)),
-        })),
-        C.opt(@"threadlocal"),
-        C.callRule(.GlobalVarDecl),
-        C.ret,
-    });
-
-    pub const TestDecl = C.seq(.{
-        @"test",
-        C.opt(C.anyOf(.{ C.call(&StringLiteral), C.call(&Identifier) })),
-        C.call(&Block),
-        C.ret,
-    });
-
-    pub const ComptimeDecl = @"comptime" ++ C.call(&Block) ++ C.ret;
-
-    pub const start = C.seq(.{
-        skip,
-        C.star(C.anyOf(.{
-            C.call(&FnDecl),
-            C.call(&TopVarDecl),
-            C.call(&TestDecl),
-            C.call(&ComptimeDecl),
-        })),
-        C.eof,
-        C.ok,
     });
 };
 
