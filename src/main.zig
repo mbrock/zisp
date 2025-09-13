@@ -16,17 +16,58 @@ pub fn main() !void {
         break :blk try allocator.dupeZ(u8, contents);
     } else "var x: i32 = 42;\n";
 
-    // Test with smaller stack sizes: original is VM(ZigMiniGrammar, 1024, 256)
-    const SmallParser = zisp.parse.VM(zisp.zigmini.ZigMiniGrammar, 128, 32);
-    var vm = SmallParser.init(allocator, source);
+    // Create VM with runtime-allocated stacks
+    const Parser = zisp.parse.VM(zisp.zigmini.ZigMiniGrammar);
+
+    // Allocate stacks
+    const mark_stack_size = 512;
+    const save_stack_size = 256;
+    const marks = try allocator.alloc(Parser.Mark, mark_stack_size);
+    defer allocator.free(marks);
+    const saves = try allocator.alloc(Parser.Save, save_stack_size);
+    defer allocator.free(saves);
+
+    std.debug.print("Creating VM on heap with stacks: marks={}, saves={}...\n", .{mark_stack_size, save_stack_size});
+    var vm = try allocator.create(Parser);
+    defer allocator.destroy(vm);
+    std.debug.print("Initializing VM...\n", .{});
+    vm.initPtr(allocator, source, marks, saves);
     defer vm.deinit();
 
-    const root = try vm.parse();
+    std.debug.print("Starting parse in yield mode...\n", .{});
+    std.debug.print("VM size: {} bytes\n", .{@sizeOf(Parser)});
+    std.debug.print("Initial codehead (P.start_ip): {}\n", .{vm.codehead});
+
+    // Use yield mode to step through execution
+    var step_count: u32 = 0;
+    while (true) {
+        // std.debug.print("Step {}: texthead={}, codehead={}, markhead={}, savehead={}\n",
+        //     .{step_count, vm.texthead, vm.codehead, vm.markhead, vm.savehead});
+        if (vm.markhead >= mark_stack_size) {
+            std.debug.print("ERROR: markhead overflow! Max is {}\n", .{mark_stack_size});
+            return error.StackOverflow;
+        }
+        const status = try vm.tick(.yield_each, null);
+        step_count += 1;
+        switch (status) {
+            .Running => continue,
+            .Ok => {
+                std.debug.print("Parse succeeded after {} steps\n", .{step_count});
+                break;
+            },
+            .Fail => {
+                std.debug.print("Parse failed after {} steps\n", .{step_count});
+                vm.formatError();
+                return error.ParseFailed;
+            },
+        }
+    }
+    const root = vm.nodes.items[0];
     std.debug.print("Parse succeeded! Root node: {s}\n", .{@tagName(root.tag)});
 
     if (vm.nodes.items.len > 0) {
         std.debug.print("\nAST:\n", .{});
-        printNode(&vm, 0, 0);
+        printNode(vm, 0, 0);
     }
 }
 

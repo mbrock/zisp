@@ -114,8 +114,10 @@ pub const ZigMiniGrammar = struct {
             opt(@","),
     ));
 
-    pub const StructBody = C.node(rule(
-        @"{" ++ opt(one(&FieldList)) ++ @"}",
+
+    pub const ContainerMembers: C.Annotated(7) = C.node(rule(
+        star(one(&ContainerDeclaration)) ++
+        opt(one(&FieldList))
     ));
 
     pub const EnumFields = C.node(rule(
@@ -126,6 +128,18 @@ pub const ZigMiniGrammar = struct {
 
     pub const EnumBody = C.node(rule(
         @"{" ++ opt(one(&EnumFields)) ++ @"}",
+    ));
+
+    pub const ContainerDeclaration: C.Annotated(15) = C.node(rule(
+        alt(.{
+            one(&FnDecl),
+            one(&VarDecl) ++ @";",
+        }),
+    ));
+
+
+    pub const StructBody: C.Annotated(22) = C.node(rule(
+        @"{" ++ one(&ContainerMembers) ++ @"}"
     ));
 
     pub const ContainerExpr = C.node(rule(
@@ -385,7 +399,7 @@ pub const ZigMiniGrammar = struct {
     ));
 
     pub const Param = C.node(rule(
-        one(&Identifier) ++ @":" ++ one(&TypeExpr),
+        opt(@"comptime") ++ one(&Identifier) ++ @":" ++ one(&TypeExpr),
     ));
 
     pub const ParamList = C.node(rule(
@@ -710,7 +724,7 @@ pub const ZigMiniGrammar = struct {
     });
 };
 
-pub const ZigMiniParser = VM(ZigMiniGrammar, 1024, 256);
+pub const ZigMiniParser = VM(ZigMiniGrammar);
 
 pub fn parseZigMini(src: [:0]const u8) !bool {
     return ZigMiniParser.parseFully(std.testing.allocator, src, .auto_continue);

@@ -84,10 +84,6 @@ const ExecMode = enum { auto_continue, yield_each };
 pub fn VM(
     /// Grammar type
     comptime G: type,
-    /// Save stack size
-    comptime T: usize,
-    /// Mark stack size
-    comptime R: usize,
 ) type {
     return struct {
         const Machine = @This();
@@ -141,8 +137,8 @@ pub fn VM(
             node_count_on_entry: u32,
         };
 
-        marklist: [R]Mark align(16) = undefined,
-        savelist: [T]Save align(16) = undefined,
+        marklist: []Mark,
+        savelist: []Save,
 
         codehead: u32 = codeinit,
         texthead: u32 = 0,
@@ -158,8 +154,28 @@ pub fn VM(
         furthest_rule: ?P.RuleT = null,
         expected_at_furthest: std.ArrayList(P.RuleT) = .{},
 
-        pub fn init(allocator: std.mem.Allocator, src: [:0]const u8) Machine {
-            return .{ .text = src, .allocator = allocator };
+        pub fn init(allocator: std.mem.Allocator, src: [:0]const u8, marks: []Mark, saves: []Save) Machine {
+            return .{
+                .text = src,
+                .allocator = allocator,
+                .marklist = marks,
+                .savelist = saves,
+            };
+        }
+
+        pub fn initPtr(self: *Machine, allocator: std.mem.Allocator, src: [:0]const u8, marks: []Mark, saves: []Save) void {
+            self.marklist = marks;
+            self.savelist = saves;
+            self.codehead = P.start_ip;
+            self.texthead = 0;
+            self.markhead = 0;
+            self.savehead = 0;
+            self.text = src;
+            self.allocator = allocator;
+            self.nodes = .{};
+            self.furthest_pos = 0;
+            self.furthest_rule = null;
+            self.expected_at_furthest = .{};
         }
 
         pub fn deinit(self: *Machine) void {
@@ -509,7 +525,9 @@ pub fn VM(
             src: [:0]const u8,
             comptime mode: ExecMode,
         ) !bool {
-            var m = @This().init(allocator, src);
+            var marks: [256]Mark = undefined;
+            var saves: [128]Save = undefined;
+            var m = @This().init(allocator, src, &marks, &saves);
             defer m.deinit();
             switch (mode) {
                 .yield_each => while (true) {
@@ -541,7 +559,9 @@ pub fn VM(
 
         /// Execute parse in yield_each mode gathering instrumentation metrics.
         pub fn runWithMetrics(allocator: std.mem.Allocator, src: [:0]const u8) !Metrics {
-            var m = @This().init(allocator, src);
+            var marks: [256]Mark = undefined;
+            var saves: [128]Save = undefined;
+            var m = @This().init(allocator, src, &marks, &saves);
             defer m.deinit();
             var metrics: Metrics = .{};
             var prev_g: usize = m.savehead;
@@ -574,7 +594,9 @@ pub fn VM(
         }
 
         pub fn runWithMetricsUncached(allocator: std.mem.Allocator, src: [:0]const u8) !Metrics {
-            var m = @This().init(allocator, src);
+            var marks: [256]Mark = undefined;
+            var saves: [128]Save = undefined;
+            var m = @This().init(allocator, src, &marks, &saves);
             defer m.deinit();
             var metrics: Metrics = .{};
             var prev_g: usize = m.savehead;
@@ -928,7 +950,7 @@ pub const JSONGrammar = struct {
     });
 };
 
-const JSONParser = VM(JSONGrammar, 32, 32);
+const JSONParser = VM(JSONGrammar);
 
 fn parseJSON(src: [:0]const u8) !bool {
     return JSONParser.parseFully(std.heap.page_allocator, src, .auto_continue);
@@ -1025,8 +1047,8 @@ pub const GreedyGrammar = struct {
     pub const start = C.seq(.{ Chain, C.eof, C.ok });
 };
 
-const BacktrackParser = VM(BacktrackGrammar, 32, 32);
-const GreedyParser = VM(GreedyGrammar, 32, 32);
+const BacktrackParser = VM(BacktrackGrammar);
+const GreedyParser = VM(GreedyGrammar);
 
 fn parseBacktrack(src: [:0]const u8) !bool {
     return BacktrackParser.parseFully(std.heap.page_allocator, src, .auto_continue);
@@ -1053,7 +1075,9 @@ test "backtracking inside greedy repetition" {
     try std.testing.expect(!try parseGreedy("aaaaa"));
 
     const src = "aaaaab"; // should skip 3 longer failing alts before match
-    var m = GreedyParser.init(std.testing.allocator, src);
+    var marks: [32]GreedyParser.Mark = undefined;
+    var saves: [32]GreedyParser.Save = undefined;
+    var m = GreedyParser.init(std.testing.allocator, src, &marks, &saves);
     defer m.deinit();
 
     for (0..10) |_| {
@@ -1098,7 +1122,7 @@ pub const BlowupGrammar = struct {
     });
 };
 
-const BlowupVM = VM(BlowupGrammar, 4096, 4096);
+const BlowupVM = VM(BlowupGrammar);
 
 test "packrat blowup demonstration" {
     const n: usize = 20;
@@ -1135,7 +1159,7 @@ fn pedometer(SomeVM: type, src: [:0]const u8, mode: enum { packrat, naive }) !us
 }
 
 test "packrat caching benefit" {
-    const PackratVM = VM(PackratGrammar, 32, 32);
+    const PackratVM = VM(PackratGrammar);
 
     try std.testing.expectEqual(
         27,
@@ -1145,7 +1169,9 @@ test "packrat caching benefit" {
 
 test "yield mode" {
     const src = "true";
-    var m = JSONParser.init(std.testing.allocator, src);
+    var marks: [32]JSONParser.Mark = undefined;
+    var saves: [32]JSONParser.Save = undefined;
+    var m = JSONParser.init(std.testing.allocator, src, &marks, &saves);
     defer m.deinit();
 
     // First tick should execute first op and return Running
@@ -1169,7 +1195,9 @@ test "yield mode" {
 
 test "yield mode complex" {
     const src = "[1, 2, 3]";
-    var m = JSONParser.init(std.testing.allocator, src);
+    var marks: [32]JSONParser.Mark = undefined;
+    var saves: [32]JSONParser.Save = undefined;
+    var m = JSONParser.init(std.testing.allocator, src, &marks, &saves);
     defer m.deinit();
 
     var count: usize = 0;
@@ -1201,7 +1229,7 @@ pub const KeywordGrammar = struct {
     });
 };
 
-const KeywordParser = VM(KeywordGrammar, 32, 32);
+const KeywordParser = VM(KeywordGrammar);
 
 fn parseKeyword(src: [:0]const u8) !bool {
     return KeywordParser.parseFully(std.heap.page_allocator, src, .auto_continue);
@@ -1236,7 +1264,7 @@ pub const EvenIntGrammar = struct {
     });
 };
 
-const EvenIntParser = VM(EvenIntGrammar, 32, 32);
+const EvenIntParser = VM(EvenIntGrammar);
 
 fn parseEvenInt(src: [:0]const u8) !bool {
     return EvenIntParser.parseFully(std.heap.page_allocator, src, .auto_continue);

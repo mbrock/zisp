@@ -12,9 +12,9 @@ pub fn DebugPrinter(comptime Parser: type) type {
         step_count: usize = 0,
         indent: usize = 0,
 
-        pub fn init(allocator: std.mem.Allocator, text: [:0]const u8, writer: *std.io.Writer) Self {
+        pub fn init(allocator: std.mem.Allocator, text: [:0]const u8, writer: *std.io.Writer, marks: []Parser.Mark, saves: []Parser.Save) Self {
             return .{
-                .machine = Parser.init(allocator, text),
+                .machine = Parser.init(allocator, text, marks, saves),
                 .writer = writer,
             };
         }
@@ -116,7 +116,9 @@ pub fn debugParse(
     text: [:0]const u8,
     writer: *std.io.Writer,
 ) !bool {
-    var printer = DebugPrinter(Parser).init(allocator, text, writer);
+    var marks: [256]Parser.Mark = undefined;
+    var saves: [128]Parser.Save = undefined;
+    var printer = DebugPrinter(Parser).init(allocator, text, writer, &marks, &saves);
     defer printer.deinit();
     const status = try printer.run();
     return status == .Ok;
@@ -124,7 +126,7 @@ pub fn debugParse(
 
 // Example usage in tests
 test "debug printer basic" {
-    const JSONParser = pegvm.VM(pegvm.JSONGrammar, 1024, 256);
+    const JSONParser = pegvm.VM(pegvm.JSONGrammar);
 
     const text = "true";
     var buf: [1024]u8 = undefined;
@@ -135,7 +137,7 @@ test "debug printer basic" {
 }
 
 test "debug printer complex" {
-    const JSONParser = pegvm.VM(pegvm.JSONGrammar, 1024, 256);
+    const JSONParser = pegvm.VM(pegvm.JSONGrammar);
 
     const text = "[1, 2]";
     var buf: [4096]u8 = undefined;
