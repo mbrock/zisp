@@ -9,6 +9,17 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    // Check for --dump-pegcode flag
+    if (args.len > 1 and std.mem.eql(u8, args[1], "--dump-pegcode")) {
+        // Check for optional --outdir flag
+        if (args.len > 3 and std.mem.eql(u8, args[2], "--outdir")) {
+            try dumpPegCodeToFiles(allocator, args[3]);
+        } else {
+            try dumpPegCodeToStdout();
+        }
+        return;
+    }
+
     const source = if (args.len > 1) blk: {
         const file = try std.fs.cwd().openFile(args[1], .{});
         defer file.close();
@@ -66,7 +77,12 @@ pub fn main() !void {
     std.debug.print("Parse succeeded! Root node: {s}\n", .{@tagName(root.tag)});
 
     if (vm.nodes.items.len > 0) {
-        std.debug.print("\nAST:\n", .{});
+        std.debug.print("\nAST ({} nodes total):\n", .{vm.nodes.items.len});
+        for (0..vm.nodes.items.len) |i| {
+            const n = vm.nodes.items[i];
+            std.debug.print("Node {}: {s} (children: first={?}, next={?})\n", .{i, @tagName(n.tag), n.first_child, n.next_sibling});
+        }
+        std.debug.print("\nTree:\n", .{});
         printNode(vm, 0, 0);
     }
 }
@@ -83,4 +99,175 @@ fn printNode(vm: anytype, idx: u32, depth: usize) void {
     std.debug.print("\n", .{});
     var it = node.children(vm.nodes.items);
     while (it.next()) |child_idx| printNode(vm, child_idx, depth + 1);
+}
+
+fn dumpPegCodeToStdout() !void {
+    const stdout_file = std.fs.File.stdout();
+    var buffer: [4096]u8 = undefined;
+    var stdout_writer = stdout_file.writer(&buffer);
+
+    try dumpPegCode(&stdout_writer.interface);
+    try stdout_writer.interface.flush();
+}
+
+fn dumpPegCodeToFiles(allocator: std.mem.Allocator, outdir: []const u8) !void {
+    // Create output directory if it doesn't exist
+    std.fs.cwd().makePath(outdir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    const Parser = zisp.parse.VM(zisp.zigmini.ZigMiniGrammar);
+    const P = Parser.P;
+
+    // Create index file
+    const index_path = try std.fmt.allocPrint(allocator, "{s}/index.txt", .{outdir});
+    defer allocator.free(index_path);
+    const index_file = try std.fs.cwd().createFile(index_path, .{});
+    defer index_file.close();
+    var index_buffer: [4096]u8 = undefined;
+    var index_writer = index_file.writer(&index_buffer);
+
+    try index_writer.interface.print("=== PEG VM Bytecode for ZigMiniGrammar ===\n\n", .{});
+    try index_writer.interface.print("Total bytecode size: {} instructions\n", .{P.code.len});
+    try index_writer.interface.print("Entry point: {}\n\n", .{P.start_ip});
+    try index_writer.interface.print("Rules:\n", .{});
+
+    // Helper to dump one rule
+    const dumpRule = struct {
+        fn dump(alloc: std.mem.Allocator, comptime rule: P.RuleT, dir: []const u8, idx_writer: anytype) !void {
+            const rule_name = @tagName(rule);
+            const rule_ip = P.rule_ip[@intFromEnum(rule)];
+
+            // Find the end of this rule
+            var end_ip: usize = P.code.len;
+            const all_rules = comptime std.enums.values(P.RuleT);
+            inline for (all_rules) |other_rule| {
+                const other_ip = P.rule_ip[@intFromEnum(other_rule)];
+                if (other_ip > rule_ip and other_ip < end_ip) {
+                    end_ip = other_ip;
+                }
+            }
+
+            // Write to index
+            try idx_writer.interface.print("  {s:30} @ {:4} (size: {} ops)\n", .{ rule_name, rule_ip, end_ip - rule_ip });
+
+            // Create file for this rule
+            const filename = try std.fmt.allocPrint(alloc, "{s}/{s}.peg", .{ dir, rule_name });
+            defer alloc.free(filename);
+            const file = try std.fs.cwd().createFile(filename, .{});
+            defer file.close();
+
+            var buffer: [4096]u8 = undefined;
+            var file_writer = file.writer(&buffer);
+
+            try file_writer.interface.print("=== Rule: {s} @ {} ===\n", .{ rule_name, rule_ip });
+            try file_writer.interface.print("Size: {} instructions\n\n", .{end_ip - rule_ip});
+
+            // Dump instructions for this rule
+            var ip = rule_ip;
+            while (ip < end_ip) : (ip += 1) {
+                try dumpInstruction(&file_writer.interface, @intCast(ip), P.code[ip]);
+            }
+
+            try file_writer.interface.flush();
+        }
+    }.dump;
+
+    // Dump each rule to a separate file
+    const rules = comptime std.enums.values(P.RuleT);
+    inline for (rules) |rule| {
+        try dumpRule(allocator, rule, outdir, &index_writer);
+    }
+
+    try index_writer.interface.flush();
+    std.debug.print("Dumped {} rules to {s}/\n", .{ rules.len, outdir });
+}
+
+fn dumpPegCode(writer: *std.Io.Writer) !void {
+    const Parser = zisp.parse.VM(zisp.zigmini.ZigMiniGrammar);
+    const P = Parser.P;
+
+    try writer.print("=== PEG VM Bytecode for ZigMiniGrammar ===\n\n", .{});
+    try writer.print("Total bytecode size: {} instructions\n", .{P.code.len});
+    try writer.print("Entry point: {}\n\n", .{P.start_ip});
+
+    // Create a map of IP to rule name for better formatting
+    const ip_to_rule = comptime blk: {
+        var arr: [P.code.len]?[]const u8 = [_]?[]const u8{null} ** P.code.len;
+        const rules = std.enums.values(P.RuleT);
+        for (rules) |rule| {
+            const rule_ip = P.rule_ip[@intFromEnum(rule)];
+            arr[rule_ip] = @tagName(rule);
+        }
+        break :blk arr;
+    };
+
+    // Dump bytecode with rule sections
+    var ip: u32 = 0;
+    while (ip < P.code.len) : (ip += 1) {
+        // Check if this IP starts a rule
+        if (ip_to_rule[ip]) |rule_name| {
+            try writer.print("\n=== Rule: {s} @ {} ===\n", .{ rule_name, ip });
+        }
+
+        try dumpInstruction(writer, ip, P.code[ip]);
+    }
+
+    try writer.print("\n=== End of bytecode ===\n", .{});
+}
+
+fn dumpInstruction(writer: *std.Io.Writer, ip: u32, op: anytype) !void {
+    // Print instruction address
+    try writer.print("{:>4}: ", .{ip});
+
+    switch (op) {
+        .ChoiceRel => |offset| {
+            const target = @as(i32, @intCast(ip)) + offset;
+            try writer.print("CHOICE      +{} (→ {})\n", .{ offset, target });
+        },
+        .CommitRel => |offset| {
+            const target = @as(i32, @intCast(ip)) + offset;
+            try writer.print("COMMIT      +{} (→ {})\n", .{ offset, target });
+        },
+        .CommitRewindRel => |offset| {
+            const target = @as(i32, @intCast(ip)) + offset;
+            try writer.print("COMMITRW    +{} (→ {})\n", .{ offset, target });
+        },
+        .Call => |rule| {
+            const Parser = zisp.parse.VM(zisp.zigmini.ZigMiniGrammar);
+            const P = Parser.P;
+            const rule_ip = P.rule_ip[@intFromEnum(rule)];
+            try writer.print("CALL        {s} (→ {})\n", .{ @tagName(rule), rule_ip });
+        },
+        .Ret => {
+            try writer.print("RETURN\n", .{});
+        },
+        .Fail => {
+            try writer.print("FAIL\n", .{});
+        },
+        .String => |s| {
+            try writer.print("STRING      \"{s}\"\n", .{s});
+        },
+        .CharSet => |cs| {
+            try writer.print("CHARSET     ", .{});
+            // Print character set ranges
+            for (0..256) |c| {
+                if (cs.isSet(@intCast(c))) {
+                    if (c >= 32 and c < 127) {
+                        try writer.print("{c}", .{@as(u8, @intCast(c))});
+                    } else {
+                        try writer.print("\\x{x:0>2}", .{c});
+                    }
+                }
+            }
+            try writer.print("\n", .{});
+        },
+        .EndInput => {
+            try writer.print("ENDINPUT\n", .{});
+        },
+        .Accept => {
+            try writer.print("ACCEPT\n", .{});
+        },
+    }
 }

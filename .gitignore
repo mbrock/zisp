@@ -17,6 +17,14 @@ debug.log
 liveness.log
 *~
 
+# Test files
+test_*.zig
+simple*.zig
+
+# PEG bytecode dumps
+tmp/
+*.peg
+
 # VS Code
 .vscode/
 

@@ -30,6 +30,14 @@ pub const ZigMiniGrammar = struct {
         return x ++ C.ret;
     }
 
+    // Whitespace and comment handling
+    const not_nl_ascii = C.charclass(.{ ascii[' ' .. '~' + 1], '\t', '\r' });
+    const line_comment = C.text("//") ++ star(not_nl_ascii);
+
+    pub const Skip: C.Annotated(10) = C.silent(rule(
+        star(alt(.{ C.charclass(" \t\n\r"), line_comment }))
+    ));
+
     pub const Statement: C.Annotated(29) = C.node(rule(
         alt(.{
             one(&IfStatement),
@@ -45,7 +53,7 @@ pub const ZigMiniGrammar = struct {
         }),
     ));
 
-    pub const Block: C.Annotated(24) = C.node(rule(
+    pub const Block: C.Annotated(8) = C.node(rule(
         @"{" ++ star(one(&Statement)) ++ @"}",
     ));
 
@@ -62,14 +70,14 @@ pub const ZigMiniGrammar = struct {
         }),
     ));
 
-    pub const TypeExpr: C.Annotated(19) =
+    pub const TypeExpr: C.Annotated(11) =
         C.node(rule(one(&TypeCore) ++ opt(@"!" ++ one(&TypeExpr))));
 
-    pub const Identifier = C.node(rule(C.shun(reserved_exact) ++ alpha ++ star(alnum_us) ++ skip));
+    pub const Identifier = C.node(rule(C.shun(reserved_exact) ++ alpha ++ star(alnum_us) ++ one(&Skip)));
 
     pub const BuiltinIdentifier = C.node(rule(C.char('@') ++ alpha ++ star(alnum_us)));
 
-    pub const Integer = C.node(rule(C.several(digit) ++ skip));
+    pub const Integer = C.node(rule(C.several(digit) ++ one(&Skip)));
 
     pub const IdentifierList = C.node(rule(
         one(&Identifier) ++
@@ -130,7 +138,7 @@ pub const ZigMiniGrammar = struct {
         @"{" ++ opt(one(&EnumFields)) ++ @"}",
     ));
 
-    pub const ContainerDeclaration: C.Annotated(15) = C.node(rule(
+    pub const ContainerDeclaration: C.Annotated(7) = C.node(rule(
         alt(.{
             one(&FnDecl),
             one(&VarDecl) ++ @";",
@@ -138,7 +146,7 @@ pub const ZigMiniGrammar = struct {
     ));
 
 
-    pub const StructBody: C.Annotated(22) = C.node(rule(
+    pub const StructBody: C.Annotated(6) = C.node(rule(
         @"{" ++ one(&ContainerMembers) ++ @"}"
     ));
 
@@ -165,14 +173,14 @@ pub const ZigMiniGrammar = struct {
         C.char('\'') ++
             alt(.{ chr_escape, chr_plain }) ++
             C.char('\'') ++
-            skip,
+            one(&Skip),
     ));
 
     pub const StringLiteral = C.node(rule(
         C.char('"') ++
             star(alt(.{ str_escape, str_plain })) ++
             C.char('"') ++
-            skip,
+            one(&Skip),
     ));
 
     pub const Primary: C.Annotated(50) = C.node(rule(
@@ -546,17 +554,18 @@ pub const ZigMiniGrammar = struct {
         @"comptime" ++ one(&Block),
     ));
 
-    pub const start = C.node(rule(
-        skip ++
+    pub const Root: C.Annotated(15) = C.node(rule(
+        one(&Skip) ++
             star(alt(.{
                 one(&FnDecl),
                 one(&TopVarDecl),
                 one(&TestDecl),
                 one(&ComptimeDecl),
             })) ++
-            C.eof ++
-            C.ok,
+            C.eof
     ));
+
+    pub const start = rule(one(&Root) ++ C.ok);
 
     const chr_escape =
         @"\\" ++ C.charclass("nr't\\\"");
@@ -575,8 +584,6 @@ pub const ZigMiniGrammar = struct {
         C.charclass(.{
             ascii['a' .. 'z' + 1], ascii['A' .. 'Z' + 1], ascii['0' .. '9' + 1], "_",
         });
-    const not_nl_ascii =
-        C.charclass(.{ ascii[' ' .. '~' + 1], '\t', '\r' });
     const str_escape =
         @"\\" ++ C.charclass("nr\"t\\");
     const str_plain =
@@ -586,14 +593,9 @@ pub const ZigMiniGrammar = struct {
             ascii[']' .. '~' + 1],
         });
 
-    const line_comment =
-        C.text("//") ++ star(not_nl_ascii);
 
-    const skip: [9]Op =
-        star(alt(.{ C.charclass(" \t\n\r"), line_comment }));
-
-    fn kw(name: []const u8) [14]Op {
-        return C.text(name) ++ ident_boundary ++ skip;
+    fn kw(name: []const u8) [6]Op {
+        return C.text(name) ++ ident_boundary ++ one(&Skip);
     }
 
     const @"fn" = kw("fn");
@@ -633,11 +635,11 @@ pub const ZigMiniGrammar = struct {
     const @"catch" = kw("catch");
     const @"error" = kw("error");
 
-    fn op(s: []const u8, neg: []const u8) [if (neg.len == 0) 10 else 14]Op {
+    fn op(s: []const u8, neg: []const u8) [if (neg.len == 0) 2 else 6]Op {
         if (neg.len == 0) {
-            return C.text(s) ++ skip;
+            return C.text(s) ++ one(&Skip);
         } else {
-            return C.text(s) ++ C.shun(C.charclass(neg)) ++ skip;
+            return C.text(s) ++ C.shun(C.charclass(neg)) ++ one(&Skip);
         }
     }
 
