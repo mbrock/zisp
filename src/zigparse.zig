@@ -49,7 +49,7 @@ pub const ZigMiniGrammar = struct {
         @"{" ++ star(one(&Statement)) ++ @"}",
     ));
 
-    pub const Expr: C.Annotated(19) = C.node(rule(
+    pub const Expr: C.Annotated(19) = C.silent(rule(
         one(&BoolAndExpr) ++
             star(@"or" ++ one(&BoolAndExpr)),
     ));
@@ -205,7 +205,7 @@ pub const ZigMiniGrammar = struct {
         }),
     ));
 
-    pub const SuffixExpr = C.node(rule(
+    pub const SuffixExpr = C.silent(rule(
         one(&Primary) ++ star(one(&OneSuffix)),
     ));
 
@@ -313,29 +313,29 @@ pub const ZigMiniGrammar = struct {
         @"switch" ++ one(&ParenExpr) ++ one(&SwitchBody),
     ));
 
-    pub const PrefixExpr = C.node(rule(
+    pub const PrefixExpr = C.silent(rule(
         star(alt(.{ @"!", @"-", @"~", @"-%", @"&", @"try" })) ++
             one(&SuffixExpr),
     ));
 
-    pub const MultiplyExpr = C.node(rule(
+    pub const MultiplyExpr = C.silent(rule(
         one(&PrefixExpr) ++
             star(alt(.{ @"*", @"/", @"%" }) ++ one(&PrefixExpr)),
     ));
 
-    pub const AddExpr = C.node(rule(
+    pub const AddExpr = C.silent(rule(
         one(&MultiplyExpr) ++ star(
             alt(.{ @"+", @"-" }) ++ one(&MultiplyExpr),
         ),
     ));
 
-    pub const BitShiftExpr = C.node(rule(
+    pub const BitShiftExpr = C.silent(rule(
         one(&AddExpr) ++ star(
             alt(.{ @"<<", @">>" }) ++ one(&AddExpr),
         ),
     ));
 
-    pub const BitwiseExpr = C.node(rule(
+    pub const BitwiseExpr = C.silent(rule(
         one(&BitShiftExpr) ++
             star(
                 alt(.{
@@ -349,7 +349,7 @@ pub const ZigMiniGrammar = struct {
             ),
     ));
 
-    pub const CompareExpr = C.node(rule(
+    pub const CompareExpr = C.silent(rule(
         one(&BitwiseExpr) ++
             opt(
                 alt(.{ @"==", @"!=", @"<=", @">=", @"<", @">" }) ++
@@ -357,7 +357,7 @@ pub const ZigMiniGrammar = struct {
             ),
     ));
 
-    pub const BoolAndExpr = C.node(rule(
+    pub const BoolAndExpr = C.silent(rule(
         one(&CompareExpr) ++
             star(@"and" ++ one(&CompareExpr)),
     ));

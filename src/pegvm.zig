@@ -138,6 +138,7 @@ pub fn VM(
             texthead: u32,
             nextcode: u32,
             node: u32,
+            node_count_on_entry: u32,
         };
 
         marklist: [R]Mark align(16) = undefined,
@@ -302,6 +303,7 @@ pub fn VM(
                                     .texthead = self.texthead,
                                     .nextcode = nextcode,
                                     .node = node_index,
+                                    .node_count_on_entry = @intCast(self.nodes.items.len),
                                 };
 
                                 self.codehead = rulecode;
@@ -327,12 +329,43 @@ pub fn VM(
                             self.markhead -= 1;
 
                             if (mark.node != std.math.maxInt(u32)) {
+                                // Normal node - connect it to parent
                                 self.nodes.items[mark.node].end = self.texthead;
                                 if (self.markhead > 0) {
                                     const parent = self.marklist[self.markhead].node;
                                     if (parent != std.math.maxInt(u32)) {
                                         self.nodes.items[mark.node].next_sibling = self.nodes.items[parent].first_child;
                                         self.nodes.items[parent].first_child = mark.node;
+                                    }
+                                }
+                            } else {
+                                // Silent node - pass children through to parent
+                                if (self.markhead > 0) {
+                                    const parent_mark = &self.marklist[self.markhead];
+                                    if (parent_mark.node != std.math.maxInt(u32)) {
+                                        // Find children created during this silent rule
+                                        var i = mark.node_count_on_entry;
+                                        while (i < self.nodes.items.len) : (i += 1) {
+                                            // Check if this node is a direct child (not already assigned to another parent)
+                                            var is_orphan = true;
+                                            var j = mark.node_count_on_entry;
+                                            while (j < i) : (j += 1) {
+                                                var child_iter = self.nodes.items[j].children(self.nodes.items);
+                                                while (child_iter.next()) |child| {
+                                                    if (child == i) {
+                                                        is_orphan = false;
+                                                        break;
+                                                    }
+                                                }
+                                                if (!is_orphan) break;
+                                            }
+
+                                            if (is_orphan) {
+                                                // Connect orphan node to grandparent
+                                                self.nodes.items[i].next_sibling = self.nodes.items[parent_mark.node].first_child;
+                                                self.nodes.items[parent_mark.node].first_child = @intCast(i);
+                                            }
+                                        }
                                     }
                                 }
                             }
