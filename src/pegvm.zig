@@ -153,12 +153,18 @@ pub fn VM(
         allocator: std.mem.Allocator,
         nodes: std.ArrayListUnmanaged(Node) = .{},
 
+        // Error tracking
+        furthest_pos: u32 = 0,
+        furthest_rule: ?P.RuleT = null,
+        expected_at_furthest: std.ArrayList(P.RuleT) = .{},
+
         pub fn init(allocator: std.mem.Allocator, src: [:0]const u8) Machine {
             return .{ .text = src, .allocator = allocator };
         }
 
         pub fn deinit(self: *Machine) void {
             self.nodes.deinit(self.allocator);
+            // expected_at_furthest uses static buffer, no dealloc needed
         }
 
         pub const Status = enum { Ok, Fail, Running };
@@ -381,7 +387,19 @@ pub fn VM(
                             }
                         },
 
-                        .Fail => void,
+                        .Fail => {
+                            // Track furthest position for error reporting
+                            if (self.texthead > self.furthest_pos) {
+                                self.furthest_pos = self.texthead;
+                                self.expected_at_furthest.clearRetainingCapacity();
+                                if (self.markhead > 0) {
+                                    self.furthest_rule = @enumFromInt(self.marklist[self.markhead].rulekind);
+                                    self.expected_at_furthest.appendBounded(@enumFromInt(self.marklist[self.markhead].rulekind)) catch {};
+                                }
+                            } else if (self.texthead == self.furthest_pos and self.markhead > 0) {
+                                self.expected_at_furthest.appendBounded(@enumFromInt(self.marklist[self.markhead].rulekind)) catch {};
+                            }
+                        },
                         .Accept => return .Ok,
                     };
 
@@ -412,6 +430,13 @@ pub fn VM(
                         if (yield) return .Running else continue :vm self.codehead;
                     }
 
+                    // Final failure - no more backtrack points
+                    if (self.texthead > self.furthest_pos) {
+                        self.furthest_pos = self.texthead;
+                        if (self.markhead > 0) {
+                            self.furthest_rule = @enumFromInt(self.marklist[self.markhead].rulekind);
+                        }
+                    }
                     return .Fail;
                 },
                 else => unreachable,
@@ -420,13 +445,63 @@ pub fn VM(
             unreachable;
         }
 
+        pub fn getErrorInfo(self: *Machine) struct { line: u32, column: u32, pos: u32, context: []const u8 } {
+            var line: u32 = 1;
+            var column: u32 = 1;
+            var line_start: u32 = 0;
+
+            // Count lines and columns up to error position
+            for (self.text[0..@min(self.furthest_pos, self.text.len)], 0..) |c, i| {
+                if (c == '\n') {
+                    line += 1;
+                    column = 1;
+                    line_start = @intCast(i + 1);
+                } else {
+                    column += 1;
+                }
+            }
+
+            // Get the line containing the error
+            var line_end = self.furthest_pos;
+            while (line_end < self.text.len and self.text[line_end] != '\n') : (line_end += 1) {}
+
+            return .{
+                .line = line,
+                .column = column,
+                .pos = self.furthest_pos,
+                .context = self.text[line_start..line_end],
+            };
+        }
+
+        pub fn formatError(self: *Machine) void {
+            const info = self.getErrorInfo();
+            std.debug.print("Parse error at line {d}, column {d}:\n", .{ info.line, info.column });
+            std.debug.print("  {s}\n", .{info.context});
+            std.debug.print("  ", .{});
+            for (0..info.column - 1) |_| std.debug.print(" ", .{});
+            std.debug.print("^\n", .{});
+
+            if (self.furthest_rule) |_| {
+                std.debug.print("Expected: ", .{});
+                for (self.expected_at_furthest.items, 0..) |expected, i| {
+                    if (i > 0) std.debug.print(" or ", .{});
+                    std.debug.print("{s}", .{@tagName(expected)});
+                }
+                std.debug.print("\n", .{});
+            }
+        }
+
         pub fn parse(self: *Machine) !Node {
             while (true) {
                 const st = try self.tick(.auto_continue, null);
                 switch (st) {
                     .Running => continue,
                     .Ok => return self.nodes.items[0],
-                    .Fail => return error.ParseFailed,
+                    .Fail => {
+                        // Print error details before returning
+                        self.formatError();
+                        return error.ParseFailed;
+                    },
                 }
             }
         }
