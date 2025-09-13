@@ -88,7 +88,7 @@ pub fn main() !void {
 }
 
 fn printNode(vm: anytype, idx: u32, depth: usize) void {
-    const node = vm.nodes.items[idx];
+    const node = vm.nodelist.items[idx];
     for (0..depth) |_| std.debug.print("  ", .{});
     std.debug.print("{s}", .{@tagName(node.tag)});
     switch (node.tag) {
@@ -96,7 +96,7 @@ fn printNode(vm: anytype, idx: u32, depth: usize) void {
         else => {},
     }
     std.debug.print("\n", .{});
-    var it = node.children(vm.nodes.items);
+    var it = node.children(vm.nodelist.items);
     while (it.next()) |child_idx| printNode(vm, child_idx, depth + 1);
 }
 
@@ -163,7 +163,7 @@ fn dumpPegCodeToFiles(allocator: std.mem.Allocator, outdir: []const u8) !void {
             // Dump instructions for this rule
             var ip = rule_ip;
             while (ip < end_ip) : (ip += 1) {
-                try dumpInstruction(&file_writer.interface, @intCast(ip), P.code[ip]);
+                try P.dumpInstruction(&file_writer.interface, @intCast(ip), P.code[ip]);
             }
 
             try file_writer.interface.flush();
@@ -188,124 +188,16 @@ fn dumpPegCode(writer: *std.Io.Writer) !void {
     try writer.print("Total bytecode size: {} instructions\n", .{P.code.len});
     try writer.print("Entry point: {}\n\n", .{P.start_ip});
 
-    // Create a map of IP to rule name for better formatting
-    const ip_to_rule = comptime blk: {
-        var arr: [P.code.len]?[]const u8 = [_]?[]const u8{null} ** P.code.len;
-        const rules = std.enums.values(P.RuleT);
-        for (rules) |rule| {
-            const rule_ip = P.rule_ip[@intFromEnum(rule)];
-            arr[rule_ip] = @tagName(rule);
-        }
-        break :blk arr;
-    };
-
     // Dump bytecode with rule sections
     var ip: u32 = 0;
     while (ip < P.code.len) : (ip += 1) {
         // Check if this IP starts a rule
-        if (ip_to_rule[ip]) |rule_name| {
+        if (P.ip_to_rule[ip]) |rule_name| {
             try writer.print("\n&{s}:\n", .{rule_name});
         }
 
-        try dumpInstruction(writer, ip, P.code[ip]);
+        try P.dumpInstruction(writer, ip, P.code[ip]);
     }
 
     try writer.print("\n=== End of bytecode ===\n", .{});
-}
-
-fn bump(value: u32, delta: i32) u32 {
-    if (delta >= 0) {
-        return value + @abs(delta);
-    } else {
-        return value - @abs(delta);
-    }
-}
-
-fn dumpInstruction(writer: *std.Io.Writer, ip: u32, op: anytype) !void {
-    // Print instruction address
-    try writer.print("  0x{x}    ", .{ip});
-
-    switch (op) {
-        .ChoiceRel => |offset| {
-            const target = bump(ip, offset);
-            try writer.print("RESCUE  0x{x:0>4}  Δ{d}\n", .{ target, offset });
-        },
-        .CommitRel => |offset| {
-            const target = bump(ip, offset);
-            try writer.print("COMMIT  0x{x:0>4}  Δ{d}\n", .{ target, offset });
-        },
-        .CommitRewindRel => |offset| {
-            const target = bump(ip, offset);
-            try writer.print("REWIND  0x{x:0>4}  Δ{d}\n", .{ target, offset });
-        },
-        .PartialCommit => |offset| {
-            const target = bump(ip, offset);
-            try writer.print("UPDATE  0x{x:0>4}  Δ{d}\n", .{ target, offset });
-        },
-        .Call => |rule| {
-            const Parser = zisp.parse.VM(zisp.zigmini.ZigMiniGrammar);
-            const P = Parser.P;
-            const rule_ip = P.rule_ip[@intFromEnum(rule)];
-            try writer.print("INVOKE  0x{x:0>4}  &{t}\n", .{ rule_ip, rule });
-        },
-        .Ret => {
-            try writer.print("RETURN\n", .{});
-        },
-        .Fail => {
-            try writer.print("REJECT\n", .{});
-        },
-        .String => |s| {
-            try writer.print("DEMAND  \"{s}\"\n", .{s});
-        },
-        .CharSet => |cs| {
-            try writer.print("DEMAND  [", .{});
-            // Print character set ranges
-
-            var start_c: u8 = 0;
-            var last_c: u8 = 255;
-            var first = true;
-            for (0..256) |c| {
-                if (last_c < 255 and c == last_c + 1) {
-                    if (cs.isSet(c)) {
-                        last_c = @intCast(c);
-                        continue;
-                    } else {
-                        if (start_c != last_c) {
-                            try writer.print("–", .{});
-                            if (last_c >= 32 and last_c < 127) {
-                                try writer.print("{c}", .{@as(u8, @intCast(last_c))});
-                            } else {
-                                try writer.print("\\x{x}", .{last_c});
-                            }
-                        }
-
-                        last_c = 255;
-                        continue;
-                    }
-                }
-
-                if (cs.isSet(c)) {
-                    start_c = @intCast(c);
-                    last_c = @intCast(c);
-                    if (!first) {
-                        try writer.writeAll(" ");
-                    }
-                    first = false;
-
-                    if (c >= 32 and c < 127) {
-                        try writer.print("{c}", .{@as(u8, @intCast(c))});
-                    } else {
-                        try writer.print("\\x{x}", .{c});
-                    }
-                }
-            }
-            try writer.print("]\n", .{});
-        },
-        .EndInput => {
-            try writer.print("NOMORE\n", .{});
-        },
-        .Accept => {
-            try writer.print("ACCEPT\n", .{});
-        },
-    }
 }

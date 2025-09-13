@@ -72,7 +72,7 @@ pub fn DebugPrinter(comptime Parser: type) type {
             // Show operation at old code position
             if (old_code < Parser.P.code.len) {
                 const op = Parser.P.code[old_code];
-                try self.printOp(op);
+                try Parser.P.dumpInstruction(self.writer, old_code, op);
             }
 
             // Show text progress
@@ -90,22 +90,6 @@ pub fn DebugPrinter(comptime Parser: type) type {
             }
 
             try self.writer.print("\n", .{});
-        }
-
-        fn printOp(self: *Self, op: Parser.P.OpT) !void {
-            switch (op) {
-                .ChoiceRel => |d| try self.writer.print("Choice(+{d})", .{d}),
-                .CommitRel => |d| try self.writer.print("Commit(+{d})", .{d}),
-                .CommitRewindRel => |d| try self.writer.print("CommitRewind(+{d})", .{d}),
-                .PartialCommit => |d| try self.writer.print("PartialCommit(+{d})", .{d}),
-                .Fail => try self.writer.print("Fail", .{}),
-                .Call => |r| try self.writer.print("Call({s})", .{@tagName(r)}),
-                .Ret => try self.writer.print("Return", .{}),
-                .EndInput => try self.writer.print("EndInput", .{}),
-                .Accept => try self.writer.print("Accept", .{}),
-                .String => |s| try self.writer.print("String(\"{s}\")", .{s}),
-                .CharSet => |_| try self.writer.print("CharSet", .{}),
-            }
         }
     };
 }

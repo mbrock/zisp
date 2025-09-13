@@ -76,6 +76,110 @@ pub fn ProgramFor(comptime G: type) type {
         pub const code = RuleCode().ops;
         pub const emit_node = RuleEmit();
         pub const start_ip = rule_ip[@intCast(@intFromEnum(Rule.start))];
+
+        // Create a map of IP to rule name for better formatting
+        pub const ip_to_rule = blk: {
+            var arr: [code.len]?[]const u8 = [_]?[]const u8{null} ** code.len;
+            const rules = std.enums.values(RuleT);
+            for (rules) |rule| {
+                arr[rule_ip[@intFromEnum(rule)]] = @tagName(rule);
+            }
+            break :blk arr;
+        };
+
+        fn bump(value: u32, delta: i32) u32 {
+            if (delta >= 0) {
+                return value + @abs(delta);
+            } else {
+                return value - @abs(delta);
+            }
+        }
+
+        pub fn dumpInstruction(writer: *std.Io.Writer, ip: u32, op: Op) !void {
+            // Print instruction address
+            try writer.print("  0x{x}    ", .{ip});
+
+            switch (op) {
+                .rescue => |offset| {
+                    const target = bump(ip, offset);
+                    try writer.print("RESCUE  0x{x:0>4}  Δ{d}\n", .{ target, offset });
+                },
+                .commit => |offset| {
+                    const target = bump(ip, offset);
+                    try writer.print("COMMIT  0x{x:0>4}  Δ{d}\n", .{ target, offset });
+                },
+                .rewind => |offset| {
+                    const target = bump(ip, offset);
+                    try writer.print("REWIND  0x{x:0>4}  Δ{d}\n", .{ target, offset });
+                },
+                .update => |offset| {
+                    const target = bump(ip, offset);
+                    try writer.print("UPDATE  0x{x:0>4}  Δ{d}\n", .{ target, offset });
+                },
+                .invoke => |rule| {
+                    try writer.print("INVOKE  0x{x:0>4}  &{t}\n", .{ @This().rule_ip[@intFromEnum(rule)], rule });
+                },
+                .@"return" => {
+                    try writer.print("RETURN\n", .{});
+                },
+                .reject => {
+                    try writer.print("REJECT\n", .{});
+                },
+                .demand_string => |s| {
+                    try writer.print("DEMAND  \"{s}\"\n", .{s});
+                },
+                .demand_charset => |cs| {
+                    try writer.print("DEMAND  [", .{});
+                    // Print character set ranges
+
+                    var start_c: u8 = 0;
+                    var last_c: u8 = 255;
+                    var first = true;
+                    for (0..256) |c| {
+                        if (last_c < 255 and c == last_c + 1) {
+                            if (cs.isSet(c)) {
+                                last_c = @intCast(c);
+                                continue;
+                            } else {
+                                if (start_c != last_c) {
+                                    try writer.print("–", .{});
+                                    if (last_c >= 32 and last_c < 127) {
+                                        try writer.print("{c}", .{@as(u8, @intCast(last_c))});
+                                    } else {
+                                        try writer.print("\\x{x}", .{last_c});
+                                    }
+                                }
+
+                                last_c = 255;
+                                continue;
+                            }
+                        }
+
+                        if (cs.isSet(c)) {
+                            start_c = @intCast(c);
+                            last_c = @intCast(c);
+                            if (!first) {
+                                try writer.writeAll(" ");
+                            }
+                            first = false;
+
+                            if (c >= 32 and c < 127) {
+                                try writer.print("{c}", .{@as(u8, @intCast(c))});
+                            } else {
+                                try writer.print("\\x{x}", .{c});
+                            }
+                        }
+                    }
+                    try writer.print("]\n", .{});
+                },
+                .nomore => {
+                    try writer.print("NOMORE\n", .{});
+                },
+                .accept => {
+                    try writer.print("ACCEPT\n", .{});
+                },
+            }
+        }
     };
 }
 
@@ -238,7 +342,7 @@ pub fn VM(
                     const nextchar = self.text[self.texthead];
 
                     _ = switch (code[codebase]) {
-                        inline .CharSet => |charmask| {
+                        inline .demand_charset => |charmask| {
                             if (charmask.isSet(nextchar)) {
                                 self.texthead += 1;
                                 if (yield) return .Running else {
@@ -247,7 +351,7 @@ pub fn VM(
                             }
                         },
 
-                        inline .String => |s| {
+                        inline .demand_string => |s| {
                             if (self.texthead + s.len <= self.text.len) {
                                 @branchHint(.likely);
 
@@ -262,7 +366,7 @@ pub fn VM(
                             }
                         },
 
-                        inline .ChoiceRel => |d| {
+                        inline .rescue => |d| {
                             self.savelist[self.savehead] = .{
                                 .markhead = self.markhead,
                                 .nextcode = @as(usize, @intCast(@as(isize, @intCast(codebase)) + 1 + d)),
@@ -276,7 +380,7 @@ pub fn VM(
                             }
                         },
 
-                        inline .CommitRel => |d| {
+                        inline .commit => |d| {
                             self.savehead -= 1;
                             const skipcode = (@as(usize, @intCast(@as(isize, codebase) + 1 + d)));
                             self.codehead = skipcode;
@@ -285,7 +389,7 @@ pub fn VM(
                             }
                         },
 
-                        inline .CommitRewindRel => |d| {
+                        inline .rewind => |d| {
                             // Pop one backtrack frame, jump relative, and rewind
                             // the text head to the saved position. Does NOT
                             // restore markhead (unlike failure), matching CommitRel
@@ -301,7 +405,7 @@ pub fn VM(
                             }
                         },
 
-                        inline .PartialCommit => |d| {
+                        inline .update => |d| {
                             // Update the current backtrack frame's position without removing it.
                             // Used for repetitions to reuse the same frame.
                             if (self.savehead > 0) {
@@ -315,7 +419,7 @@ pub fn VM(
                             }
                         },
 
-                        inline .Call => |r| {
+                        inline .invoke => |r| {
                             const rulekind: u32 = @intCast(@intFromEnum(r));
                             const rulecode = P.rule_ip[rulekind];
                             const memo = if (backpack != null) backpack.?.get(rulekind, self.texthead) else null;
@@ -356,7 +460,7 @@ pub fn VM(
                             }
                         },
 
-                        .Ret => {
+                        .@"return" => {
                             if (backpack) |map| {
                                 const mark = self.marklist[self.markhead];
                                 const head = mark.texthead;
@@ -417,20 +521,20 @@ pub fn VM(
                             }
                         },
 
-                        .EndInput => if (self.texthead >= self.text.len) {
+                        .nomore => if (self.texthead >= self.text.len) {
                             if (yield) return .Running else {
                                 continue :vm nextcode;
                             }
                         },
 
-                        .Fail => {
+                        .reject => {
                             // Track expected rules at furthest position
                             if (self.texthead == self.furthest_pos and self.markhead > 0) {
                                 self.furthest_rule = @enumFromInt(self.marklist[self.markhead].rulekind);
                                 self.expected_at_furthest.appendBounded(@enumFromInt(self.marklist[self.markhead].rulekind)) catch {};
                             }
                         },
-                        .Accept => return .Ok,
+                        .accept => return .Ok,
                     };
 
                     if (self.savehead != 0) {
@@ -645,21 +749,21 @@ pub fn Combinators(comptime G: type) type {
         pub const Rule = std.meta.DeclEnum(G);
 
         pub const Op = union(enum) {
-            ChoiceRel: i16,
-            CommitRel: i16,
+            rescue: i16,
+            commit: i16,
             // Pop backtrack frame, jump relative, and rewind texthead
             // to the saved position from that frame.
-            CommitRewindRel: i16,
+            rewind: i16,
             // Update the current backtrack frame's position without removing it.
             // Used for repetitions to reuse the same frame.
-            PartialCommit: i16,
-            Fail: void,
-            Call: Rule,
-            Ret: void,
-            CharSet: CharBitset,
-            String: []const u8,
-            EndInput: void,
-            Accept: void,
+            update: i16,
+            reject: void,
+            invoke: Rule,
+            @"return": void,
+            demand_charset: CharBitset,
+            demand_string: []const u8,
+            nomore: void,
+            accept: void,
         };
 
         pub fn Annotated(comptime n: usize) type {
@@ -679,9 +783,9 @@ pub fn Combinators(comptime G: type) type {
 
         pub const space = star(charclass(" \t\n\r"));
 
-        pub const eof = op1(.{ .EndInput = {} });
-        pub const ok = op1(.{ .Accept = {} });
-        pub const ret = op1(.{ .Ret = {} });
+        pub const eof = op1(.{ .nomore = {} });
+        pub const ok = op1(.{ .accept = {} });
+        pub const ret = op1(.{ .@"return" = {} });
 
         pub inline fn OpN(comptime n: usize) type {
             return [n]Op;
@@ -698,17 +802,17 @@ pub fn Combinators(comptime G: type) type {
         }
 
         pub inline fn text(comptime s: []const u8) Op1 {
-            return op1(.{ .String = s });
+            return op1(.{ .demand_string = s });
         }
 
         pub inline fn callRule(comptime r: Rule) Op1 {
-            return op1(.{ .Call = r });
+            return op1(.{ .invoke = r });
         }
 
         pub inline fn call(comptime p: anytype) Op1 {
             inline for (@typeInfo(G).@"struct".decls) |decl| {
                 if (@as(*const anyopaque, @ptrCast(p)) == @as(*const anyopaque, @ptrCast(&@field(G, decl.name)))) {
-                    return op1(.{ .Call = @field(Rule, decl.name) });
+                    return op1(.{ .invoke = @field(Rule, decl.name) });
                 }
             }
             @compileError("call argument must be a field of the grammar struct");
@@ -741,8 +845,8 @@ pub fn Combinators(comptime G: type) type {
         pub inline fn star(comptime X: anytype) OpN(X.len + 2) {
             const to_end = X.len + 1; // from ChoiceRel next to end
             const back = -@as(i16, @intCast(X.len + 1)); // from PartialCommit back to X
-            return op1(.{ .ChoiceRel = @intCast(to_end) }) ++ X ++
-                op1(.{ .PartialCommit = back });
+            return op1(.{ .rescue = @intCast(to_end) }) ++ X ++
+                op1(.{ .update = back });
         }
 
         pub inline fn anyOf(comptime parts: anytype) OpN(sizeSum(parts) + (parts.len - 1) * 2) {
@@ -772,13 +876,13 @@ pub fn Combinators(comptime G: type) type {
                         rest_len += lens[k]; // body of alt k
                         if (k > i) rest_len += 1; // commits at start of later alts
                     }
-                    out[o] = .{ .CommitRel = @intCast(rest_len) };
+                    out[o] = .{ .commit = @intCast(rest_len) };
                     o += 1;
                 }
 
                 // Choice into current alternative if not the last
                 if (i != parts.len - 1) {
-                    out[o] = .{ .ChoiceRel = @intCast(lens[i] + 1) };
+                    out[o] = .{ .rescue = @intCast(lens[i] + 1) };
                     o += 1;
                 }
 
@@ -807,10 +911,10 @@ pub fn Combinators(comptime G: type) type {
             const to_faillbl = n + 1; // ChoiceRel -> FAIL_LABEL (at index n+2)
             const j_to_end = 1; // CommitRewindRel from (n+1) -> END (at n+3)
 
-            return op1(.{ .ChoiceRel = @intCast(to_faillbl + 0) }) ++ // F
+            return op1(.{ .rescue = @intCast(to_faillbl + 0) }) ++ // F
                 inner ++
-                op1(.{ .CommitRewindRel = @intCast(j_to_end) }) ++ // -> END
-                op1(.{ .Fail = {} }); // FAIL_LABEL
+                op1(.{ .rewind = @intCast(j_to_end) }) ++ // -> END
+                op1(.{ .reject = {} }); // FAIL_LABEL
         }
 
         /// Negative lookahead: succeeds iff `inner` would fail, consumes 0 chars.
@@ -825,10 +929,10 @@ pub fn Combinators(comptime G: type) type {
             const to_succ = n + 2; // ChoiceRel -> SUCC/END (at index n+3)
             const j_to_fail = 0; // CommitRewindRel from (n+1) -> FAIL_LABEL (at n+2)
 
-            return op1(.{ .ChoiceRel = @intCast(to_succ) }) ++ // F
+            return op1(.{ .rescue = @intCast(to_succ) }) ++ // F
                 inner ++
-                op1(.{ .CommitRewindRel = @intCast(j_to_fail) }) ++ // -> FAIL_LABEL
-                op1(.{ .Fail = {} }); // FAIL_LABEL; fallthrough after this is SUCC/END
+                op1(.{ .rewind = @intCast(j_to_fail) }) ++ // -> FAIL_LABEL
+                op1(.{ .reject = {} }); // FAIL_LABEL; fallthrough after this is SUCC/END
         }
 
         pub inline fn several(comptime X: anytype) OpN(X.len + (X.len + 2)) {
@@ -845,7 +949,7 @@ pub fn Combinators(comptime G: type) type {
                         set.set(c),
                 };
 
-            return op1(.{ .CharSet = set });
+            return op1(.{ .demand_charset = set });
         }
     };
 }
