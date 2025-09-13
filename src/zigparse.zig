@@ -49,9 +49,9 @@ pub const ZigMiniGrammar = struct {
         @"{" ++ star(one(&Statement)) ++ @"}",
     ));
 
-    pub const Expr: C.Annotated(19) = C.silent(rule(
+    pub const Expr: C.Annotated(6) = C.silent(rule(
         one(&BoolAndExpr) ++
-            star(@"or" ++ one(&BoolAndExpr)),
+            star(one(&BoolOrOp) ++ one(&BoolAndExpr)),
     ));
 
     pub const TypeAtom: C.Annotated(8) = C.node(rule(
@@ -313,53 +313,68 @@ pub const ZigMiniGrammar = struct {
         @"switch" ++ one(&ParenExpr) ++ one(&SwitchBody),
     ));
 
+    pub const PrefixOp = C.node(rule(alt(.{ @"!", @"-", @"~", @"-%", @"&", @"try" })));
+
     pub const PrefixExpr = C.silent(rule(
-        star(alt(.{ @"!", @"-", @"~", @"-%", @"&", @"try" })) ++
+        star(one(&PrefixOp)) ++
             one(&SuffixExpr),
     ));
 
+    pub const MultiplyOp = C.node(rule(alt(.{ @"*", @"/", @"%" })));
+
     pub const MultiplyExpr = C.silent(rule(
         one(&PrefixExpr) ++
-            star(alt(.{ @"*", @"/", @"%" }) ++ one(&PrefixExpr)),
+            star(one(&MultiplyOp) ++ one(&PrefixExpr)),
     ));
+
+    pub const AddOp = C.node(rule(alt(.{ @"+", @"-" })));
 
     pub const AddExpr = C.silent(rule(
         one(&MultiplyExpr) ++ star(
-            alt(.{ @"+", @"-" }) ++ one(&MultiplyExpr),
+            one(&AddOp) ++ one(&MultiplyExpr),
         ),
     ));
 
+    pub const BitShiftOp = C.node(rule(alt(.{ @"<<", @">>" })));
+
     pub const BitShiftExpr = C.silent(rule(
         one(&AddExpr) ++ star(
-            alt(.{ @"<<", @">>" }) ++ one(&AddExpr),
+            one(&BitShiftOp) ++ one(&AddExpr),
         ),
     ));
+
+    pub const BitwiseOp = C.node(rule(alt(.{
+        @"&",
+        @"^",
+        @"|",
+        @"orelse",
+        @"catch" ++ opt(one(&Payload)),
+    })));
 
     pub const BitwiseExpr = C.silent(rule(
         one(&BitShiftExpr) ++
             star(
-                alt(.{
-                    @"&",
-                    @"^",
-                    @"|",
-                    @"orelse",
-                    @"catch" ++ opt(one(&Payload)),
-                }) ++
+                one(&BitwiseOp) ++
                     one(&BitShiftExpr),
             ),
     ));
 
+    pub const CompareOp = C.node(rule(alt(.{ @"==", @"!=", @"<=", @">=", @"<", @">" })));
+
     pub const CompareExpr = C.silent(rule(
         one(&BitwiseExpr) ++
             opt(
-                alt(.{ @"==", @"!=", @"<=", @">=", @"<", @">" }) ++
+                one(&CompareOp) ++
                     one(&BitwiseExpr),
             ),
     ));
 
+    pub const BoolAndOp = C.node(rule(@"and"));
+    pub const BoolOrOp = C.node(rule(@"or"));
+
     pub const BoolAndExpr = C.silent(rule(
         one(&CompareExpr) ++
-            star(@"and" ++ one(&CompareExpr)),
+            star(one(&BoolAndOp) ++ one(&CompareExpr)),
     ));
 
     pub const CallExpr = C.node(rule(
