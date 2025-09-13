@@ -209,6 +209,12 @@ pub fn VM(
                 inline 0...P.code.len - 1 => |codebase| {
                     const nextcode = codebase + 1;
 
+                    // Update furthest position if we've advanced
+                    if (self.texthead > self.furthest_pos) {
+                        self.furthest_pos = self.texthead;
+                        self.expected_at_furthest.clearRetainingCapacity();
+                    }
+
                     // We usually advance; some branches overwrite this.
                     self.codehead = nextcode;
 
@@ -388,15 +394,9 @@ pub fn VM(
                         },
 
                         .Fail => {
-                            // Track furthest position for error reporting
-                            if (self.texthead > self.furthest_pos) {
-                                self.furthest_pos = self.texthead;
-                                self.expected_at_furthest.clearRetainingCapacity();
-                                if (self.markhead > 0) {
-                                    self.furthest_rule = @enumFromInt(self.marklist[self.markhead].rulekind);
-                                    self.expected_at_furthest.appendBounded(@enumFromInt(self.marklist[self.markhead].rulekind)) catch {};
-                                }
-                            } else if (self.texthead == self.furthest_pos and self.markhead > 0) {
+                            // Track expected rules at furthest position
+                            if (self.texthead == self.furthest_pos and self.markhead > 0) {
+                                self.furthest_rule = @enumFromInt(self.marklist[self.markhead].rulekind);
                                 self.expected_at_furthest.appendBounded(@enumFromInt(self.marklist[self.markhead].rulekind)) catch {};
                             }
                         },
@@ -431,11 +431,9 @@ pub fn VM(
                     }
 
                     // Final failure - no more backtrack points
-                    if (self.texthead > self.furthest_pos) {
-                        self.furthest_pos = self.texthead;
-                        if (self.markhead > 0) {
-                            self.furthest_rule = @enumFromInt(self.marklist[self.markhead].rulekind);
-                        }
+                    if (self.texthead == self.furthest_pos and self.markhead > 0) {
+                        self.furthest_rule = @enumFromInt(self.marklist[self.markhead].rulekind);
+                        self.expected_at_furthest.appendBounded(@enumFromInt(self.marklist[self.markhead].rulekind)) catch {};
                     }
                     return .Fail;
                 },
