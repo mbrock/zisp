@@ -453,8 +453,18 @@ pub fn Combinators(comptime G: type) type {
             return op1(.{ .String = s });
         }
 
-        pub inline fn call(comptime r: Rule) Op1 {
+        pub inline fn callRule(comptime r: Rule) Op1 {
             return op1(.{ .Call = r });
+        }
+
+        pub inline fn call(comptime p: anytype) Op1 {
+            inline for (@typeInfo(G).@"struct".decls) |decl| {
+                if ((p).ptr == &(@field(G, decl.name))) {
+                    return op1(.{ .Call = @field(Rule, decl.name) });
+                }
+            }
+            @compileError("call argument must be a field of the grammar struct");
+            //            return op1(.{ .CallPtr = p });
         }
 
         fn sizeSum(comptime parts: anytype) comptime_int {
@@ -562,7 +572,7 @@ pub fn Combinators(comptime G: type) type {
         ///   commit_rewind -> FAIL_LABEL  (pop F, rewind text)
         ///   FAIL_LABEL: fail             (propagate failure)
         ///   SUCC/END: fallthrough        (success)
-        pub inline fn notLookahead(comptime inner: anytype) OpN(inner.len + 3) {
+        pub inline fn shun(comptime inner: anytype) OpN(inner.len + 3) {
             const n = inner.len;
             const to_succ = n + 2; // ChoiceRel -> SUCC/END (at index n+3)
             const j_to_fail = 0; // CommitRewindRel from (n+1) -> FAIL_LABEL (at n+2)
@@ -646,10 +656,10 @@ pub const JSONGrammar = struct {
 
     // Value <- Object / Array / String / Number / 'true' / 'false' / 'null'
     pub const Value = C.anyOf(.{
-        C.call(.Object),
-        C.call(.Array),
-        C.call(.String),
-        C.call(.Number),
+        C.callRule(.Object),
+        C.callRule(.Array),
+        C.callRule(.String),
+        C.callRule(.Number),
         C.text("true"),
         C.text("false"),
         C.text("null"),
@@ -657,18 +667,18 @@ pub const JSONGrammar = struct {
 
     // Member <- String WS ':' WS Value
     pub const Member = C.seq(.{
-        C.call(.String),
+        C.callRule(.String),
         C.space,
         C.char(':'),
         C.space,
-        C.call(.Value),
+        C.callRule(.Value),
         C.ret,
     });
 
     // Members <- Member (WS ',' WS Member)*
     pub const Members = C.seq(.{
-        C.call(.Member),
-        C.star(C.seq(.{ C.space, C.char(','), C.space, C.call(.Member) })),
+        C.callRule(.Member),
+        C.star(C.seq(.{ C.space, C.char(','), C.space, C.callRule(.Member) })),
         C.ret,
     });
 
@@ -676,7 +686,7 @@ pub const JSONGrammar = struct {
     pub const Object = C.seq(.{
         C.char('{'),
         C.space,
-        C.opt(C.call(.Members)),
+        C.opt(C.callRule(.Members)),
         C.space,
         C.char('}'),
         C.ret,
@@ -684,8 +694,8 @@ pub const JSONGrammar = struct {
 
     // Elements <- Value (WS ',' WS Value)*
     pub const Elements = C.seq(.{
-        C.call(.Value),
-        C.star(C.seq(.{ C.space, C.char(','), C.space, C.call(.Value) })),
+        C.callRule(.Value),
+        C.star(C.seq(.{ C.space, C.char(','), C.space, C.callRule(.Value) })),
         C.ret,
     });
 
@@ -693,7 +703,7 @@ pub const JSONGrammar = struct {
     pub const Array = C.seq(.{
         C.char('['),
         C.space,
-        C.opt(C.call(.Elements)),
+        C.opt(C.callRule(.Elements)),
         C.space,
         C.char(']'),
         C.ret,
@@ -702,7 +712,7 @@ pub const JSONGrammar = struct {
     // start <- WS Value WS EOF
     pub const start = C.seq(.{
         C.space,
-        C.call(.Value),
+        C.callRule(.Value),
         C.space,
         C.eof,
         C.ok,
@@ -781,7 +791,7 @@ pub const BacktrackGrammar = struct {
     pub const APlusB = C.seq(.{ C.several(C.char('a')), C.char('b'), C.ret });
 
     pub const start = C.seq(.{
-        C.anyOf(.{ C.call(.Long), C.call(.APlusB) }),
+        C.anyOf(.{ C.callRule(.Long), C.callRule(.APlusB) }),
         C.eof,
         C.ok,
     });
@@ -866,13 +876,13 @@ pub const BlowupGrammar = struct {
 
     /// Shout ::= ('a' Shout) / 'a'
     pub const shout = C.anyOf(.{
-        C.seq(.{ C.char('a'), C.call(.shout) }),
+        C.seq(.{ C.char('a'), C.callRule(.shout) }),
         C.char('a'),
     }) ++ C.ret;
 
     /// start ::= A 'b' EOF
     pub const start = C.seq(.{
-        C.call(.shout),
+        C.callRule(.shout),
         C.char('b'),
         C.eof,
         C.ok,
@@ -895,11 +905,11 @@ const PackratGrammar = struct {
     const C = Combinators(@This());
 
     pub const start = C.anyOf(.{
-        C.call(.x) ++ C.eof, C.call(.x) ++ C.call(.x) ++ C.eof,
+        C.callRule(.x) ++ C.eof, C.callRule(.x) ++ C.callRule(.x) ++ C.eof,
     }) ++ C.ok;
 
     pub const x = C.anyOf(.{
-        C.char('(') ++ C.call(.x) ++ C.char(')'),
+        C.char('(') ++ C.callRule(.x) ++ C.char(')'),
         C.char('x'),
     }) ++ C.ret;
 };
@@ -975,7 +985,7 @@ pub const KeywordGrammar = struct {
 
     pub const start = C.seq(.{
         C.text("if"),
-        C.notLookahead(alnum),
+        C.shun(alnum),
         C.eof,
         C.ok,
     });

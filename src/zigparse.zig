@@ -12,18 +12,25 @@ const ascii = pegvm.ascii;
 pub const ZigMiniGrammar = struct {
     const C = Combinators(@This());
 
-    const alpha = C.charclass(.{ ascii['a' .. 'z' + 1], ascii['A' .. 'Z' + 1], "_" });
-    const digit = C.charclass(ascii['0' .. '9' + 1]);
-    const alnum_us = C.charclass(.{
-        ascii['a' .. 'z' + 1], ascii['A' .. 'Z' + 1], ascii['0' .. '9' + 1], "_",
-    });
+    const alpha =
+        C.charclass(.{ ascii['a' .. 'z' + 1], ascii['A' .. 'Z' + 1], "_" });
+    const digit =
+        C.charclass(ascii['0' .. '9' + 1]);
+    const alnum_us =
+        C.charclass(.{
+            ascii['a' .. 'z' + 1], ascii['A' .. 'Z' + 1], ascii['0' .. '9' + 1], "_",
+        });
+    const not_nl_ascii =
+        C.charclass(.{ ascii[' ' .. '~' + 1], '\t', '\r' });
 
-    const not_nl_ascii = C.charclass(.{ ascii[' ' .. '~' + 1], '\t', '\r' });
-    const line_comment = C.text("//") ++ C.star(not_nl_ascii);
-    const WS = C.star(C.anyOf(.{ C.charclass(" \t\n\r"), line_comment }));
+    const line_comment =
+        C.text("//") ++ C.star(not_nl_ascii);
+
+    const skip: [9]C.Op =
+        C.star(C.anyOf(.{ C.charclass(" \t\n\r"), line_comment }));
 
     fn kw(name: []const u8) [14]C.Op {
-        return C.text(name) ++ ident_boundary ++ WS;
+        return C.text(name) ++ ident_boundary ++ skip;
     }
 
     const @"fn" = kw("fn");
@@ -65,9 +72,9 @@ pub const ZigMiniGrammar = struct {
 
     fn op(s: []const u8, neg: []const u8) [if (neg.len == 0) 10 else 14]C.Op {
         if (neg.len == 0) {
-            return C.text(s) ++ WS;
+            return C.text(s) ++ skip;
         } else {
-            return C.text(s) ++ C.notLookahead(C.charclass(neg)) ++ WS;
+            return C.text(s) ++ C.shun(C.charclass(neg)) ++ skip;
         }
     }
 
@@ -82,6 +89,7 @@ pub const ZigMiniGrammar = struct {
     const @";" = op(";", "");
     const @"=" = op("=", "");
     const @"*" = op("*", "*%=|");
+    const @"?" = op("?", "");
     const @"." = op(".", ".");
     const @".*" = op(".*", "");
     const @"..." = op("...", "");
@@ -108,7 +116,7 @@ pub const ZigMiniGrammar = struct {
     const @"-%" = op("-%", "=");
     const @"&" = op("&", "=");
 
-    const ident_boundary = C.notLookahead(alnum_us); // next is not [A-Za-z0-9_]
+    const ident_boundary = C.shun(alnum_us); // next is not [A-Za-z0-9_]
 
     fn ident(name: []const u8) [5]C.Op {
         return C.text(name) ++ ident_boundary;
@@ -152,451 +160,495 @@ pub const ZigMiniGrammar = struct {
         ident("inline"),
     });
 
-    pub const Identifier = C.seq(.{
-        C.notLookahead(reserved_exact),
-        alpha,
-        C.star(alnum_us),
-        WS,
-        C.ret,
-    });
+    fn rule(x: anytype) [x.len + 1]C.Op {
+        return x ++ C.ret;
+    }
 
-    pub const BuiltinIdentifier = C.seq(.{ C.char('@'), alpha, C.star(alnum_us), C.ret });
-    pub const Integer = C.seq(.{ C.several(digit), WS, C.ret });
+    pub const Identifier =
+        rule(C.shun(reserved_exact) ++ alpha ++ C.star(alnum_us) ++ skip);
 
-    pub const IdentifierList = C.seq(.{
-        C.call(.Identifier),
-        C.star(C.seq(.{ @",", C.call(.Identifier) })),
-        C.opt(@","),
-        C.ret,
-    });
+    pub const BuiltinIdentifier =
+        rule(C.char('@') ++ alpha ++ C.star(alnum_us));
 
-    pub const ErrorSetDecl = C.seq(.{ @"error", @"{", C.opt(C.call(.IdentifierList)), @"}", C.ret });
-    pub const TypeAtom = C.anyOf(.{ C.call(.Identifier), C.call(.ContainerExpr), C.call(.ErrorSetDecl) }) ++ C.ret;
+    pub const Integer =
+        rule(C.several(digit) ++ skip);
 
-    const SliceStart = C.seq(.{ @"[", @"]" });
-    const ArrayStart = C.seq(.{ @"[", C.call(.Expr), @"]" });
-    const BrackType = C.anyOf(.{ ArrayStart, SliceStart });
+    pub const IdentifierList = rule(
+        C.call(&Identifier) ++
+            C.star(@"," ++ C.call(&Identifier)) ++
+            C.opt(@","),
+    );
 
-    const TypePrefix = C.anyOf(.{ C.char('?'), star: {
-        const s = C.char('*');
-        break :star s;
-    }, BrackType });
+    pub const ErrorSetDecl =
+        rule(@"error" ++ @"{" ++ C.opt(C.call(&IdentifierList)) ++ @"}");
 
-    pub const TypeCore = C.seq(.{ C.star(TypePrefix), C.call(.TypeAtom), C.ret });
-    pub const ErrorUnionType = C.seq(.{
-        C.call(.TypeCore),
-        C.opt(C.seq(.{ @"!", C.call(.TypeExpr) })),
-        C.ret,
-    });
-    pub const TypeExpr = C.seq(.{ C.call(.ErrorUnionType), C.ret });
+    pub const TypeAtom: [8]C.Op = rule(
+        C.anyOf(.{
+            C.call(&Identifier),
+            C.call(&ContainerExpr),
+            C.call(&ErrorSetDecl),
+        }),
+    );
 
-    const str_escape = C.seq(.{ @"\\", C.charclass("nr\"t\\") });
-    const str_plain = C.charclass(.{ ascii[' ' .. '!' + 1], ascii['#' .. '[' + 1], ascii[']' .. '~' + 1] });
-    pub const StringLiteral = C.seq(.{ C.char('"'), C.star(C.anyOf(.{ str_escape, str_plain })), C.char('"'), WS, C.ret });
+    pub const ArrayStart: [22]C.Op =
+        rule(@"[" ++ C.call(&Expr) ++ @"]");
 
-    const chr_escape = C.seq(.{ @"\\", C.charclass("nr't\\\"") });
-    const chr_plain = C.charclass(.{ ascii[' ' .. '&' + 1], ascii['(' .. '[' + 1], ascii[']' .. '~' + 1] });
-    pub const CharLiteral = C.seq(.{ C.char('\''), C.anyOf(.{ chr_escape, chr_plain }), C.char('\''), WS, C.ret });
+    pub const TypePrefix = rule(
+        C.anyOf(.{
+            @"?",
+            @"*",
+            C.call(&ArrayStart),
+            @"[" ++ @"]",
+        }),
+    );
 
-    pub const LinkSection = C.seq(.{ @"linksection", @"(", C.call(.Expr), @")", C.ret });
-    pub const AddrSpace = C.seq(.{ @"addrspace", @"(", C.call(.Expr), @")", C.ret });
-    pub const CallConv = C.seq(.{ @"callconv", @"(", C.call(.Expr), @")", C.ret });
-    pub const ByteAlign = C.seq(.{ @"align", @"(", C.call(.Expr), @")", C.ret });
+    pub const TypeCore =
+        rule(C.star(C.call(&TypePrefix)) ++ C.call(&TypeAtom));
 
-    pub const GroupedExpr = C.seq(.{ @"(", C.call(.Expr), @")", C.ret });
+    pub const TypeExpr: [19]C.Op =
+        rule(C.call(&TypeCore) ++ C.opt(@"!" ++ C.call(&TypeExpr)));
 
-    pub const ErrorLiteral = C.seq(.{ @"error", @".", C.call(.Identifier), C.ret });
+    const str_escape =
+        @"\\" ++ C.charclass("nr\"t\\");
+    const str_plain =
+        C.charclass(.{
+            ascii[' ' .. '!' + 1],
+            ascii['#' .. '[' + 1],
+            ascii[']' .. '~' + 1],
+        });
 
-    pub const DotIdentifier = C.seq(.{ @".", C.call(.Identifier), C.ret });
+    pub const StringLiteral = rule(
+        C.char('"') ++
+            C.star(C.anyOf(.{ str_escape, str_plain })) ++
+            C.char('"') ++
+            skip,
+    );
 
-    pub const Primary = C.anyOf(.{
-        C.call(.GroupedExpr),
-        C.call(.Block),
-        C.call(.IfExpr),
-        C.call(.WhileExprE),
-        C.call(.ForExprE),
-        C.call(.SwitchExpr),
-        C.call(.ReturnExpr),
-        C.call(.BreakExpr),
-        C.call(.ContinueExpr),
-        C.call(.ContainerExpr),
-        C.call(.BuiltinIdentifier),
-        C.call(.ErrorLiteral),
-        C.call(.DotIdentifier),
-        C.call(.Integer),
-        C.call(.StringLiteral),
-        C.call(.CharLiteral),
-        C.call(.Identifier),
-    }) ++ C.ret;
+    const chr_escape =
+        @"\\" ++ C.charclass("nr't\\\"");
+    const chr_plain =
+        C.charclass(.{
+            ascii[' ' .. '&' + 1],
+            ascii['(' .. '[' + 1],
+            ascii[']' .. '~' + 1],
+        });
 
-    pub const FnCallArguments = C.seq(.{ @"(", C.opt(C.call(.ExprList)), @")", C.ret });
+    pub const CharLiteral = rule(
+        C.char('\'') ++
+            C.anyOf(.{ chr_escape, chr_plain }) ++
+            C.char('\'') ++
+            skip,
+    );
 
-    pub const MemberAccess = C.seq(.{ @".", C.call(.Identifier), C.ret });
+    pub const ExprInParens: [22]C.Op =
+        rule(@"(" ++ C.call(&Expr) ++ @")");
 
-    pub const IndexOrSlice = C.seq(.{
-        @"[",
-        C.call(.Expr),
-        C.opt(C.seq(.{
-            @"..",
-            C.opt(C.seq(.{
-                C.opt(C.call(.Expr)),
-                C.opt(C.seq(.{ @":", C.call(.Expr) })),
-            })),
-        })),
-        @"]",
-        C.ret,
-    });
+    pub const LinkSection =
+        rule(@"linksection" ++ C.call(&ExprInParens));
+    pub const AddrSpace =
+        rule(@"addrspace" ++ C.call(&ExprInParens));
+    pub const CallConv =
+        rule(@"callconv" ++ C.call(&ExprInParens));
+    pub const ByteAlign =
+        rule(@"align" ++ C.call(&ExprInParens));
 
-    pub const OneSuffix = C.anyOf(.{
-        C.call(.FnCallArguments),
-        C.call(.IndexOrSlice),
-        @".*",
-        @".?",
-        C.call(.MemberAccess),
-    }) ++ C.ret;
+    pub const ErrorLiteral =
+        rule(@"error" ++ @"." ++ C.call(&Identifier));
 
-    pub const SuffixExpr = C.seq(.{
-        C.call(.Primary),
-        C.star(C.call(.OneSuffix)),
-        C.ret,
-    });
+    pub const DotIdentifier =
+        rule(@"." ++ C.call(&Identifier));
 
-    pub const ReturnExpr = C.seq(.{ @"return", C.opt(C.call(.Expr)), C.ret });
+    pub const Primary: [50]C.Op = rule(
+        C.anyOf(.{
+            C.call(&ExprInParens),
+            C.call(&Block),
+            C.call(&IfExpr),
+            C.call(&WhileExprE),
+            C.call(&ForExprE),
+            C.call(&SwitchExpr),
+            C.call(&ReturnExpr),
+            C.call(&BreakExpr),
+            C.call(&ContinueExpr),
+            C.call(&ContainerExpr),
+            C.call(&BuiltinIdentifier),
+            C.call(&ErrorLiteral),
+            C.call(&DotIdentifier),
+            C.call(&Integer),
+            C.call(&StringLiteral),
+            C.call(&CharLiteral),
+            C.call(&Identifier),
+        }),
+    );
 
-    pub const BreakLabel = C.seq(.{ @":", C.call(.Identifier), C.ret });
-    pub const BlockLabel = C.seq(.{ C.call(.Identifier), @":", C.ret });
+    pub const FnCallArguments: [24]C.Op =
+        rule(@"(" ++ C.opt(C.call(&ExprList)) ++ @")");
 
-    pub const BreakExpr = C.seq(.{
-        @"break",
-        C.opt(C.anyOf(.{
-            C.call(.BreakLabel) ++ C.opt(C.call(.Expr)),
-            C.call(.Expr),
-        })),
-        C.ret,
-    });
+    pub const MemberAccess = rule(@"." ++ C.call(&Identifier));
 
-    pub const ContinueExpr = C.seq(.{ @"continue", C.opt(C.call(.BreakLabel)), C.ret });
+    const sliceSuffix =
+        @".." ++ C.opt(C.call(&Expr)) ++ C.opt(@":" ++ C.call(&Expr));
 
-    pub const IfExpr = C.seq(.{
-        @"if",
-        @"(",
-        C.call(.Expr),
-        @")",
-        C.opt(C.call(.PtrPayload)),
-        C.call(.Expr),
-        C.opt(C.seq(.{ @"else", C.opt(C.call(.PtrPayload)), C.call(.Expr) })),
-        C.ret,
-    });
+    pub const IndexOrSlice: [54]C.Op = rule(
+        @"[" ++ C.call(&Expr) ++ C.opt(sliceSuffix) ++ @"]",
+    );
 
-    pub const WhileContinueExpr = C.seq(.{ @":", @"(", C.call(.AssignExpr), @")", C.ret });
+    pub const OneSuffix = rule(
+        C.anyOf(.{
+            C.call(&FnCallArguments),
+            C.call(&IndexOrSlice),
+            @".*",
+            @".?",
+            C.call(&MemberAccess),
+        }),
+    );
 
-    pub const WhileExprE = C.seq(.{
-        @"while",
-        @"(",
-        C.call(.Expr),
-        @")",
-        C.opt(C.call(.PtrPayload)),
-        C.opt(C.call(.WhileContinueExpr)),
-        C.call(.Block),
-        C.opt(C.seq(.{ @"else", C.opt(C.call(.PtrPayload)), C.call(.Expr) })),
-        C.ret,
-    });
+    pub const SuffixExpr = rule(
+        C.call(&Primary) ++ C.star(C.call(&OneSuffix)),
+    );
 
-    pub const ForItem = C.seq(.{
-        C.call(.Expr),
-        C.opt(C.seq(.{ @"..", C.opt(C.call(.Expr)) })),
-        C.ret,
-    });
+    pub const ReturnExpr: [18]C.Op =
+        rule(@"return" ++ C.opt(C.call(&Expr)));
 
-    pub const ForArgumentsList = C.seq(.{
-        C.call(.ForItem),
-        C.star(C.seq(.{ @",", C.call(.ForItem) })),
-        C.opt(@","),
-        C.ret,
-    });
+    pub const LabelRef =
+        rule(@":" ++ C.call(&Identifier));
+    pub const LabelDef =
+        rule(C.call(&Identifier) ++ @":");
 
-    pub const ForExprE = C.seq(.{
-        @"for",                         @"(",           C.call(.ForArgumentsList),                                                 @")",
-        C.opt(C.call(.PtrListPayload)), C.call(.Block), C.opt(C.seq(.{ @"else", C.opt(C.call(.PtrListPayload)), C.call(.Expr) })), C.ret,
-    });
+    pub const BreakExpr: [21]C.Op = rule(
+        @"break" ++ C.opt(C.call(&LabelRef)) ++ C.opt(C.call(&Expr)),
+    );
 
-    pub const CaseItem = C.seq(.{
-        C.call(.Expr),
-        C.opt(C.seq(.{ @"...", C.call(.Expr) })),
-        C.ret,
-    });
+    pub const ContinueExpr =
+        rule(@"continue" ++ C.opt(C.call(&LabelRef)));
 
-    pub const PtrPayload = C.seq(.{
-        @"|", C.opt(@"*"), C.call(.Identifier), @"|", C.ret,
-    });
-    pub const PtrIndexPayload = C.seq(.{
-        @"|",                                         C.opt(@"*"), C.call(.Identifier),
-        C.opt(C.seq(.{ @",", C.call(.Identifier) })), @"|",        C.ret,
-    });
+    const payloadExpr =
+        C.opt(C.call(&PtrPayload)) ++ C.call(&Expr);
+    const elseExpr =
+        @"else" ++ payloadExpr;
 
-    pub const PtrListPayload = C.seq(.{
-        @"|",                                                       C.opt(@"*"), C.call(.Identifier),
-        C.star(C.seq(.{ @",", C.opt(@"*"), C.call(.Identifier) })), C.opt(@","), @"|",
-        C.ret,
-    });
+    pub const IfExpr: [58]C.Op = rule(
+        @"if" ++ @"(" ++ C.call(&Expr) ++ @")" ++
+            payloadExpr ++
+            elseExpr,
+    );
 
-    pub const Payload = C.seq(.{ @"|", C.call(.Identifier), @"|", C.ret });
+    pub const WhileContinueExpr: [32]C.Op =
+        rule(@":" ++ @"(" ++ C.call(&AssignExpr) ++ @")");
 
-    pub const ElseProng = C.seq(.{ @"else", @"=>", C.opt(C.call(.PtrIndexPayload)), C.call(.Expr), C.ret });
-    pub const CaseProng = C.seq(.{
-        C.opt(@"inline"),
-        C.call(.CaseItem),
-        C.star(@"," ++ C.call(.CaseItem)),
-        @"=>",
-        C.opt(C.call(.PtrIndexPayload)),
-        C.call(.Expr),
-        C.ret,
-    });
+    pub const WhileExprE: [43]C.Op = rule(
+        @"while" ++ C.call(&ExprInParens) ++
+            C.opt(C.call(&PtrPayload)) ++
+            C.opt(C.call(&WhileContinueExpr)) ++
+            C.call(&Block) ++
+            C.opt(elseExpr),
+    );
 
-    pub const Prong = C.anyOf(.{ C.call(.ElseProng), C.call(.CaseProng) }) ++ C.ret;
-    pub const SwitchBody = C.seq(.{ @"{", C.opt(C.call(.Prong) ++ C.star(@"," ++ C.call(.Prong))), @"}", C.ret });
-    pub const SwitchExpr = C.seq(.{ @"switch", @"(", C.call(.Expr), @")", C.call(.SwitchBody), C.ret });
+    pub const ForItem: [21]C.Op = rule(
+        C.call(&Expr) ++ C.opt(@".." ++ C.opt(C.call(&Expr))),
+    );
 
-    pub const FieldDecl = C.seq(.{ C.call(.Identifier), @":", C.call(.TypeExpr), C.ret });
-    pub const FieldList = C.seq(.{
-        C.call(.FieldDecl),
-        C.star(C.seq(.{ @",", C.call(.FieldDecl) })),
-        C.opt(@","),
-        C.ret,
-    });
+    pub const ForArgumentsList = rule(
+        C.call(&ForItem) ++
+            C.star(@"," ++ C.call(&ForItem)) ++
+            C.opt(@","),
+    );
 
-    pub const StructBody = C.seq(.{
-        @"{", C.opt(C.call(.FieldList)), @"}", C.ret,
-    });
+    pub const ForExprE: [60]C.Op = rule(
+        @"for" ++ @"(" ++ C.call(&ForArgumentsList) ++ @")" ++
+            C.opt(C.call(&PtrListPayload)) ++
+            C.call(&Block) ++
+            C.opt(elseExpr),
+    );
+
+    pub const CaseItem: [15]C.Op = rule(
+        C.call(&Expr) ++ C.opt(@"..." ++ C.call(&Expr)),
+    );
+
+    pub const PtrPayload = rule(
+        @"|" ++ C.opt(@"*") ++ C.call(&Identifier) ++ @"|",
+    );
+
+    pub const PtrIndexPayload = rule(
+        @"|" ++
+            C.opt(@"*") ++ C.call(&Identifier) ++
+            C.opt(@"," ++ C.call(&Identifier)) ++
+            @"|",
+    );
+
+    pub const PtrListPayload = rule(
+        @"|" ++
+            C.opt(@"*") ++ C.call(&Identifier) ++
+            C.star(@"," ++ C.opt(@"*") ++ C.call(&Identifier)) ++
+            C.opt(@",") ++
+            @"|",
+    );
+
+    pub const Payload =
+        rule(@"|" ++ C.call(&Identifier) ++ @"|");
+
+    pub const ElseProng: [29]C.Op = rule(
+        @"else" ++ @"=>" ++ C.opt(C.call(&PtrIndexPayload)) ++ C.call(&Expr),
+    );
+
+    pub const CaseProng: [45]C.Op = rule(
+        C.opt(@"inline") ++
+            C.call(&CaseItem) ++
+            C.star(@"," ++ C.call(&CaseItem)) ++
+            @"=>" ++
+            C.opt(C.call(&PtrIndexPayload)) ++
+            C.call(&Expr),
+    );
+
+    pub const Prong = rule(
+        C.anyOf(.{
+            C.call(&ElseProng),
+            C.call(&CaseProng),
+        }),
+    );
+
+    pub const SwitchBody = rule(
+        @"{" ++
+            C.opt(C.call(&Prong) ++
+                C.star(@"," ++ C.call(&Prong))) ++
+            @"}",
+    );
+
+    pub const SwitchExpr: [17]C.Op = rule(
+        @"switch" ++ C.call(&ExprInParens) ++ C.call(&SwitchBody),
+    );
+
+    pub const FieldDecl = rule(
+        C.call(&Identifier) ++ @":" ++ C.call(&TypeExpr),
+    );
+
+    pub const FieldList = rule(
+        C.call(&FieldDecl) ++
+            C.star(C.seq(.{ @",", C.call(&FieldDecl) })) ++
+            C.opt(@","),
+    );
+
+    pub const StructBody = rule(
+        @"{" ++ C.opt(C.call(&FieldList)) ++ @"}",
+    );
 
     pub const UnionBody = StructBody;
 
-    pub const EnumFields = C.seq(.{
-        C.call(.Identifier),
-        C.star(C.seq(.{ @",", C.call(.Identifier) })),
-        C.opt(@","),
-        C.ret,
-    });
+    pub const EnumFields = rule(
+        C.call(&Identifier) ++
+            C.star(C.seq(.{ @",", C.call(&Identifier) })) ++
+            C.opt(@","),
+    );
 
-    pub const EnumBody = C.seq(.{ @"{", C.opt(C.call(.EnumFields)), @"}", C.ret });
+    pub const EnumBody = rule(
+        @"{" ++ C.opt(C.call(&EnumFields)) ++ @"}",
+    );
 
-    pub const ContainerExpr = C.anyOf(.{
-        C.seq(.{ @"struct", C.call(.StructBody) }),
-        C.seq(.{ @"union", C.call(.UnionBody) }),
-        C.seq(.{ @"enum", C.call(.EnumBody) }),
-    }) ++ C.ret;
+    pub const ContainerExpr = rule(
+        C.anyOf(.{
+            C.seq(.{ @"struct", C.call(&StructBody) }),
+            C.seq(.{ @"union", C.call(&UnionBody) }),
+            C.seq(.{ @"enum", C.call(&EnumBody) }),
+        }),
+    );
 
-    pub const PrefixExpr = C.seq(.{
-        C.star(C.anyOf(.{ @"!", @"-", @"~", @"-%", @"&", @"try" })),
-        C.call(.SuffixExpr),
-        C.ret,
-    });
+    pub const PrefixExpr = rule(
+        C.star(C.anyOf(.{ @"!", @"-", @"~", @"-%", @"&", @"try" })) ++
+            C.call(&SuffixExpr),
+    );
 
-    pub const MultiplyExpr = C.seq(.{
-        C.call(.PrefixExpr),
-        C.star(C.seq(.{ C.anyOf(.{ @"*", @"/", @"%" }), C.call(.PrefixExpr) })),
-        C.ret,
-    });
+    pub const MultiplyExpr = rule(
+        C.call(&PrefixExpr) ++
+            C.star(C.anyOf(.{ @"*", @"/", @"%" }) ++ C.call(&PrefixExpr)),
+    );
 
-    pub const AddExpr = C.seq(.{
-        C.call(.MultiplyExpr),
-        C.star(C.seq(.{ C.anyOf(.{ @"+", @"-" }), C.call(.MultiplyExpr) })),
-        C.ret,
-    });
+    pub const AddExpr = rule(
+        C.call(&MultiplyExpr) ++ C.star(
+            C.anyOf(.{ @"+", @"-" }) ++ C.call(&MultiplyExpr),
+        ),
+    );
 
-    pub const BitShiftExpr = C.seq(.{
-        C.call(.AddExpr),
-        C.star(C.seq(.{ C.anyOf(.{ @"<<", @">>" }), C.call(.AddExpr) })),
-        C.ret,
-    });
+    pub const BitShiftExpr = rule(
+        C.call(&AddExpr) ++ C.star(
+            C.anyOf(.{ @"<<", @">>" }) ++ C.call(&AddExpr),
+        ),
+    );
 
-    pub const BitwiseExpr = C.seq(.{
-        C.call(.BitShiftExpr),
-        C.star(C.seq(.{
-            C.anyOf(.{
-                @"&",
-                @"^",
-                @"|",
-                @"orelse",
-                C.seq(.{ @"catch", C.opt(C.call(.Payload)) }),
-            }),
-            C.call(.BitShiftExpr),
-        })),
-        C.ret,
-    });
+    pub const BitwiseExpr = rule(
+        C.call(&BitShiftExpr) ++
+            C.star(
+                C.anyOf(.{
+                    @"&",
+                    @"^",
+                    @"|",
+                    @"orelse",
+                    @"catch" ++ C.opt(C.call(&Payload)),
+                }) ++
+                    C.call(&BitShiftExpr),
+            ),
+    );
 
-    pub const CompareExpr = C.seq(.{
-        C.call(.BitwiseExpr),
-        C.opt(C.seq(.{ C.anyOf(.{ @"==", @"!=", @"<=", @">=", @"<", @">" }), C.call(.BitwiseExpr) })),
-        C.ret,
-    });
+    pub const CompareExpr = rule(
+        C.call(&BitwiseExpr) ++
+            C.opt(
+                C.anyOf(.{ @"==", @"!=", @"<=", @">=", @"<", @">" }) ++
+                    C.call(&BitwiseExpr),
+            ),
+    );
 
-    pub const BoolAndExpr = C.seq(.{
-        C.call(.CompareExpr),
-        C.star(C.seq(.{ @"and", C.call(.CompareExpr) })),
-        C.ret,
-    });
+    pub const BoolAndExpr = rule(
+        C.call(&CompareExpr) ++
+            C.star(@"and" ++ C.call(&CompareExpr)),
+    );
 
-    pub const BoolOrExpr = C.seq(.{
-        C.call(.BoolAndExpr),
-        C.star(C.seq(.{ @"or", C.call(.BoolAndExpr) })),
-        C.ret,
-    });
+    pub const Expr = rule(
+        C.call(&BoolAndExpr) ++
+            C.star(@"or" ++ C.call(&BoolAndExpr)),
+    );
 
-    pub const Expr = C.seq(.{ C.call(.BoolOrExpr), C.ret });
+    pub const ExprList = rule(
+        C.call(&Expr) ++
+            C.star(@"," ++ C.call(&Expr)),
+    );
 
-    pub const ExprList = C.seq(.{
-        C.call(.Expr),
-        C.star(C.seq(.{ @",", C.call(.Expr) })),
-        C.ret,
-    });
+    pub const CallExpr = rule(
+        C.anyOf(.{ C.call(&Identifier), C.call(&BuiltinIdentifier) }) ++
+            @"(" ++
+            C.opt(C.call(&ExprList)) ++
+            @")",
+    );
 
-    pub const CallExpr = C.seq(.{
-        C.anyOf(.{ C.call(.Identifier), C.call(.BuiltinIdentifier) }),
-        @"(",
-        C.opt(C.call(.ExprList)),
-        @")",
-        C.ret,
-    });
+    pub const Param = rule(
+        C.call(&Identifier) ++ @":" ++ C.call(&TypeExpr),
+    );
 
-    pub const Param = C.seq(.{ C.call(.Identifier), @":", C.call(.TypeExpr), C.ret });
+    pub const ParamList = rule(
+        C.call(&Param) ++
+            C.star(@"," ++ C.call(&Param)),
+    );
 
-    pub const ParamList = C.seq(.{
-        C.call(.Param),
-        C.star(C.seq(.{ @",", C.call(.Param) })),
-        C.ret,
-    });
+    pub const ReturnStmt = rule(
+        @"return" ++ C.opt(C.call(&Expr)),
+    );
 
-    pub const ReturnStmt = C.seq(.{ @"return", C.opt(C.call(.Expr)), C.ret });
+    // ok continue from here, claude! turn the C.seq(.{ a, b, ..., C.ret }) into rule(a ++ b ++ ...),
+    // also changing inner C.seq(...) into simple ++ forms
 
     pub const VarDecl = C.seq(.{
         C.anyOf(.{ @"const", @"var" }),
-        C.call(.Identifier),
-        C.opt(C.seq(.{ @"=", C.call(.Expr) })),
+        C.call(&Identifier),
+        C.opt(C.seq(.{ @"=", C.call(&Expr) })),
         C.ret,
     });
 
     pub const AssignExpr = C.anyOf(.{
-        C.seq(.{ C.call(.Identifier), @"=", C.call(.Expr) }),
-        C.call(.Expr),
+        C.seq(.{ C.call(&Identifier), @"=", C.call(&Expr) }),
+        C.call(&Expr),
     }) ++ C.ret;
 
-    pub const IfStmt = C.seq(.{
-        @"if",
-        @"(",
-        C.call(.Expr),
-        @")",
-        C.call(.Block),
-        C.opt(C.seq(.{ @"else", C.call(.Block) })),
-        C.ret,
-    });
+    pub const Block: [24]C.Op =
+        @"{" ++ C.star(C.call(&Statement)) ++ @"}" ++ C.ret;
 
-    pub const WhileStmt = C.seq(.{
-        @"while",
-        @"(",
-        C.call(.Expr),
-        @")",
-        C.call(.Block),
-        C.opt(C.seq(.{ @"else", C.call(.Block) })),
-        C.ret,
-    });
-
-    pub const ForStmt = C.seq(.{
-        @"for",         @"(",  C.call(.Expr), @")",
-        C.call(.Block), C.ret,
-    });
-
-    pub const BlockExpr = C.seq(.{ C.opt(C.call(.BlockLabel)), C.call(.Block), C.ret });
+    pub const BlockExpr = C.seq(.{ C.opt(C.call(&LabelDef)), C.call(&Block), C.ret });
     pub const BlockExprStatement = C.anyOf(.{
-        C.call(.BlockExpr),
-        C.seq(.{ C.call(.AssignExpr), @";" }),
+        C.call(&BlockExpr),
+        C.seq(.{ C.call(&AssignExpr), @";" }),
     }) ++ C.ret;
 
     pub const VarDeclExprStatement = C.anyOf(.{
-        C.seq(.{ C.call(.VarDecl), @";" }),
-        C.seq(.{ C.call(.Expr), @";" }),
+        C.seq(.{ C.call(&VarDecl), @";" }),
+        C.seq(.{ C.call(&Expr), @";" }),
     }) ++ C.ret;
 
-    pub const IfStatement = C.anyOf(.{
-        C.seq(.{ @"if", @"(", C.call(.Expr), @")", C.opt(C.call(.PtrPayload)), C.call(.BlockExpr), C.opt(C.seq(.{ @"else", C.opt(C.call(.PtrPayload)), C.call(.Statement) })) }),
-        C.seq(.{ @"if", @"(", C.call(.Expr), @")", C.opt(C.call(.PtrPayload)), C.call(.AssignExpr), C.anyOf(.{ @";", C.seq(.{ @"else", C.opt(C.call(.PtrPayload)), C.call(.Statement) }) }) }),
+    pub const Else =
+        @"else" ++ C.opt(C.call(&PtrPayload)) ++ C.callRule(.Statement) ++ C.ret;
+
+    pub const IfStatement =
+        @"if" ++ @"(" ++ C.call(&Expr) ++ @")" ++ C.opt(C.call(&PtrPayload)) ++ C.anyOf(.{
+            C.call(&BlockExpr) ++ C.opt(C.call(&Else)),
+            C.call(&AssignExpr) ++ C.anyOf(.{ @";", C.call(&Else) }),
+        }) ++ C.ret;
+
+    pub const WhileStatement =
+        @"while" ++ @"(" ++ C.call(&Expr) ++ @")" ++
+        C.opt(C.call(&PtrPayload)) ++
+        C.opt(C.call(&WhileContinueExpr)) ++
+        C.anyOf(.{
+            C.call(&BlockExpr) ++ C.opt(C.call(&Else)),
+            C.call(&AssignExpr) ++ C.anyOf(.{ @";", C.call(&Else) }),
+        }) ++ C.ret;
+
+    pub const LabeledWhileStatement =
+        C.opt(C.call(&LabelDef)) ++ C.call(&WhileStatement) ++ C.ret;
+
+    pub const ForStatement =
+        @"for" ++ @"(" ++ C.call(&ForArgumentsList) ++ @")" ++
+        C.opt(C.call(&PtrListPayload)) ++
+        C.anyOf(.{
+            C.call(&BlockExpr),
+            C.call(&AssignExpr) ++ @";",
+        }) ++ C.ret;
+
+    pub const LabeledForStatement =
+        C.opt(C.call(&LabelDef)) ++ C.call(&ForStatement) ++ C.ret;
+
+    pub const DeferStatement =
+        @"defer" ++ C.call(&BlockExprStatement) ++ C.ret;
+    pub const ErrDeferStatement =
+        @"errdefer" ++ C.opt(C.call(&Payload)) ++ C.call(&BlockExprStatement) ++ C.ret;
+    pub const NoSuspendStatement =
+        @"nosuspend" ++ C.call(&BlockExprStatement) ++ C.ret;
+    pub const SuspendStatement =
+        @"suspend" ++ C.call(&BlockExprStatement) ++ C.ret;
+
+    pub const Statement: [29]C.Op = C.anyOf(.{
+        C.call(&IfStatement),
+        C.call(&LabeledWhileStatement),
+        C.call(&LabeledForStatement),
+        C.call(&SwitchExpr),
+        C.call(&DeferStatement),
+        C.call(&ErrDeferStatement),
+        C.call(&NoSuspendStatement),
+        C.call(&SuspendStatement),
+        C.call(&VarDeclExprStatement),
+        C.call(&BlockExprStatement),
     }) ++ C.ret;
-
-    pub const WhileStatement = C.anyOf(.{
-        C.seq(.{ @"while", @"(", C.call(.Expr), @")", C.opt(C.call(.PtrPayload)), C.opt(C.call(.WhileContinueExpr)), C.call(.BlockExpr), C.opt(C.seq(.{ @"else", C.opt(C.call(.PtrPayload)), C.call(.Statement) })) }),
-        C.seq(.{ @"while", @"(", C.call(.Expr), @")", C.opt(C.call(.PtrPayload)), C.opt(C.call(.WhileContinueExpr)), C.call(.AssignExpr), C.anyOf(.{ @";", C.seq(.{ @"else", C.opt(C.call(.PtrPayload)), C.call(.Statement) }) }) }),
-    }) ++ C.ret;
-
-    pub const LabeledWhileStatement = C.seq(.{ C.opt(C.call(.BlockLabel)), C.call(.WhileStatement), C.ret });
-
-    pub const ForStatement = C.anyOf(.{
-        C.seq(.{ @"for", @"(", C.call(.ForArgumentsList), @")", C.opt(C.call(.PtrListPayload)), C.call(.BlockExpr) }),
-        C.seq(.{ @"for", @"(", C.call(.ForArgumentsList), @")", C.opt(C.call(.PtrListPayload)), C.call(.AssignExpr), @";" }),
-    }) ++ C.ret;
-
-    pub const LabeledForStatement = C.seq(.{ C.opt(C.call(.BlockLabel)), C.call(.ForStatement), C.ret });
-
-    pub const DeferStatement = C.seq(.{ @"defer", C.call(.BlockExprStatement), C.ret });
-    pub const ErrDeferStatement = C.seq(.{ @"errdefer", C.opt(C.call(.Payload)), C.call(.BlockExprStatement), C.ret });
-    pub const NoSuspendStatement = C.seq(.{ @"nosuspend", C.call(.BlockExprStatement), C.ret });
-    pub const SuspendStatement = C.seq(.{ @"suspend", C.call(.BlockExprStatement), C.ret });
-
-    pub const Statement = C.anyOf(.{
-        C.call(.IfStatement),
-        C.call(.LabeledWhileStatement),
-        C.call(.LabeledForStatement),
-        C.call(.SwitchExpr),
-        C.call(.DeferStatement),
-        C.call(.ErrDeferStatement),
-        C.call(.NoSuspendStatement),
-        C.call(.SuspendStatement),
-        C.call(.VarDeclExprStatement),
-        C.call(.BlockExprStatement),
-    }) ++ C.ret;
-
-    pub const Block = C.seq(.{
-        @"{",
-        C.star(C.call(.Statement)),
-        @"}",
-        C.ret,
-    });
 
     pub const FnDecl = C.seq(.{
         C.opt(@"pub"),
         C.opt(C.anyOf(.{
             @"export",
-            C.seq(.{ @"extern", C.opt(C.call(.StringLiteral)) }),
+            C.seq(.{ @"extern", C.opt(C.callRule(.StringLiteral)) }),
             @"inline",
             @"noinline",
         })),
         @"fn",
-        C.call(.Identifier),
+        C.callRule(.Identifier),
         @"(",
-        C.opt(C.call(.ParamList)),
+        C.opt(C.callRule(.ParamList)),
         @")",
-        C.opt(C.call(.ByteAlign)),
-        C.opt(C.call(.AddrSpace)),
-        C.opt(C.call(.LinkSection)),
-        C.opt(C.call(.CallConv)),
+        C.opt(C.callRule(.ByteAlign)),
+        C.opt(C.callRule(.AddrSpace)),
+        C.opt(C.callRule(.LinkSection)),
+        C.opt(C.callRule(.CallConv)),
         C.opt(@"!"),
-        C.call(.TypeExpr),
-        C.call(.Block),
+        C.callRule(.TypeExpr),
+        C.call(&Block),
         C.ret,
     });
 
     pub const VarDeclProto = C.seq(.{
         C.anyOf(.{ @"const", @"var" }),
-        C.call(.Identifier),
-        C.opt(C.seq(.{ @":", C.call(.TypeExpr) })),
-        C.opt(C.call(.ByteAlign)),
-        C.opt(C.call(.AddrSpace)),
-        C.opt(C.call(.LinkSection)),
+        C.callRule(.Identifier),
+        C.opt(C.seq(.{ @":", C.callRule(.TypeExpr) })),
+        C.opt(C.callRule(.ByteAlign)),
+        C.opt(C.callRule(.AddrSpace)),
+        C.opt(C.callRule(.LinkSection)),
         C.ret,
     });
 
     pub const GlobalVarDecl = C.seq(.{
-        C.call(.VarDeclProto),
-        C.opt(C.seq(.{ @"=", C.call(.Expr) })),
+        C.callRule(.VarDeclProto),
+        C.opt(@"=" ++ C.callRule(.Expr)),
         @";",
         C.ret,
     });
@@ -605,28 +657,29 @@ pub const ZigMiniGrammar = struct {
         C.opt(@"pub"),
         C.opt(C.anyOf(.{
             @"export",
-            C.seq(.{ @"extern", C.opt(C.call(.StringLiteral)) }),
+            @"extern" ++ C.opt(C.callRule(.StringLiteral)),
         })),
         C.opt(@"threadlocal"),
-        C.call(.GlobalVarDecl),
+        C.callRule(.GlobalVarDecl),
         C.ret,
     });
 
     pub const TestDecl = C.seq(.{
         @"test",
-        C.opt(C.anyOf(.{ C.call(.StringLiteral), C.call(.Identifier) })),
-        C.call(.Block),
+        C.opt(C.anyOf(.{ C.call(&StringLiteral), C.call(&Identifier) })),
+        C.call(&Block),
         C.ret,
     });
-    pub const ComptimeDecl = C.seq(.{ @"comptime", C.call(.Block), C.ret });
+
+    pub const ComptimeDecl = @"comptime" ++ C.call(&Block) ++ C.ret;
 
     pub const start = C.seq(.{
-        WS,
+        skip,
         C.star(C.anyOf(.{
-            C.call(.FnDecl),
-            C.call(.TopVarDecl),
-            C.call(.TestDecl),
-            C.call(.ComptimeDecl),
+            C.call(&FnDecl),
+            C.call(&TopVarDecl),
+            C.call(&TestDecl),
+            C.call(&ComptimeDecl),
         })),
         C.eof,
         C.ok,
