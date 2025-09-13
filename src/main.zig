@@ -16,7 +16,9 @@ pub fn main() !void {
         break :blk try allocator.dupeZ(u8, contents);
     } else "var x: i32 = 42;\n";
 
-    var vm = zisp.zigmini.ZigMiniParser.init(allocator, source);
+    // Test with smaller stack sizes: original is VM(ZigMiniGrammar, 1024, 256)
+    const SmallParser = zisp.parse.VM(zisp.zigmini.ZigMiniGrammar, 128, 32);
+    var vm = SmallParser.init(allocator, source);
     defer vm.deinit();
 
     const root = try vm.parse();
