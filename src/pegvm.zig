@@ -429,7 +429,7 @@ pub fn Combinators(comptime G: type) type {
             Accept: void,
         };
 
-        pub const space = zeroOrMany(charclass(" \t\n\r"));
+        pub const space = star(charclass(" \t\n\r"));
 
         pub const eof = op1(.{ .EndInput = {} });
         pub const ok = op1(.{ .Accept = {} });
@@ -453,7 +453,7 @@ pub fn Combinators(comptime G: type) type {
             return op1(.{ .String = s });
         }
 
-        pub inline fn Call(comptime r: Rule) Op1 {
+        pub inline fn call(comptime r: Rule) Op1 {
             return op1(.{ .Call = r });
         }
 
@@ -480,7 +480,7 @@ pub fn Combinators(comptime G: type) type {
             return out;
         }
 
-        pub inline fn zeroOrMany(comptime X: anytype) OpN(X.len + 2) {
+        pub inline fn star(comptime X: anytype) OpN(X.len + 2) {
             const to_end = X.len + 1; // from ChoiceRel next to end
             const back = -@as(i16, @intCast(X.len + 2)); // from CommitRel back to ChoiceRel
             return op1(.{ .ChoiceRel = @intCast(to_end) }) ++ X ++
@@ -488,6 +488,7 @@ pub fn Combinators(comptime G: type) type {
         }
 
         pub inline fn anyOf(comptime parts: anytype) OpN(sizeSum(parts) + (parts.len - 1) * 2) {
+            @setEvalBranchQuota(2000);
             if (parts.len < 2) @compileError("choose needs at least 2 parts");
 
             // Precompute lengths of each alternative
@@ -533,7 +534,7 @@ pub fn Combinators(comptime G: type) type {
             return out;
         }
 
-        pub inline fn maybe(comptime X: anytype) OpN(X.len + 2) {
+        pub inline fn opt(comptime X: anytype) OpN(X.len + 2) {
             return anyOf(.{ X, .{} });
         }
 
@@ -573,7 +574,7 @@ pub fn Combinators(comptime G: type) type {
         }
 
         pub inline fn several(comptime X: anytype) OpN(X.len + (X.len + 2)) {
-            return seq(.{ X, zeroOrMany(X) });
+            return seq(.{ X, star(X) });
         }
 
         pub inline fn charclass(comptime ranges: anytype) Op1 {
@@ -627,7 +628,7 @@ pub const JSONGrammar = struct {
     // String <- '"' (Unescaped / Escape)* '"'
     pub const String =
         C.char('"') ++
-        C.zeroOrMany(C.anyOf(.{ stringchar, simple_escape, uXXXX })) ++
+        C.star(C.anyOf(.{ stringchar, simple_escape, uXXXX })) ++
         C.char('"') ++
         C.ret;
 
@@ -637,18 +638,18 @@ pub const JSONGrammar = struct {
     // Exp  <- ([eE] [+-]? [0-9]+)?
     const digit = C.several(C.charclass("0123456789"));
     const nonzerodigit = C.charclass("123456789");
-    const maybe_minus = C.maybe(C.char('-'));
-    const integral = C.anyOf(.{ C.char('0'), nonzerodigit ++ C.zeroOrMany(digit) });
-    const fractional = C.maybe(C.seq(.{ C.char('.'), digit }));
-    const scientific = C.maybe(C.seq(.{ C.charclass("eE"), C.maybe(C.charclass("+-")), digit }));
+    const maybe_minus = C.opt(C.char('-'));
+    const integral = C.anyOf(.{ C.char('0'), nonzerodigit ++ C.star(digit) });
+    const fractional = C.opt(C.seq(.{ C.char('.'), digit }));
+    const scientific = C.opt(C.seq(.{ C.charclass("eE"), C.opt(C.charclass("+-")), digit }));
     pub const Number = C.seq(.{ maybe_minus, integral, fractional, scientific, C.ret });
 
     // Value <- Object / Array / String / Number / 'true' / 'false' / 'null'
     pub const Value = C.anyOf(.{
-        C.Call(.Object),
-        C.Call(.Array),
-        C.Call(.String),
-        C.Call(.Number),
+        C.call(.Object),
+        C.call(.Array),
+        C.call(.String),
+        C.call(.Number),
         C.text("true"),
         C.text("false"),
         C.text("null"),
@@ -656,18 +657,18 @@ pub const JSONGrammar = struct {
 
     // Member <- String WS ':' WS Value
     pub const Member = C.seq(.{
-        C.Call(.String),
+        C.call(.String),
         C.space,
         C.char(':'),
         C.space,
-        C.Call(.Value),
+        C.call(.Value),
         C.ret,
     });
 
     // Members <- Member (WS ',' WS Member)*
     pub const Members = C.seq(.{
-        C.Call(.Member),
-        C.zeroOrMany(C.seq(.{ C.space, C.char(','), C.space, C.Call(.Member) })),
+        C.call(.Member),
+        C.star(C.seq(.{ C.space, C.char(','), C.space, C.call(.Member) })),
         C.ret,
     });
 
@@ -675,7 +676,7 @@ pub const JSONGrammar = struct {
     pub const Object = C.seq(.{
         C.char('{'),
         C.space,
-        C.maybe(C.Call(.Members)),
+        C.opt(C.call(.Members)),
         C.space,
         C.char('}'),
         C.ret,
@@ -683,8 +684,8 @@ pub const JSONGrammar = struct {
 
     // Elements <- Value (WS ',' WS Value)*
     pub const Elements = C.seq(.{
-        C.Call(.Value),
-        C.zeroOrMany(C.seq(.{ C.space, C.char(','), C.space, C.Call(.Value) })),
+        C.call(.Value),
+        C.star(C.seq(.{ C.space, C.char(','), C.space, C.call(.Value) })),
         C.ret,
     });
 
@@ -692,7 +693,7 @@ pub const JSONGrammar = struct {
     pub const Array = C.seq(.{
         C.char('['),
         C.space,
-        C.maybe(C.Call(.Elements)),
+        C.opt(C.call(.Elements)),
         C.space,
         C.char(']'),
         C.ret,
@@ -701,7 +702,7 @@ pub const JSONGrammar = struct {
     // start <- WS Value WS EOF
     pub const start = C.seq(.{
         C.space,
-        C.Call(.Value),
+        C.call(.Value),
         C.space,
         C.eof,
         C.ok,
@@ -780,7 +781,7 @@ pub const BacktrackGrammar = struct {
     pub const APlusB = C.seq(.{ C.several(C.char('a')), C.char('b'), C.ret });
 
     pub const start = C.seq(.{
-        C.anyOf(.{ C.Call(.Long), C.Call(.APlusB) }),
+        C.anyOf(.{ C.call(.Long), C.call(.APlusB) }),
         C.eof,
         C.ok,
     });
@@ -865,13 +866,13 @@ pub const BlowupGrammar = struct {
 
     /// Shout ::= ('a' Shout) / 'a'
     pub const shout = C.anyOf(.{
-        C.seq(.{ C.char('a'), C.Call(.shout) }),
+        C.seq(.{ C.char('a'), C.call(.shout) }),
         C.char('a'),
     }) ++ C.ret;
 
     /// start ::= A 'b' EOF
     pub const start = C.seq(.{
-        C.Call(.shout),
+        C.call(.shout),
         C.char('b'),
         C.eof,
         C.ok,
@@ -894,11 +895,11 @@ const PackratGrammar = struct {
     const C = Combinators(@This());
 
     pub const start = C.anyOf(.{
-        C.Call(.x) ++ C.eof, C.Call(.x) ++ C.Call(.x) ++ C.eof,
+        C.call(.x) ++ C.eof, C.call(.x) ++ C.call(.x) ++ C.eof,
     }) ++ C.ok;
 
     pub const x = C.anyOf(.{
-        C.char('(') ++ C.Call(.x) ++ C.char(')'),
+        C.char('(') ++ C.call(.x) ++ C.char(')'),
         C.char('x'),
     }) ++ C.ret;
 };
