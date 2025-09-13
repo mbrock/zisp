@@ -12,9 +12,9 @@ pub fn DebugPrinter(comptime Parser: type) type {
         step_count: usize = 0,
         indent: usize = 0,
 
-        pub fn init(text: [:0]const u8, writer: *std.io.Writer) Self {
+        pub fn init(allocator: std.mem.Allocator, text: [:0]const u8, writer: *std.io.Writer) Self {
             return .{
-                .machine = Parser.init(text),
+                .machine = Parser.init(allocator, text),
                 .writer = writer,
             };
         }
@@ -112,10 +112,11 @@ pub fn DebugPrinter(comptime Parser: type) type {
 /// Convenience function to debug parse a string
 pub fn debugParse(
     comptime Parser: type,
+    allocator: std.mem.Allocator,
     text: [:0]const u8,
     writer: *std.io.Writer,
 ) !bool {
-    var printer = DebugPrinter(Parser).init(text, writer);
+    var printer = DebugPrinter(Parser).init(allocator, text, writer);
     defer printer.deinit();
     const status = try printer.run();
     return status == .Ok;
@@ -129,7 +130,7 @@ test "debug printer basic" {
     var buf: [1024]u8 = undefined;
     var stream = std.Io.Writer.Discarding.init(&buf);
 
-    const result = try debugParse(JSONParser, text, &stream.writer);
+    const result = try debugParse(JSONParser, std.heap.page_allocator, text, &stream.writer);
     try std.testing.expect(result);
 }
 
@@ -140,6 +141,6 @@ test "debug printer complex" {
     var buf: [4096]u8 = undefined;
     var stream = std.Io.Writer.Discarding.init(&buf);
 
-    const result = try debugParse(JSONParser, text, &stream.writer);
+    const result = try debugParse(JSONParser, std.heap.page_allocator, text, &stream.writer);
     try std.testing.expect(result);
 }

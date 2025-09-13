@@ -11,53 +11,70 @@ const CharBitset = std.bit_set.ArrayBitSet(u64, 256);
 pub fn ProgramFor(comptime G: type) type {
     return struct {
         const Rule = std.meta.DeclEnum(G);
-        const FirstRuleArrT = @TypeOf(@field(G, @tagName(Rule.start)));
-        const Op = Combinators(G).Op;
+        const C = Combinators(G);
+        const Op = C.Op;
         const E = std.enums.values(Rule);
 
         inline fn ruleBody(comptime nm: Rule) [RuleSize(nm)]Op {
             const raw = @field(G, @tagName(nm));
-            const RawT = @TypeOf(raw);
-            return switch (@typeInfo(RawT)) {
-                .array => |a| if (a.child == Op) raw else .{},
-                else => .{},
-            };
+            const T = @TypeOf(raw);
+            const info = @typeInfo(T);
+            if (info == .@"struct" and @hasField(T, "ops") and @hasField(T, "emit_node")) {
+                return raw.ops;
+            } else if (info == .array and info.array.child == Op) {
+                return raw;
+            }
+            return .{};
         }
 
-        fn GetCodeSize() usize {
+        fn RuleSize(r: Rule) usize {
+            const raw = @field(G, @tagName(r));
+            const T = @TypeOf(raw);
+            const info = @typeInfo(T);
+            if (info == .@"struct" and @hasField(T, "ops") and @hasField(T, "emit_node")) {
+                return raw.ops.len;
+            } else if (info == .array and info.array.child == Op) {
+                return raw.len;
+            }
+            return 0;
+        }
+
+        inline fn GetCodeSize() usize {
             var sz: usize = 0;
             for (E) |f| sz += ruleBody(f).len;
             return sz;
         }
 
-        fn RuleSize(r: Rule) usize {
-            const raw = @field(G, @tagName(r));
-            const RawT = @TypeOf(raw);
-            return switch (@typeInfo(RawT)) {
-                .array => |a| if (a.child == Op) a.len else 0,
-                else => 0,
-            };
-        }
-
         pub const CodeSize = GetCodeSize();
 
         inline fn RuleCode() struct { ips: [E.len]usize, ops: [CodeSize]Op } {
+            @setEvalBranchQuota(200000);
             comptime var ips: [E.len]usize = undefined;
-            comptime var ops: []const Op = &.{};
+            comptime var ops: [CodeSize]Op = undefined;
             comptime var off: usize = 0;
-
             for (E) |f| {
                 ips[@intFromEnum(f)] = off;
-                ops = ops ++ ruleBody(f);
-                off += RuleSize(f);
+                const body = ruleBody(f);
+                inline for (body, 0..) |op, i| ops[off + i] = op;
+                off += body.len;
             }
-            return .{ .ips = ips, .ops = ops[0..CodeSize].* };
+            return .{ .ips = ips, .ops = ops };
+        }
+
+        inline fn RuleEmit() [E.len]bool {
+            comptime var arr: [E.len]bool = undefined;
+            for (E) |f| {
+                const raw = @field(G, @tagName(f));
+                arr[@intFromEnum(f)] = if (@hasField(@TypeOf(raw), "emit_node")) raw.emit_node else false;
+            }
+            return arr;
         }
 
         pub const OpT = Op;
         pub const RuleT = Rule;
         pub const rule_ip = RuleCode().ips;
         pub const code = RuleCode().ops;
+        pub const emit_node = RuleEmit();
         pub const start_ip = rule_ip[@intCast(@intFromEnum(Rule.start))];
     };
 }
@@ -81,10 +98,38 @@ pub fn VM(
         const codeinit = P.start_ip;
 
         /// A frame on the backtracking stack.
+        pub const Node = struct {
+            tag: P.RuleT,
+            start: u32,
+            end: u32,
+            first_child: ?u32,
+            next_sibling: ?u32,
+
+            pub const ChildIter = struct {
+                nodes: []const Node,
+                index: ?u32,
+
+                pub fn next(self: *ChildIter) ?u32 {
+                    const i = self.index orelse return null;
+                    self.index = self.nodes[i].next_sibling;
+                    return i;
+                }
+            };
+
+            pub fn children(self: Node, nodes: []const Node) ChildIter {
+                return .{ .nodes = nodes, .index = self.first_child };
+            }
+
+            pub fn siblings(self: Node, nodes: []const Node) ChildIter {
+                return .{ .nodes = nodes, .index = self.next_sibling };
+            }
+        };
+
         pub const Save = extern struct {
             nextcode: u32,
             texthead: u32,
             markhead: u32,
+            nodehead: usize,
         };
 
         /// A frame on the rule call stack.
@@ -92,6 +137,7 @@ pub fn VM(
             rulekind: u32,
             texthead: u32,
             nextcode: u32,
+            node: u32,
         };
 
         marklist: [R]Mark align(16) = undefined,
@@ -103,12 +149,16 @@ pub fn VM(
         savehead: u32 = 0,
 
         text: [:0]const u8,
+        allocator: std.mem.Allocator,
+        nodes: std.ArrayListUnmanaged(Node) = .{},
 
-        pub fn init(src: [:0]const u8) Machine {
-            return .{ .text = src };
+        pub fn init(allocator: std.mem.Allocator, src: [:0]const u8) Machine {
+            return .{ .text = src, .allocator = allocator };
         }
 
-        pub fn deinit(_: *Machine) void {}
+        pub fn deinit(self: *Machine) void {
+            self.nodes.deinit(self.allocator);
+        }
 
         pub const Status = enum { Ok, Fail, Running };
 
@@ -188,6 +238,7 @@ pub fn VM(
                                 .markhead = self.markhead,
                                 .nextcode = @as(usize, @intCast(@as(isize, @intCast(codebase)) + 1 + d)),
                                 .texthead = self.texthead,
+                                .nodehead = self.nodes.items.len,
                             };
 
                             self.savehead += 1;
@@ -213,6 +264,7 @@ pub fn VM(
                             self.savehead -= 1;
                             const s = self.savelist[self.savehead];
                             self.texthead = s.texthead;
+                            self.nodes.items.len = s.nodehead;
                             const skipcode = (@as(usize, @intCast(@as(isize, codebase) + 1 + d)));
                             self.codehead = skipcode;
                             if (yield) return .Running else {
@@ -234,10 +286,22 @@ pub fn VM(
                             } else {
                                 // Normal call path (not cached or no cache)
                                 self.markhead += 1;
+                                var node_index: u32 = std.math.maxInt(u32);
+                                if (P.emit_node[rulekind]) {
+                                    try self.nodes.append(self.allocator, .{
+                                        .tag = @enumFromInt(rulekind),
+                                        .start = self.texthead,
+                                        .end = 0,
+                                        .first_child = null,
+                                        .next_sibling = null,
+                                    });
+                                    node_index = @intCast(self.nodes.items.len - 1);
+                                }
                                 self.marklist[self.markhead] = .{
                                     .rulekind = rulekind,
                                     .texthead = self.texthead,
                                     .nextcode = nextcode,
+                                    .node = node_index,
                                 };
 
                                 self.codehead = rulecode;
@@ -261,6 +325,17 @@ pub fn VM(
                             const mark = self.marklist[self.markhead];
                             self.codehead = mark.nextcode;
                             self.markhead -= 1;
+
+                            if (mark.node != std.math.maxInt(u32)) {
+                                self.nodes.items[mark.node].end = self.texthead;
+                                if (self.markhead > 0) {
+                                    const parent = self.marklist[self.markhead].node;
+                                    if (parent != std.math.maxInt(u32)) {
+                                        self.nodes.items[mark.node].next_sibling = self.nodes.items[parent].first_child;
+                                        self.nodes.items[parent].first_child = mark.node;
+                                    }
+                                }
+                            }
 
                             if (yield) return .Running else {
                                 continue :vm mark.nextcode;
@@ -299,6 +374,7 @@ pub fn VM(
                         self.codehead = failsave.nextcode;
                         self.markhead = failsave.markhead;
                         self.texthead = failsave.texthead;
+                        self.nodes.items.len = failsave.nodehead;
 
                         if (yield) return .Running else continue :vm self.codehead;
                     }
@@ -311,11 +387,23 @@ pub fn VM(
             unreachable;
         }
 
+        pub fn parse(self: *Machine) !Node {
+            while (true) {
+                const st = try self.tick(.auto_continue, null);
+                switch (st) {
+                    .Running => continue,
+                    .Ok => return self.nodes.items[0],
+                    .Fail => return error.ParseFailed,
+                }
+            }
+        }
+
         pub fn parseFully(
+            allocator: std.mem.Allocator,
             src: [:0]const u8,
             comptime mode: ExecMode,
         ) !bool {
-            var m = @This().init(src);
+            var m = @This().init(allocator, src);
             defer m.deinit();
             switch (mode) {
                 .yield_each => while (true) {
@@ -346,8 +434,8 @@ pub fn VM(
         };
 
         /// Execute parse in yield_each mode gathering instrumentation metrics.
-        pub fn runWithMetrics(src: [:0]const u8) !Metrics {
-            var m = @This().init(src);
+        pub fn runWithMetrics(allocator: std.mem.Allocator, src: [:0]const u8) !Metrics {
+            var m = @This().init(allocator, src);
             defer m.deinit();
             var metrics: Metrics = .{};
             var prev_g: usize = m.savehead;
@@ -379,8 +467,8 @@ pub fn VM(
             }
         }
 
-        pub fn runWithMetricsUncached(src: [:0]const u8) !Metrics {
-            var m = @This().init(src);
+        pub fn runWithMetricsUncached(allocator: std.mem.Allocator, src: [:0]const u8) !Metrics {
+            var m = @This().init(allocator, src);
             defer m.deinit();
             var metrics: Metrics = .{};
             var prev_g: usize = m.savehead;
@@ -429,6 +517,21 @@ pub fn Combinators(comptime G: type) type {
             Accept: void,
         };
 
+        pub fn Annotated(comptime n: usize) type {
+            return struct {
+                ops: [n]Op,
+                emit_node: bool,
+            };
+        }
+
+        pub inline fn node(comptime ops: anytype) Annotated(ops.len) {
+            return .{ .ops = ops, .emit_node = true };
+        }
+
+        pub inline fn silent(comptime ops: anytype) Annotated(ops.len) {
+            return .{ .ops = ops, .emit_node = false };
+        }
+
         pub const space = star(charclass(" \t\n\r"));
 
         pub const eof = op1(.{ .EndInput = {} });
@@ -459,7 +562,7 @@ pub fn Combinators(comptime G: type) type {
 
         pub inline fn call(comptime p: anytype) Op1 {
             inline for (@typeInfo(G).@"struct".decls) |decl| {
-                if ((p).ptr == &(@field(G, decl.name))) {
+                if (@as(*const anyopaque, @ptrCast(p)) == @as(*const anyopaque, @ptrCast(&@field(G, decl.name)))) {
                     return op1(.{ .Call = @field(Rule, decl.name) });
                 }
             }
@@ -722,7 +825,7 @@ pub const JSONGrammar = struct {
 const JSONParser = VM(JSONGrammar, 32, 32);
 
 fn parseJSON(src: [:0]const u8) !bool {
-    return JSONParser.parseFully(src, .auto_continue);
+    return JSONParser.parseFully(std.heap.page_allocator, src, .auto_continue);
 }
 
 fn expectJsonOk(src: [:0]const u8) !void {
@@ -820,11 +923,11 @@ const BacktrackParser = VM(BacktrackGrammar, 32, 32);
 const GreedyParser = VM(GreedyGrammar, 32, 32);
 
 fn parseBacktrack(src: [:0]const u8) !bool {
-    return BacktrackParser.parseFully(src, .auto_continue);
+    return BacktrackParser.parseFully(std.heap.page_allocator, src, .auto_continue);
 }
 
 fn parseGreedy(src: [:0]const u8) !bool {
-    return GreedyParser.parseFully(src, .auto_continue);
+    return GreedyParser.parseFully(std.heap.page_allocator, src, .auto_continue);
 }
 
 test "backtracking alt with long common prefix" {
@@ -844,7 +947,7 @@ test "backtracking inside greedy repetition" {
     try std.testing.expect(!try parseGreedy("aaaaa"));
 
     const src = "aaaaab"; // should skip 3 longer failing alts before match
-    var m = GreedyParser.init(src);
+    var m = GreedyParser.init(std.testing.allocator, src);
     defer m.deinit();
 
     for (0..10) |_| {
@@ -856,7 +959,7 @@ test "backtracking inside greedy repetition" {
 }
 
 test "metrics collection on backtracking grammar" {
-    const metrics = try BacktrackParser.runWithMetrics("aaaaaaaaab");
+    const metrics = try BacktrackParser.runWithMetrics(std.testing.allocator, "aaaaaaaaab");
     try std.testing.expect(metrics.accepted);
     try std.testing.expectEqual(10, metrics.backtracks);
     try std.testing.expectEqual(1, metrics.max_back_height);
@@ -864,7 +967,7 @@ test "metrics collection on backtracking grammar" {
 }
 
 test "metrics collection on simple json token" {
-    const metrics = try JSONParser.runWithMetrics("true");
+    const metrics = try JSONParser.runWithMetrics(std.testing.allocator, "true");
     try std.testing.expect(metrics.accepted);
     try std.testing.expectEqual(2, metrics.max_rule_height);
     try std.testing.expectEqual(27, metrics.steps);
@@ -894,7 +997,7 @@ const BlowupVM = VM(BlowupGrammar, 4096, 4096);
 test "packrat blowup demonstration" {
     const n: usize = 20;
     const buf: *const [(n + 1):0]u8 = "a" ** n ++ "b";
-    const metrics = try BlowupVM.runWithMetrics(buf);
+    const metrics = try BlowupVM.runWithMetrics(std.testing.allocator, buf);
 
     try std.testing.expect(metrics.accepted);
     try std.testing.expectEqual(107, metrics.steps);
@@ -915,9 +1018,10 @@ const PackratGrammar = struct {
 };
 
 fn pedometer(SomeVM: type, src: [:0]const u8, mode: enum { packrat, naive }) !usize {
+    const alloc = std.testing.allocator;
     const metrics = try switch (mode) {
-        .packrat => SomeVM.runWithMetrics(src),
-        .naive => SomeVM.runWithMetricsUncached(src),
+        .packrat => SomeVM.runWithMetrics(alloc, src),
+        .naive => SomeVM.runWithMetricsUncached(alloc, src),
     };
 
     try std.testing.expect(metrics.accepted);
@@ -935,7 +1039,7 @@ test "packrat caching benefit" {
 
 test "yield mode" {
     const src = "true";
-    var m = JSONParser.init(src);
+    var m = JSONParser.init(std.testing.allocator, src);
     defer m.deinit();
 
     // First tick should execute first op and return Running
@@ -959,7 +1063,7 @@ test "yield mode" {
 
 test "yield mode complex" {
     const src = "[1, 2, 3]";
-    var m = JSONParser.init(src);
+    var m = JSONParser.init(std.testing.allocator, src);
     defer m.deinit();
 
     var count: usize = 0;
@@ -994,7 +1098,7 @@ pub const KeywordGrammar = struct {
 const KeywordParser = VM(KeywordGrammar, 32, 32);
 
 fn parseKeyword(src: [:0]const u8) !bool {
-    return KeywordParser.parseFully(src, .auto_continue);
+    return KeywordParser.parseFully(std.heap.page_allocator, src, .auto_continue);
 }
 
 test "negative lookahead keyword" {
@@ -1029,7 +1133,7 @@ pub const EvenIntGrammar = struct {
 const EvenIntParser = VM(EvenIntGrammar, 32, 32);
 
 fn parseEvenInt(src: [:0]const u8) !bool {
-    return EvenIntParser.parseFully(src, .auto_continue);
+    return EvenIntParser.parseFully(std.heap.page_allocator, src, .auto_continue);
 }
 
 test "positive lookahead integer and even alnum" {
