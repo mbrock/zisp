@@ -139,6 +139,7 @@ pub fn VM(
 
         marklist: []Mark,
         savelist: []Save,
+        nodelist: std.ArrayList(Node) = .{},
 
         codehead: u32 = codeinit,
         texthead: u32 = 0,
@@ -147,7 +148,6 @@ pub fn VM(
 
         text: [:0]const u8,
         allocator: std.mem.Allocator,
-        nodes: std.ArrayListUnmanaged(Node) = .{},
 
         // Error tracking
         furthest_pos: u32 = 0,
@@ -172,14 +172,14 @@ pub fn VM(
             self.savehead = 0;
             self.text = src;
             self.allocator = allocator;
-            self.nodes = .{};
+            self.nodelist = .{};
             self.furthest_pos = 0;
             self.furthest_rule = null;
             self.expected_at_furthest = .{};
         }
 
         pub fn deinit(self: *Machine) void {
-            self.nodes.deinit(self.allocator);
+            self.nodelist.deinit(self.allocator);
             // expected_at_furthest uses static buffer, no dealloc needed
         }
 
@@ -267,7 +267,7 @@ pub fn VM(
                                 .markhead = self.markhead,
                                 .nextcode = @as(usize, @intCast(@as(isize, @intCast(codebase)) + 1 + d)),
                                 .texthead = self.texthead,
-                                .nodehead = self.nodes.items.len,
+                                .nodehead = self.nodelist.items.len,
                             };
 
                             self.savehead += 1;
@@ -293,7 +293,7 @@ pub fn VM(
                             self.savehead -= 1;
                             const s = self.savelist[self.savehead];
                             self.texthead = s.texthead;
-                            self.nodes.items.len = s.nodehead;
+                            self.nodelist.items.len = s.nodehead;
                             const skipcode = (@as(usize, @intCast(@as(isize, codebase) + 1 + d)));
                             self.codehead = skipcode;
                             if (yield) return .Running else {
@@ -306,7 +306,7 @@ pub fn VM(
                             // Used for repetitions to reuse the same frame.
                             if (self.savehead > 0) {
                                 self.savelist[self.savehead - 1].texthead = self.texthead;
-                                self.savelist[self.savehead - 1].nodehead = self.nodes.items.len;
+                                self.savelist[self.savehead - 1].nodehead = self.nodelist.items.len;
                             }
                             const skipcode = (@as(usize, @intCast(@as(isize, codebase) + 1 + d)));
                             self.codehead = skipcode;
@@ -331,21 +331,21 @@ pub fn VM(
                                 self.markhead += 1;
                                 var node_index: u32 = std.math.maxInt(u32);
                                 if (P.emit_node[rulekind]) {
-                                    try self.nodes.append(self.allocator, .{
+                                    try self.nodelist.append(self.allocator, .{
                                         .tag = @enumFromInt(rulekind),
                                         .start = self.texthead,
                                         .end = 0,
                                         .first_child = null,
                                         .next_sibling = null,
                                     });
-                                    node_index = @intCast(self.nodes.items.len - 1);
+                                    node_index = @intCast(self.nodelist.items.len - 1);
                                 }
                                 self.marklist[self.markhead] = .{
                                     .rulekind = rulekind,
                                     .texthead = self.texthead,
                                     .nextcode = nextcode,
                                     .node = node_index,
-                                    .node_count_on_entry = @intCast(self.nodes.items.len),
+                                    .node_count_on_entry = @intCast(self.nodelist.items.len),
                                 };
 
                                 self.codehead = rulecode;
@@ -372,12 +372,12 @@ pub fn VM(
 
                             if (mark.node != std.math.maxInt(u32)) {
                                 // Normal node - connect it to parent
-                                self.nodes.items[mark.node].end = self.texthead;
+                                self.nodelist.items[mark.node].end = self.texthead;
                                 if (self.markhead > 0) {
                                     const parent = self.marklist[self.markhead].node;
                                     if (parent != std.math.maxInt(u32)) {
-                                        self.nodes.items[mark.node].next_sibling = self.nodes.items[parent].first_child;
-                                        self.nodes.items[parent].first_child = mark.node;
+                                        self.nodelist.items[mark.node].next_sibling = self.nodelist.items[parent].first_child;
+                                        self.nodelist.items[parent].first_child = mark.node;
                                     }
                                 }
                             } else {
@@ -387,12 +387,12 @@ pub fn VM(
                                     if (parent_mark.node != std.math.maxInt(u32)) {
                                         // Find children created during this silent rule
                                         var i = mark.node_count_on_entry;
-                                        while (i < self.nodes.items.len) : (i += 1) {
+                                        while (i < self.nodelist.items.len) : (i += 1) {
                                             // Check if this node is a direct child (not already assigned to another parent)
                                             var is_orphan = true;
                                             var j = mark.node_count_on_entry;
                                             while (j < i) : (j += 1) {
-                                                var child_iter = self.nodes.items[j].children(self.nodes.items);
+                                                var child_iter = self.nodelist.items[j].children(self.nodelist.items);
                                                 while (child_iter.next()) |child| {
                                                     if (child == i) {
                                                         is_orphan = false;
@@ -404,8 +404,8 @@ pub fn VM(
 
                                             if (is_orphan) {
                                                 // Connect orphan node to grandparent
-                                                self.nodes.items[i].next_sibling = self.nodes.items[parent_mark.node].first_child;
-                                                self.nodes.items[parent_mark.node].first_child = @intCast(i);
+                                                self.nodelist.items[i].next_sibling = self.nodelist.items[parent_mark.node].first_child;
+                                                self.nodelist.items[parent_mark.node].first_child = @intCast(i);
                                             }
                                         }
                                     }
@@ -455,7 +455,7 @@ pub fn VM(
                         self.codehead = failsave.nextcode;
                         self.markhead = failsave.markhead;
                         self.texthead = failsave.texthead;
-                        self.nodes.items.len = failsave.nodehead;
+                        self.nodelist.items.len = failsave.nodehead;
 
                         if (yield) return .Running else continue :vm self.codehead;
                     }
@@ -524,7 +524,7 @@ pub fn VM(
                 const st = try self.tick(.auto_continue, null);
                 switch (st) {
                     .Running => continue,
-                    .Ok => return self.nodes.items[0],
+                    .Ok => return self.nodelist.items[0],
                     .Fail => {
                         // Print error details before returning
                         self.formatError();

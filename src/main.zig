@@ -73,13 +73,13 @@ pub fn main() !void {
             },
         }
     }
-    const root = vm.nodes.items[0];
+    const root = vm.nodelist.items[0];
     std.debug.print("Parse succeeded! Root node: {s}\n", .{@tagName(root.tag)});
 
-    if (vm.nodes.items.len > 0) {
-        std.debug.print("\nAST ({} nodes total):\n", .{vm.nodes.items.len});
-        for (0..vm.nodes.items.len) |i| {
-            const n = vm.nodes.items[i];
+    if (vm.nodelist.items.len > 0) {
+        std.debug.print("\nAST ({} nodes total):\n", .{vm.nodelist.items.len});
+        for (0..vm.nodelist.items.len) |i| {
+            const n = vm.nodelist.items[i];
             std.debug.print("Node {}: {s} (children: first={?}, next={?})\n", .{ i, @tagName(n.tag), n.first_child, n.next_sibling });
         }
         std.debug.print("\nTree:\n", .{});
