@@ -3,6 +3,8 @@ comptime {
     _ = @import("pegvm.zig");
     _ = @import("debug_printer.zig");
     _ = @import("pegvmfun.zig");
+    _ = @import("pegvmfun_iter.zig");
+    _ = @import("test_pegvmfun.zig");
     //    _ = @import("zigparse.zig");
 }
 
