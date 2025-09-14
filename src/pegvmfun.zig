@@ -154,7 +154,6 @@ pub inline fn Grammar(rules: type) type {
     return struct {
         const Ops = OpFor(rules);
         const Op = Ops.Rel;
-        const AbsoluteOp = OpFor(rules).Abs;
         const RuleEnum = std.meta.DeclEnum(rules);
         const RuleOffsetMap = std.enums.EnumMap(RuleEnum, comptime_int);
 
@@ -336,7 +335,13 @@ pub const BranchAction = enum(u8) {
     rewind,
 };
 
+pub const AbsoluteOp = OpG(void, false);
+
 pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
+    if (rel == false and RuleTag != void) {
+        return AbsoluteOp;
+    }
+
     return union(enum) {
         /// Consume any byte that matches the bitset
         read: std.StaticBitSet(256),

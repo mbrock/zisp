@@ -13,25 +13,25 @@ pub const Parser = ParserGen;
 pub fn VM(comptime Program: []const pegvmfun.AbsoluteOp) type {
     return struct {
         const Self = @This();
-        
+
         ip: u32 = 0,
         sp: u32 = 0,
         text: [:0]const u8,
         saves: BoundedStack(SaveFrame, 128) = .{},
         calls: BoundedStack(CallFrame, 256) = .{},
-        
+
         pub const SaveFrame = struct {
             ip: u32,
             sp: u32,
             call_depth: u32,
         };
-        
+
         pub const CallFrame = struct {
             return_ip: u32,
             rule_id: u32,
             start_sp: u32,
         };
-        
+
         pub const Event = union(enum) {
             accept: void,
             reject: void,
@@ -41,7 +41,7 @@ pub fn VM(comptime Program: []const pegvmfun.AbsoluteOp) type {
             backtrack: struct { from: u32, to: u32 },
             match: struct { pos: u32, len: u32 },
         };
-        
+
         // Simple next() function - returns null when done
         pub fn next(self: *Self) ?Event {
             // The simple inline switch VM core
@@ -50,9 +50,9 @@ pub fn VM(comptime Program: []const pegvmfun.AbsoluteOp) type {
                     const op = Program[ip];
                     self.ip = ip + 1;
                     const ch = self.text[self.sp];
-                    
+
                     switch (op) {
-                        .op_charset => |set| {
+                        .read => |set| {
                             if (set.isSet(ch)) {
                                 const ev = Event{ .match = .{ .pos = self.sp, .len = 1 } };
                                 self.sp += 1;
@@ -60,30 +60,21 @@ pub fn VM(comptime Program: []const pegvmfun.AbsoluteOp) type {
                             }
                             return self.fail();
                         },
-                        
-                        .op_range => |r| {
-                            if (ch >= r.min and ch <= r.max) {
-                                const ev = Event{ .match = .{ .pos = self.sp, .len = 1 } };
-                                self.sp += 1;
-                                return ev;
-                            }
-                            return self.fail();
-                        },
-                        
-                        .op_invoke => |target| {
+
+                        .call => |target| {
                             self.calls.push(.{
                                 .return_ip = self.ip,
                                 .rule_id = target,
                                 .start_sp = self.sp,
                             }) catch unreachable;
-                            
+
                             const ev = Event{ .invoke_rule = .{ .id = target, .pos = self.sp } };
                             self.ip = target;
                             return ev;
                         },
-                        
-                        .op_ctrl => |ctrl| switch (ctrl.mode) {
-                            .rescue => {
+
+                        .branch => |ctrl| switch (ctrl.action) {
+                            .cope => {
                                 self.saves.push(.{
                                     .ip = ctrl.offset,
                                     .sp = self.sp,
@@ -91,21 +82,21 @@ pub fn VM(comptime Program: []const pegvmfun.AbsoluteOp) type {
                                 }) catch unreachable;
                                 return self.next(); // Silent, continue
                             },
-                            
+
                             .commit => {
                                 _ = self.saves.pop();
                                 self.ip = ctrl.offset;
                                 return self.next(); // Silent, continue
                             },
-                            
-                            .update => {
+
+                            .recope => {
                                 if (self.saves.len > 0) {
                                     self.saves.items[self.saves.len - 1].sp = self.sp;
                                 }
                                 self.ip = ctrl.offset;
                                 return self.next();
                             },
-                            
+
                             .rewind => {
                                 const save = self.saves.pop();
                                 self.sp = save.sp;
@@ -113,25 +104,25 @@ pub fn VM(comptime Program: []const pegvmfun.AbsoluteOp) type {
                                 return self.next();
                             },
                         },
-                        
-                        .op_return => {
+
+                        .ret => {
                             const frame = self.calls.pop();
                             self.ip = frame.return_ip;
                             return .{ .return_rule = .{
                                 .id = frame.rule_id,
                                 .start = frame.start_sp,
                                 .end = self.sp,
-                            }};
+                            } };
                         },
-                        
-                        .op_accept => return .accept,
-                        .op_reject => return self.fail(),
+
+                        .accept => return .accept,
+                        .fail => return self.fail(),
                     }
                 },
                 else => return null,
             }
         }
-        
+
         fn fail(self: *Self) ?Event {
             // Check if we're failing inside a rule
             if (self.calls.len > 0) {
@@ -142,22 +133,22 @@ pub fn VM(comptime Program: []const pegvmfun.AbsoluteOp) type {
                     return .{ .fail_rule = .{ .id = frame.rule_id, .pos = self.sp } };
                 }
             }
-            
+
             // Backtrack if we can
             if (self.saves.len > 0) {
                 const save = self.saves.pop();
                 const from = self.sp;
-                
+
                 self.ip = save.ip;
                 self.sp = save.sp;
                 self.calls.len = save.call_depth;
-                
+
                 return .{ .backtrack = .{ .from = from, .to = save.sp } };
             }
-            
+
             return .reject;
         }
-        
+
         // Simple run to completion
         pub fn run(self: *Self) bool {
             while (self.next()) |event| {
@@ -176,24 +167,24 @@ pub fn VM(comptime Program: []const pegvmfun.AbsoluteOp) type {
 pub fn Memoizer(comptime Inner: type) type {
     return struct {
         const Self = @This();
-        
+
         inner: Inner,
         cache: std.ArrayList(Entry) = .{},
         allocator: std.mem.Allocator,
-        
+
         const Entry = struct {
             rule: u32,
             pos: u32,
             end: u32,
             success: bool,
         };
-        
+
         pub const Event = Inner.Event; // Same event type!
-        
+
         pub fn deinit(self: *Self) void {
             self.cache.deinit(self.allocator);
         }
-        
+
         pub fn next(self: *Self) ?Event {
             // Internal iteration - we drive the inner iterator
             while (self.inner.next()) |event| {
@@ -205,7 +196,7 @@ pub fn Memoizer(comptime Inner: type) type {
                                 // Skip this rule invocation!
                                 const frame = self.inner.calls.pop();
                                 self.inner.ip = frame.return_ip;
-                                
+
                                 if (entry.success) {
                                     self.inner.sp = entry.end;
                                     // Synthesize a return event
@@ -213,37 +204,37 @@ pub fn Memoizer(comptime Inner: type) type {
                                         .id = inv.id,
                                         .start = inv.pos,
                                         .end = entry.end,
-                                    }};
+                                    } };
                                 } else {
                                     // Synthesize a fail event
                                     return .{ .fail_rule = .{
                                         .id = inv.id,
                                         .pos = inv.pos,
-                                    }};
+                                    } };
                                 }
                             }
                         }
                         return event; // Cache miss, proceed normally
                     },
-                    
+
                     .return_rule => |ret| {
                         // Store successful parse
                         self.storeCache(ret.id, ret.start, ret.end, true);
                         return event;
                     },
-                    
+
                     .fail_rule => |fail| {
                         // Store failed parse
                         self.storeCache(fail.id, fail.pos, fail.pos, false);
                         return event;
                     },
-                    
+
                     else => return event, // Pass through
                 }
             }
             return null;
         }
-        
+
         fn storeCache(self: *Self, rule: u32, pos: u32, end: u32, success: bool) void {
             if (self.cache.items.len >= 256) {
                 _ = self.cache.orderedRemove(0); // LRU
@@ -255,7 +246,7 @@ pub fn Memoizer(comptime Inner: type) type {
                 .success = success,
             }) catch {};
         }
-        
+
         pub fn run(self: *Self) bool {
             while (self.next()) |event| {
                 switch (event) {
@@ -273,12 +264,12 @@ pub fn Memoizer(comptime Inner: type) type {
 pub fn TreeBuilder(comptime Inner: type) type {
     return struct {
         const Self = @This();
-        
+
         inner: Inner,
         nodes: std.ArrayList(Node) = .{},
         stack: std.ArrayList(u32) = .{},
         allocator: std.mem.Allocator,
-        
+
         pub const Node = struct {
             rule: u32,
             start: u32,
@@ -286,14 +277,14 @@ pub fn TreeBuilder(comptime Inner: type) type {
             first_child: ?u32 = null,
             next_sibling: ?u32 = null,
         };
-        
+
         pub const Event = Inner.Event; // Same events flow through
-        
+
         pub fn deinit(self: *Self) void {
             self.nodes.deinit(self.allocator);
             self.stack.deinit(self.allocator);
         }
-        
+
         pub fn next(self: *Self) ?Event {
             while (self.inner.next()) |event| {
                 switch (event) {
@@ -306,12 +297,12 @@ pub fn TreeBuilder(comptime Inner: type) type {
                         }) catch {};
                         self.stack.append(self.allocator, @intCast(id)) catch {};
                     },
-                    
+
                     .return_rule => |ret| {
                         if (self.stack.pop()) |node_id| {
                             const idx = @as(usize, @intCast(node_id));
                             self.nodes.items[idx].end = ret.end;
-                            
+
                             // Connect to parent
                             if (self.stack.items.len > 0) {
                                 const parent = self.stack.items[self.stack.items.len - 1];
@@ -320,13 +311,13 @@ pub fn TreeBuilder(comptime Inner: type) type {
                             }
                         }
                     },
-                    
+
                     .fail_rule => {
                         if (self.stack.pop()) |failed| {
                             self.nodes.items.len = @intCast(failed); // Roll back
                         }
                     },
-                    
+
                     .backtrack => |b| {
                         // Roll back nodes past backtrack point
                         while (self.stack.items.len > 0) {
@@ -337,14 +328,14 @@ pub fn TreeBuilder(comptime Inner: type) type {
                             } else break;
                         }
                     },
-                    
+
                     else => {},
                 }
                 return event; // Always pass events through!
             }
             return null;
         }
-        
+
         pub fn run(self: *Self) bool {
             while (self.next()) |event| {
                 switch (event) {
@@ -355,7 +346,7 @@ pub fn TreeBuilder(comptime Inner: type) type {
             }
             return false;
         }
-        
+
         pub fn getTree(self: *Self) ?[]const Node {
             if (self.nodes.items.len > 0) {
                 return self.nodes.items;
@@ -369,13 +360,13 @@ pub fn TreeBuilder(comptime Inner: type) type {
 pub fn Logger(comptime Inner: type, comptime Writer: type) type {
     return struct {
         const Self = @This();
-        
+
         inner: Inner,
         writer: Writer,
         depth: u32 = 0,
-        
+
         pub const Event = Inner.Event;
-        
+
         pub fn next(self: *Self) ?Event {
             if (self.inner.next()) |event| {
                 // Log based on event type
@@ -414,13 +405,13 @@ pub fn Logger(comptime Inner: type, comptime Writer: type) type {
             }
             return null;
         }
-        
+
         fn indent(self: *Self) void {
             for (0..self.depth) |_| {
                 self.writer.writeAll("  ") catch {};
             }
         }
-        
+
         pub fn run(self: *Self) bool {
             while (self.next()) |event| {
                 switch (event) {
@@ -439,48 +430,38 @@ pub fn ParserGen(comptime Grammar: type) type {
     return struct {
         const Program = Grammar.compile();
         const BaseVM = VM(Program);
-        
+
         // Simple parse
         pub fn parse(text: [:0]const u8) bool {
             var vm = BaseVM{ .text = text };
             return vm.run();
         }
-        
+
         // Parse with memoization
         pub fn parseWithCache(text: [:0]const u8) bool {
-            var vm = Memoizer(BaseVM){ 
-                .inner = .{ .text = text } 
-            };
+            var vm = Memoizer(BaseVM){ .inner = .{ .text = text } };
             return vm.run();
         }
-        
+
         // Parse with AST
         pub fn parseWithTree(text: [:0]const u8) ?[]const TreeBuilder(BaseVM).Node {
-            var vm = TreeBuilder(BaseVM){ 
-                .inner = .{ .text = text } 
-            };
+            var vm = TreeBuilder(BaseVM){ .inner = .{ .text = text } };
             _ = vm.run();
             return vm.getTree();
         }
-        
+
         // Compose features!
         pub fn parseWithFeatures(text: [:0]const u8) ?[]const TreeBuilder(Memoizer(BaseVM)).Node {
             // Tree builder on top of memoizer on top of VM!
-            var vm = TreeBuilder(Memoizer(BaseVM)){
-                .inner = .{
-                    .inner = .{ .text = text }
-                }
-            };
+            var vm = TreeBuilder(Memoizer(BaseVM)){ .inner = .{ .inner = .{ .text = text } } };
             _ = vm.run();
             return vm.getTree();
         }
-        
+
         // Parse with logging
         pub fn parseWithLog(text: [:0]const u8, writer: anytype) bool {
             var vm = Logger(Memoizer(BaseVM), @TypeOf(writer)){
-                .inner = .{
-                    .inner = .{ .text = text }
-                },
+                .inner = .{ .inner = .{ .text = text } },
                 .writer = writer,
             };
             return vm.run();
@@ -490,7 +471,7 @@ pub fn ParserGen(comptime Grammar: type) type {
 
 // The key insight: Each layer is just a stateful function that:
 // 1. Has an inner iterator it drives
-// 2. Intercepts/modifies/observes events  
+// 2. Intercepts/modifies/observes events
 // 3. Maintains its own state
 // 4. Passes events through (usually)
 //
@@ -500,13 +481,13 @@ pub fn BoundedStack(comptime T: type, comptime capacity: usize) type {
     return struct {
         items: [capacity]T = undefined,
         len: usize = 0,
-        
+
         pub fn push(self: *@This(), item: T) !void {
             if (self.len >= capacity) return error.StackOverflow;
             self.items[self.len] = item;
             self.len += 1;
         }
-        
+
         pub fn pop(self: *@This()) T {
             self.len -= 1;
             return self.items[self.len];
