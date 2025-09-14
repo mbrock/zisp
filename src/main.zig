@@ -9,6 +9,11 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    if (args.len > 1 and std.mem.eql(u8, args[1], "--fun")) {
+        try zisp.pegvmfun.main();
+        return;
+    }
+
     // Check for --dump-pegcode flag
     if (args.len > 1 and std.mem.eql(u8, args[1], "--dump-pegcode")) {
         // Check for optional --outdir flag
