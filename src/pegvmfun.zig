@@ -132,11 +132,19 @@ pub fn main() !void {
     const stdout = &stdout_writer.interface;
 
     const G = comptime Grammar(demoGrammar);
-    const ops = comptime G.compile(true);
+    const ops = comptime G.compile(false);
     const tty = std.Io.tty.detectConfig(stdout_file);
 
-    inline for (ops, 0..) |op, i| {
-        try op.dump(tty, stdout, @intCast(i));
+    comptime var i = 0;
+    inline for (ops) |op| {
+        if (G.isStartOfRule(i)) |rule| {
+            try tty.setColor(stdout, .bold);
+            try stdout.print("\n&{t}:\n", .{rule});
+            try tty.setColor(stdout, .reset);
+        }
+
+        try op.dump(tty, stdout, i);
+        i += 1;
     }
 
     try stdout.flush();
@@ -170,11 +178,11 @@ pub inline fn Grammar(rules: type) type {
         // Helper: Calculate total size needed for a rule's opcodes
         fn calculateRuleSize(comptime rule: anytype) comptime_int {
             const fn_info = getRuleFunctionInfo(rule);
-            var size: comptime_int = 0;
+            var size: comptime_int = 1; // +1 for return
 
             inline for (fn_info.params) |param| {
                 if (param.type) |param_type| {
-                    size += compilePattern(param_type).len + 1; // +1 for return
+                    size += compilePattern(param_type).len;
                 } else {
                     @compileError("Grammar rule parameters must have types");
                 }
@@ -260,6 +268,16 @@ pub inline fn Grammar(rules: type) type {
             const link_info = comptime buildRuleOffsetMap();
             const ops = comptime emitOps(rel, link_info.map, link_info.total_size);
             return &ops;
+        }
+
+        pub fn isStartOfRule(ip: u32) ?RuleEnum {
+            const offset_map = comptime buildRuleOffsetMap().map;
+            inline for (comptime std.meta.tags(RuleEnum)) |rule_tag| {
+                if (offset_map.getAssertContains(rule_tag) == ip) {
+                    return rule_tag;
+                }
+            }
+            return null;
         }
 
         // Normalize a pattern type (e.g., []T becomes kleene(T))
