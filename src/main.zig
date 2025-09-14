@@ -1,5 +1,7 @@
 const std = @import("std");
 const zisp = @import("zisp");
+const pegiter = zisp.pegvmfun_iter;
+const pegvmfun = zisp.pegvmfun;
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -11,6 +13,11 @@ pub fn main() !void {
 
     if (args.len > 1 and std.mem.eql(u8, args[1], "--fun")) {
         try zisp.pegvmfun.main();
+        return;
+    }
+
+    if (args.len > 1 and std.mem.eql(u8, args[1], "--ast")) {
+        try runPegvmfunWithAST(allocator, if (args.len > 2) args[2] else null);
         return;
     }
 
@@ -205,4 +212,143 @@ fn dumpPegCode(writer: *std.Io.Writer) !void {
     }
 
     try writer.print("\n=== End of bytecode ===\n", .{});
+}
+
+fn runPegvmfunWithAST(allocator: std.mem.Allocator, maybe_file: ?[]const u8) !void {
+    // Read source code
+    const source = if (maybe_file) |filename| blk: {
+        const file = try std.fs.cwd().openFile(filename, .{});
+        defer file.close();
+        const contents = try file.readToEndAlloc(allocator, 1024 * 1024);
+        break :blk try allocator.dupeZ(u8, contents);
+    } else try allocator.dupeZ(u8, "ab");  // Default simple example
+    defer allocator.free(source);
+
+    std.debug.print("=== PEG Iterator Parser with AST Building ===\n", .{});
+    std.debug.print("Input: {s}\n\n", .{source});
+
+    // Create a very simple grammar: match 'a' 'b'
+    // With a rule invocation to show AST
+    const SimpleProgram = comptime blk: {
+        var prog: [5]pegvmfun.AbsoluteOp = undefined;
+        // Main: invoke ab rule
+        prog[0] = .{ .op_invoke = 2 };  // Call ab rule at position 2
+        prog[1] = .{ .op_accept = {} };
+        
+        // ab rule (at position 2): match 'a' then 'b'
+        prog[2] = .{ .op_charset = charSetFrom("a") };
+        prog[3] = .{ .op_charset = charSetFrom("b") };
+        prog[4] = .{ .op_return = {} };
+        break :blk prog;
+    };
+
+    // Create VM with TreeBuilder wrapper  
+    const BaseVM = pegiter.VM(&SimpleProgram);
+    const TreeVM = pegiter.TreeBuilder(BaseVM);
+    
+    var vm = TreeVM{
+        .inner = .{ .text = source },
+        .allocator = allocator,
+    };
+    defer vm.deinit();
+
+    // Track events as we parse
+    var event_count: usize = 0;
+    std.debug.print("Events:\n", .{});
+    
+    while (vm.next()) |event| {
+        event_count += 1;
+        switch (event) {
+            .invoke_rule => |inv| {
+                std.debug.print("  [{:4}] INVOKE rule {} at pos {}\n", .{ event_count, inv.id, inv.pos });
+            },
+            .return_rule => |ret| {
+                std.debug.print("  [{:4}] RETURN rule {} ({}..{})\n", .{ event_count, ret.id, ret.start, ret.end });
+            },
+            .fail_rule => |fail| {
+                std.debug.print("  [{:4}] FAIL   rule {} at pos {}\n", .{ event_count, fail.id, fail.pos });
+            },
+            .match => |m| {
+                const text_slice = if (m.pos + m.len <= source.len) source[m.pos..m.pos + m.len] else "<out of bounds>";
+                std.debug.print("  [{:4}] MATCH  \"{s}\" at {}..{}\n", .{ event_count, text_slice, m.pos, m.pos + m.len });
+            },
+            .backtrack => |b| {
+                std.debug.print("  [{:4}] BACKTRACK from {} to {}\n", .{ event_count, b.from, b.to });
+            },
+            .accept => {
+                std.debug.print("  [{:4}] ACCEPT\n", .{event_count});
+            },
+            .reject => {
+                std.debug.print("  [{:4}] REJECT\n", .{event_count});
+            },
+        }
+    }
+
+    // Print the AST
+    std.debug.print("\n=== AST Structure ===\n", .{});
+    if (vm.getTree()) |tree| {
+        std.debug.print("Total nodes: {}\n\n", .{tree.len});
+        for (tree, 0..) |node, i| {
+            std.debug.print("Node[{}]: rule={}, span={}..{}", .{ i, node.rule, node.start, node.end });
+            if (node.end <= source.len and node.end > node.start) {
+                const text = source[node.start..node.end];
+                if (text.len <= 20) {
+                    std.debug.print(" text=\"{s}\"", .{text});
+                }
+            }
+            if (node.first_child) |fc| {
+                std.debug.print(" first_child={}", .{fc});
+            }
+            if (node.next_sibling) |ns| {
+                std.debug.print(" next_sibling={}", .{ns});
+            }
+            std.debug.print("\n", .{});
+        }
+        
+        // Print tree structure
+        std.debug.print("\n=== Tree View ===\n", .{});
+        if (tree.len > 0) {
+            printASTNode(tree, 0, 0, source);
+        }
+    } else {
+        std.debug.print("No tree built (parse may have failed)\n", .{});
+    }
+}
+
+fn printASTNode(tree: anytype, idx: usize, depth: usize, source: []const u8) void {
+    const node = tree[idx];
+    
+    // Indent
+    for (0..depth) |_| std.debug.print("  ", .{});
+    
+    // Print node info
+    std.debug.print("Rule {}", .{node.rule});
+    if (node.end <= source.len and node.end > node.start) {
+        const text = source[node.start..node.end];
+        if (text.len <= 30) {
+            std.debug.print(": \"{s}\"", .{text});
+        }
+    }
+    std.debug.print("\n", .{});
+    
+    // Print children
+    if (node.first_child) |first| {
+        var child_idx = first;
+        while (child_idx < tree.len) {
+            printASTNode(tree, child_idx, depth + 1, source);
+            if (tree[child_idx].next_sibling) |next| {
+                child_idx = next;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+fn charSetFrom(chars: []const u8) std.StaticBitSet(256) {
+    comptime var set = std.StaticBitSet(256).initEmpty();
+    inline for (chars) |c| {
+        set.set(c);
+    }
+    return set;
 }

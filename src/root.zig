@@ -12,3 +12,4 @@ pub const parse = @import("pegvm.zig");
 pub const debug = @import("debug_printer.zig");
 pub const zigmini = @import("zigparse.zig");
 pub const pegvmfun = @import("pegvmfun.zig");
+pub const pegvmfun_iter = @import("pegvmfun_iter.zig");
