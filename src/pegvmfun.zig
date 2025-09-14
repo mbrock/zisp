@@ -127,10 +127,11 @@ pub fn main() !void {
     const stdout = &stdout_writer.interface;
 
     const G = comptime Grammar(demoGrammar);
-    const ops = comptime G.compile();
+    const ops = comptime G.compile(true);
+    const tty = std.Io.tty.detectConfig(stdout_file);
 
     inline for (ops, 0..) |op, i| {
-        try op.dump(stdout, @intCast(i));
+        try op.dump(tty, stdout, @intCast(i));
     }
 
     try stdout.flush();
@@ -193,10 +194,11 @@ pub inline fn Grammar(rules: type) type {
 
         // Pass 2: Emit opcodes with resolved addresses (linking)
         fn emitLinkedOpcodes(
+            comptime rel: bool,
             comptime offset_map: RuleOffsetMap,
             comptime total_size: comptime_int,
-        ) [total_size]AbsoluteOp {
-            var code: [total_size]AbsoluteOp = undefined;
+        ) [total_size]OpG(RuleEnum, rel) {
+            var code: [total_size]OpG(RuleEnum, rel) = undefined;
             var i: usize = 0;
 
             inline for (comptime std.meta.declarations(rules)) |decl| {
@@ -209,10 +211,8 @@ pub inline fn Grammar(rules: type) type {
                 inline for (fn_info.params) |param| {
                     if (param.type) |param_type| {
                         const relative_ops = compilePattern(param_type);
-
-                        // Link each opcode (resolve symbolic references and relative jumps)
                         for (relative_ops) |op| {
-                            code[i] = linkOpcode(op, offset_map, @intCast(i));
+                            code[i] = if (rel) op else linkOpcode(op, offset_map, @intCast(i));
                             i += 1;
                         }
                     }
@@ -250,13 +250,13 @@ pub inline fn Grammar(rules: type) type {
         }
 
         // Main compilation entry point
-        pub fn compile() []const AbsoluteOp {
+        pub fn compile(comptime rel: bool) []const OpG(RuleEnum, rel) {
             // Two-pass compilation:
             // 1. Build symbol table (calculate offsets)
             const link_info = comptime buildRuleOffsetMap();
 
             // 2. Emit and link opcodes
-            const linked_program = comptime emitLinkedOpcodes(link_info.map, link_info.total_size);
+            const linked_program = comptime emitLinkedOpcodes(rel, link_info.map, link_info.total_size);
 
             return &linked_program;
         }
@@ -346,19 +346,36 @@ pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
             };
         }
 
-        pub fn dump(op: @This(), w: *std.Io.Writer, ip: u32) !void {
-            try w.print("  0x{x:0>4}    ", .{ip});
+        pub fn dump(
+            op: @This(),
+            tty: std.Io.tty.Config,
+            w: *std.Io.Writer,
+            ip: u32,
+        ) !void {
+            try tty.setColor(w, .dim);
+            try w.print("  0x{x:0>4}  ", .{ip});
+            try tty.setColor(w, .reset);
             try w.print("{s}  ", .{op.name()});
 
             switch (op) {
                 .BRANCH => |ctrl| {
-                    try w.print("0x{x:0>4}", .{ctrl.offset});
+                    if (rel == false) {
+                        try tty.setColor(w, .cyan);
+                        try w.print("0x{x:0>4}", .{ctrl.offset});
+                    } else {
+                        try tty.setColor(w, .green);
+                        if (ctrl.offset > 0)
+                            try w.writeByte('+');
+                        try w.print("{d}", .{ctrl.offset});
+                    }
                 },
                 .INVOKE => |target| {
                     if (@TypeOf(target) == u32) {
+                        try tty.setColor(w, .cyan);
                         try w.print("0x{x:0>4}", .{target});
                     } else {
-                        try w.print("{s}", .{@tagName(target)});
+                        try tty.setColor(w, .blue);
+                        try w.print("&{s}", .{@tagName(target)});
                     }
                 },
                 .DEMAND => |cs| {
@@ -377,7 +394,9 @@ pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
                                 // We have a range of at least 3 characters
                                 // Print start of range
                                 try printChar(w, @intCast(i));
+                                try tty.setColor(w, .dim);
                                 try w.writeAll("-");
+                                try tty.setColor(w, .reset);
                                 // Print end of range
                                 try printChar(w, @intCast(range_end));
                                 i = range_end;
@@ -398,6 +417,7 @@ pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
                 inline else => {},
             }
 
+            try tty.setColor(w, .reset);
             try w.writeAll("\n");
         }
     };
