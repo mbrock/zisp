@@ -120,96 +120,17 @@ fn printChar(writer: anytype, c: u8) !void {
         try writer.print("\\x{x:0>2}", .{c});
 }
 
-pub fn dumpInstruction(writer: anytype, ip: u32, op: anytype) !void {
-    // Print instruction address
-    try writer.print("  0x{x:0>4}    ", .{ip});
-
-    switch (op) {
-        .op_ctrl => |ctrl| {
-            const mode_str = switch (ctrl.mode) {
-                .rescue => "RESCUE",
-                .commit => "COMMIT",
-                .update => "UPDATE",
-                .rewind => "REWIND",
-            };
-            try writer.print("{s}  0x{x:0>4}\n", .{ mode_str, ctrl.offset });
-        },
-        .op_invoke => |target| {
-            if (@TypeOf(target) == u32) {
-                try writer.print("INVOKE  0x{x:0>4}\n", .{target});
-            } else {
-                try writer.print("INVOKE  {s}\n", .{@tagName(target)});
-            }
-        },
-        .op_return => {
-            try writer.print("RETURN\n", .{});
-        },
-        .op_reject => {
-            try writer.print("REJECT\n", .{});
-        },
-        .op_accept => {
-            try writer.print("ACCEPT\n", .{});
-        },
-        .op_charset => |cs| {
-            try writer.print("CHARSET ", .{});
-            var first = true;
-            var i: u32 = 0;
-            while (i < 256) : (i += 1) {
-                if (cs.isSet(i)) {
-                    if (!first) try writer.writeAll(" ");
-                    first = false;
-
-                    // Check for ranges - look ahead for consecutive characters
-                    var range_end = i;
-                    while (range_end + 1 < 256 and cs.isSet(range_end + 1)) : (range_end += 1) {}
-
-                    if (range_end > i + 1) {
-                        // We have a range of at least 3 characters
-                        // Print start of range
-                        try printChar(writer, @intCast(i));
-                        try writer.writeAll("-");
-                        // Print end of range
-                        try printChar(writer, @intCast(range_end));
-                        i = range_end;
-                    } else if (range_end == i + 1) {
-                        // Just two consecutive characters - print them separately
-                        try printChar(writer, @intCast(i));
-                        try writer.writeAll(" ");
-                        try printChar(writer, @intCast(range_end));
-                        i = range_end;
-                    } else {
-                        // Single character
-                        try printChar(writer, @intCast(i));
-                    }
-                }
-            }
-            try writer.print("\n", .{});
-        },
-        .op_range => |r| {
-            try writer.print("RANGE   ", .{});
-            try printChar(writer, r.min);
-            try writer.writeAll("-");
-            try printChar(writer, r.max);
-            try writer.print("\n", .{});
-        },
-    }
-}
-
 pub fn main() !void {
     const stdout_file = std.fs.File.stdout();
     var buffer: [4096]u8 = undefined;
     var stdout_writer = stdout_file.writer(&buffer);
     const stdout = &stdout_writer.interface;
 
-    const relops = comptime Grammar(demoGrammar).compile();
+    const G = comptime Grammar(demoGrammar);
+    const ops = comptime G.compile();
 
-    // Print header
-    try stdout.print("=== PEG VM Instructions ===\n", .{});
-    try stdout.print("Total: {} instructions\n\n", .{relops.len});
-
-    // Dump each instruction with proper formatting
-    inline for (relops, 0..) |op, i| {
-        try dumpInstruction(stdout, @intCast(i), op);
+    inline for (ops, 0..) |op, i| {
+        try op.dump(stdout, @intCast(i));
     }
 
     try stdout.flush();
@@ -271,9 +192,12 @@ pub inline fn Grammar(rules: type) type {
         }
 
         // Pass 2: Emit opcodes with resolved addresses (linking)
-        fn emitLinkedOpcodes(comptime offset_map: RuleOffsetMap, comptime total_size: comptime_int) [total_size]AbsoluteOp {
-            var linked_ops: [total_size]AbsoluteOp = undefined;
-            var write_position: usize = 0;
+        fn emitLinkedOpcodes(
+            comptime offset_map: RuleOffsetMap,
+            comptime total_size: comptime_int,
+        ) [total_size]AbsoluteOp {
+            var code: [total_size]AbsoluteOp = undefined;
+            var i: usize = 0;
 
             inline for (comptime std.meta.declarations(rules)) |decl| {
                 const rule_fn = @field(rules, decl.name);
@@ -288,14 +212,14 @@ pub inline fn Grammar(rules: type) type {
 
                         // Link each opcode (resolve symbolic references and relative jumps)
                         for (relative_ops) |op| {
-                            linked_ops[write_position] = linkOpcode(op, offset_map, @intCast(write_position));
-                            write_position += 1;
+                            code[i] = linkOpcode(op, offset_map, @intCast(i));
+                            i += 1;
                         }
                     }
                 }
             }
 
-            return linked_ops;
+            return code;
         }
 
         // Helper: Apply a relative offset to an absolute address
@@ -310,13 +234,13 @@ pub inline fn Grammar(rules: type) type {
         // Helper: Convert relative opcode to absolute opcode (resolve symbols and addresses)
         fn linkOpcode(op: Op, offset_map: RuleOffsetMap, current_ip: u32) AbsoluteOp {
             return switch (op) {
-                .op_invoke => |rule_tag| blk: {
+                .INVOKE => |rule_tag| blk: {
                     const absolute_offset = offset_map.getAssertContains(rule_tag);
-                    break :blk .{ .op_invoke = @intCast(absolute_offset) };
+                    break :blk .{ .INVOKE = @intCast(absolute_offset) };
                 },
-                .op_ctrl => |c| .{
-                    .op_ctrl = .{
-                        .mode = c.mode,
+                .BRANCH => |c| .{
+                    .BRANCH = .{
+                        .action = c.action,
                         .offset = bump(current_ip + 1, c.offset),
                     },
                 },
@@ -386,25 +310,96 @@ pub inline fn Grammar(rules: type) type {
     };
 }
 
-pub const CtrlMode = enum(u8) {
-    rescue, // Push backtrack frame, jump on fail
-    commit, // Pop frame and jump forward
-    update, // Update frame position and jump (for loops)
-    rewind, // Pop frame, reset text position, and jump
+pub const BranchAction = enum(u8) {
+    /// Push backtrack frame, jump on fail
+    RESCUE,
+    /// Pop frame and jump forward
+    COMMIT,
+    /// Update frame position and jump (for loops)
+    UPDATE,
+    /// Pop frame, reset text position, and jump
+    REWIND,
 };
 
 pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
     return union(enum) {
-        op_charset: std.StaticBitSet(256),
-        op_range: struct { min: u8, max: u8 },
-        op_invoke: if (rel) RuleTag else u32,
-        op_ctrl: struct {
-            mode: CtrlMode,
+        /// Consume any byte that matches the bitset
+        DEMAND: std.StaticBitSet(256),
+        /// Call a rule (by tag or absolute address)
+        INVOKE: if (rel) RuleTag else u32,
+        /// Frame-manipulating instruction
+        BRANCH: struct {
+            action: BranchAction,
             offset: if (rel) i32 else u32 = undefined,
         },
-        op_reject: void, // Fail current alternative
-        op_return: void,
-        op_accept: void,
+        /// Fail and backtrack
+        REJECT: void,
+        /// Return from rule invocation
+        RETURN: void,
+        /// Successful parse completion
+        ACCEPT: void,
+
+        fn name(op: @This()) []const u8 {
+            return switch (op) {
+                .BRANCH => |x| @tagName(x.action),
+                inline else => @tagName(op),
+            };
+        }
+
+        pub fn dump(op: @This(), w: *std.Io.Writer, ip: u32) !void {
+            try w.print("  0x{x:0>4}    ", .{ip});
+            try w.print("{s}  ", .{op.name()});
+
+            switch (op) {
+                .BRANCH => |ctrl| {
+                    try w.print("0x{x:0>4}", .{ctrl.offset});
+                },
+                .INVOKE => |target| {
+                    if (@TypeOf(target) == u32) {
+                        try w.print("0x{x:0>4}", .{target});
+                    } else {
+                        try w.print("{s}", .{@tagName(target)});
+                    }
+                },
+                .DEMAND => |cs| {
+                    var first = true;
+                    var i: u32 = 0;
+                    while (i < 256) : (i += 1) {
+                        if (cs.isSet(i)) {
+                            if (!first) try w.writeAll(" ");
+                            first = false;
+
+                            // Check for ranges - look ahead for consecutive characters
+                            var range_end = i;
+                            while (range_end + 1 < 256 and cs.isSet(range_end + 1)) : (range_end += 1) {}
+
+                            if (range_end > i + 1) {
+                                // We have a range of at least 3 characters
+                                // Print start of range
+                                try printChar(w, @intCast(i));
+                                try w.writeAll("-");
+                                // Print end of range
+                                try printChar(w, @intCast(range_end));
+                                i = range_end;
+                            } else if (range_end == i + 1) {
+                                // Just two consecutive characters - print them separately
+                                try printChar(w, @intCast(i));
+                                try w.writeAll(" ");
+                                try printChar(w, @intCast(range_end));
+                                i = range_end;
+                            } else {
+                                // Single character
+                                try printChar(w, @intCast(i));
+                            }
+                        }
+                    }
+                },
+
+                inline else => {},
+            }
+
+            try w.writeAll("\n");
+        }
     };
 }
 
@@ -423,7 +418,7 @@ pub fn OpFor(comptime Rules: type) type {
                     for (s) |c| {
                         bs.set(c);
                     }
-                    return &[_]Op{.{ .op_charset = bs }};
+                    return &[_]Op{.{ .DEMAND = bs }};
                 }
             };
         }
@@ -431,7 +426,11 @@ pub fn OpFor(comptime Rules: type) type {
         pub fn range(a: u8, b: u8) type {
             return struct {
                 pub fn compile(_: type) []const Op {
-                    return &[_]Op{.{ .op_range = .{ .min = a, .max = b } }};
+                    var bs = std.bit_set.ArrayBitSet(usize, 256).initEmpty();
+                    for (a..b + 1) |c| {
+                        bs.set(c);
+                    }
+                    return &[_]Op{.{ .DEMAND = bs }};
                 }
             };
         }
@@ -439,7 +438,7 @@ pub fn OpFor(comptime Rules: type) type {
         pub fn call(r: RuleTag) type {
             return struct {
                 pub fn compile(_: type) []const Op {
-                    return &[_]Op{.{ .op_invoke = r }};
+                    return &[_]Op{.{ .INVOKE = r }};
                 }
             };
         }
@@ -461,31 +460,31 @@ pub fn OpFor(comptime Rules: type) type {
                     return self;
                 }
 
-                fn addCtrl(self: *Self, mode: CtrlMode, lbl: labels) *Self {
+                fn addCtrl(self: *Self, mode: BranchAction, lbl: labels) *Self {
                     self.forwards[self.forward_count] = .{
                         .op_index = self.op_count,
                         .label_id = lbl,
                     };
                     self.forward_count += 1;
-                    self.ops[self.op_count] = .{ .op_ctrl = .{ .mode = mode } };
+                    self.ops[self.op_count] = .{ .BRANCH = .{ .action = mode } };
                     self.op_count += 1;
                     return self;
                 }
 
                 pub fn rescue(self: *Self, lbl: labels) *Self {
-                    return self.addCtrl(.rescue, lbl);
+                    return self.addCtrl(.RESCUE, lbl);
                 }
 
                 pub fn commit(self: *Self, lbl: labels) *Self {
-                    return self.addCtrl(.commit, lbl);
+                    return self.addCtrl(.COMMIT, lbl);
                 }
 
                 pub fn update(self: *Self, lbl: labels) *Self {
-                    return self.addCtrl(.update, lbl);
+                    return self.addCtrl(.UPDATE, lbl);
                 }
 
                 pub fn rewind(self: *Self, lbl: labels) *Self {
-                    return self.addCtrl(.rewind, lbl);
+                    return self.addCtrl(.REWIND, lbl);
                 }
 
                 pub fn emit(self: *Self, new_ops: []const Op) *Self {
@@ -497,7 +496,7 @@ pub fn OpFor(comptime Rules: type) type {
                 }
 
                 pub fn reject(self: *Self) *Self {
-                    self.ops[self.op_count] = .{ .op_reject = {} };
+                    self.ops[self.op_count] = .{ .REJECT = {} };
                     self.op_count += 1;
                     return self;
                 }
@@ -508,7 +507,7 @@ pub fn OpFor(comptime Rules: type) type {
                         const fwd = self.forwards[i];
                         const target = self.labels.getAssertContains(fwd.label_id);
                         const from = @as(i32, @intCast(fwd.op_index));
-                        self.ops[fwd.op_index].op_ctrl.offset = target - from - 1;
+                        self.ops[fwd.op_index].BRANCH.offset = target - from - 1;
                     }
 
                     // Return slice of actual ops
