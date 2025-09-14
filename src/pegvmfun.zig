@@ -38,12 +38,53 @@
 
 const std = @import("std");
 
+pub const demoGrammar = Grammar(struct {
+    // Rules define their grammatical structure entirely via parameter types.
+    // The grammar compiler compiles the parameter types to opcode sequences.
+    //
+    // At runtime, the rule functions are actually called with arguments
+    // being values of the input text that matched the parameter types.
+    //
+    // The return type of a rule function is the type of value that the rule
+    // produces when it successfully matches input text.
+
+    pub fn integer(
+        d0: range('1', '9'),
+        ds: []range('0', '9'),
+        _: call(skip),
+    ) !i32 {
+        const small = try std.fmt.parseInt(i32, ds.slice, 10);
+        const order = ds.len;
+        return @as(i32, d0) * std.math.pow(10, order) + small;
+    }
+
+    pub fn skip(_: []charset(" \t\n\r")) void {}
+});
+
+pub fn main() !void {
+    const stdout = std.fs.File.stdout();
+    var outbuf: [1024]u8 = undefined;
+    var outfs = stdout.writer(&outbuf);
+    var out = &outfs.interface;
+
+    const relops = comptime demoGrammar.compile();
+
+    inline for (relops) |op| {
+        try out.print("{any}\n", .{op});
+    }
+    try out.flush();
+}
+
 pub inline fn Grammar(rules: type) type {
     return struct {
-        pub fn compile() []const Op {
+        pub fn compile() []const AbsoluteOp {
             comptime var i = 0;
-            inline for (comptime std.meta.declarations(rules)) |decl| {
-                const rule = @field(rules, decl.name);
+            const rulekind = std.meta.DeclEnum(rules);
+            comptime var map = std.enums.EnumMap(rulekind, comptime_int).init(.{});
+
+            inline for (comptime std.meta.tags(rulekind)) |tag| {
+                const rule = @field(rules, @tagName(tag));
+                map.put(tag, i);
                 switch (@typeInfo(@TypeOf(rule))) {
                     .@"fn" => |f| {
                         inline for (f.params) |param| {
@@ -60,7 +101,7 @@ pub inline fn Grammar(rules: type) type {
                 }
             }
 
-            var ops: [i]Op = undefined;
+            var ops: [i]AbsoluteOp = undefined;
             var pos: usize = 0;
             inline for (comptime std.meta.declarations(rules)) |decl| {
                 const rule = @field(rules, decl.name);
@@ -69,8 +110,13 @@ pub inline fn Grammar(rules: type) type {
                         inline for (f.params) |param| {
                             if (param.type) |t| {
                                 const part = compile1(t);
-                                @memmove(ops[pos..][0..part.len], part);
-                                pos += part.len;
+                                for (part) |op| {
+                                    ops[pos] = switch (op) {
+                                        .op_invoke => |s| .{ .op_invoke = map.getAssertContains(@field(rulekind, s)) },
+                                        inline else => |opi, tag| @unionInit(AbsoluteOp, @tagName(tag), opi),
+                                    };
+                                    pos += 1;
+                                }
                             } else {
                                 @compileError("Grammar rule parameters must have types");
                             }
@@ -102,133 +148,58 @@ pub inline fn Grammar(rules: type) type {
                 },
             }
         }
-
-        pub fn describe(out: *std.Io.Writer) !void {
-            try out.print("Grammar {{\n", .{});
-            inline for (comptime std.meta.declarations(rules)) |decl| {
-                const rule = @field(rules, decl.name);
-                try out.print("  {s}: ", .{decl.name});
-                switch (@typeInfo(@TypeOf(rule))) {
-                    .@"fn" => |f| {
-                        inline for (f.params) |param| {
-                            if (param.type) |t| {
-                                try describeParamType(out, t);
-                            } else {
-                                try out.print("unknown param type\n", .{});
-                            }
-                            try out.print(" >> ", .{});
-                        }
-                    },
-                    else => {
-                        try out.print("unknown rule type\n", .{});
-                    },
-                }
-
-                try out.print("\n", .{});
-            }
-            try out.print("}}\n", .{});
-        }
-
-        fn describeParamType(out: *std.Io.Writer, t: type) !void {
-            switch (@typeInfo(t)) {
-                .pointer => |pt| {
-                    if (pt.size == .slice) {
-                        try out.print("many0(", .{});
-                        try describeParamType(out, pt.child);
-                        try out.print(")", .{});
-                    }
-                },
-
-                .@"struct" => {
-                    try t.describe(out);
-                },
-
-                else => |x| try out.print("{any}", .{x}),
-            }
-        }
     };
 }
 
-pub const Op = union(enum) {
-    op_charset: std.StaticBitSet(256),
-    op_range: struct { a: u8, b: u8 },
-    op_call: []const u8,
-    op_rescue: comptime_int,
-    op_commit: comptime_int,
-    op_reject: void,
-};
+pub fn OpG(comptime rel: bool) type {
+    return union(enum) {
+        op_charset: std.StaticBitSet(256),
+        op_range: struct { min: u8, max: u8 },
+        op_invoke: if (rel) []const u8 else comptime_int,
+        op_rescue: comptime_int,
+        op_commit: comptime_int,
+        op_reject: void,
+    };
+}
+
+pub const Op = OpG(true);
+pub const AbsoluteOp = OpG(false);
 
 pub fn charset(s: []const u8) type {
     return struct {
-        pub fn describe(out: *std.Io.Writer) !void {
-            try out.print("charset(\"{s}\")", .{s});
-        }
-
         pub fn compile(_: type) []const Op {
             var bs = std.bit_set.ArrayBitSet(usize, 256).initEmpty();
             for (s) |c| {
                 bs.set(c);
             }
-            return &[1]Op{.{ .op_charset = bs }};
+            return &[_]Op{.{ .op_charset = bs }};
         }
     };
 }
 
 pub fn range(a: u8, b: u8) type {
     return struct {
-        pub fn describe(out: *std.Io.Writer) !void {
-            try out.print("range('{c}'-'{d}')", .{ a, b });
-        }
-
         pub fn compile(_: type) []const Op {
-            return &[1]Op{.{ .op_range = .{ .a = a, .b = b } }};
+            return &[_]Op{.{ .op_range = .{ .min = a, .max = b } }};
         }
     };
 }
 
 pub fn call(r: anytype) type {
     return struct {
-        pub fn describe(out: *std.Io.Writer) !void {
-            try out.print("call({any})", .{&r});
-        }
-
         pub fn compile(g: type) []const Op {
             inline for (comptime std.meta.declarations(g)) |decl| {
+                // Look up a rule's name by identity comparison on its function body.
+                // Note: function bodies, not function pointers.
+                // Hence known at compile time.
                 if (@TypeOf(@field(g, decl.name)) == @TypeOf(r)) {
                     if (@field(g, decl.name) == r) {
-                        return &[1]Op{.{ .op_call = decl.name }};
+                        return &[_]Op{.{ .op_invoke = decl.name }};
                     }
                 }
             }
+
             @compileError("call to unknown rule " ++ @typeName(@TypeOf(r)));
         }
     };
-}
-
-pub const demoGrammar = Grammar(struct {
-    pub fn skip(_: []charset(" \t\n\r")) void {}
-
-    pub fn integer(
-        d0: range('1', '9'),
-        ds: []range('0', '9'),
-        _: call(skip),
-    ) !i32 {
-        const small = try std.fmt.parseInt(i32, ds.slice, 10);
-        const order = ds.len;
-        return @as(i32, d0) * std.math.pow(10, order) + small;
-    }
-});
-
-pub fn main() !void {
-    const stdout = std.fs.File.stdout();
-    var outbuf: [1024]u8 = undefined;
-    var outfs = stdout.writer(&outbuf);
-    var out = &outfs.interface;
-
-    try demoGrammar.describe(out);
-    try out.print("\n", .{});
-    inline for (demoGrammar.compile()) |op| {
-        try out.print("{any}\n", .{op});
-    }
-    try out.flush();
 }
