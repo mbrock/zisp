@@ -38,6 +38,20 @@
 
 const std = @import("std");
 
+fn tupleTypes(T: anytype) [T.len]type {
+    var types: [T.len]type = undefined;
+    comptime var i = 0;
+    inline for (T) |t| {
+        types[i] = t;
+        i += 1;
+    }
+    return types;
+}
+
+pub fn Seq(parts: anytype) type {
+    return std.meta.Tuple(&tupleTypes(parts));
+}
+
 pub const demoGrammar = struct {
     // Rules define their grammatical structure entirely via parameter types.
     // The grammar compiler compiles the parameter types to opcode sequences.
@@ -49,74 +63,77 @@ pub const demoGrammar = struct {
     // produces when it successfully matches input text.
 
     const Op = OpFor(@This());
-
-    pub fn integer(
-        _: Op.range('1', '9'),
-        _: []Op.range('0', '9'),
-        _: Op.call(.skip),
-    ) void {}
+    const call = Op.call;
+    const charset = Op.charset;
+    const range = Op.range;
 
     pub fn value(
         _: union(enum) {
-            integer: Op.call(.integer),
-            array: Op.call(.array),
+            integer: call(.integer),
+            array: call(.array),
         },
     ) void {}
 
-    pub fn array(
-        _: Op.charset("["),
-        _: Op.call(.skip),
-        _: []Op.call(.value),
-        _: Op.call(.skip),
-        _: Op.charset("]"),
+    pub fn integer(
+        _: range('1', '9'),
+        _: []range('0', '9'),
+        _: call(.skip),
     ) void {}
 
-    pub fn skip(_: []Op.charset(" \t\n\r")) void {}
+    pub fn array(_: Seq(.{
+        charset("["),
+        call(.skip),
+        []call(.value),
+        call(.skip),
+        charset("]"),
+        call(.skip),
+    })) void {}
+
+    pub fn skip(_: []charset(" \t\n\r")) void {}
 };
 
-const AsciiCtrl = enum(u8) {
-    NUL = 0x00,
-    SOH = 0x01,
-    STK = 0x02,
-    ETX = 0x03,
-    EOT = 0x04,
-    ENQ = 0x05,
-    ACK = 0x06,
-    BEL = 0x07,
-    BS = 0x08,
-    @"\\t" = 0x09,
-    @"\\n" = 0x0a,
-    VT = 0x0b,
-    NP = 0x0c,
-    @"\\r" = 0x0d,
-    SO = 0x0e,
-    SI = 0x0f,
-    DLE = 0x10,
-    DC1 = 0x11,
-    DC2 = 0x12,
-    DC3 = 0x13,
-    DC4 = 0x14,
-    NAK = 0x15,
-    SYN = 0x16,
-    ETB = 0x17,
-    CAN = 0x18,
-    EM = 0x19,
-    SUB = 0x1a,
-    ESC = 0x1b,
-    FS = 0x1c,
-    GS = 0x1d,
-    RS = 0x1e,
-    US = 0x1f,
-    SP = 0x20,
-    _,
+const ctrls = [_][]const u8{
+    "␀",
+    "␁",
+    "␂",
+    "␃",
+    "␄",
+    "␅",
+    "␆",
+    "␇",
+    "␈",
+    "␉",
+    "␤",
+    "␋",
+    "␌",
+    "␍",
+    "␎",
+    "␏",
+    "␐",
+    "␑",
+    "␒",
+    "␓",
+    "␔",
+    "␕",
+    "␖",
+    "␗",
+    "␘",
+    "␙",
+    "␚",
+    "␛",
+    "␜",
+    "␝",
+    "␞",
+    "␟",
+    "␠",
 };
 
 fn printChar(tty: std.Io.tty.Config, writer: *std.Io.Writer, c: u8) !void {
-    if (std.enums.tagName(AsciiCtrl, @enumFromInt(c))) |ctrl| {
-        try tty.setColor(writer, .bright_green);
-        try writer.print("{s}", .{ctrl});
+    if (c < ctrls.len) {
+        try tty.setColor(writer, .magenta);
+        try writer.print("{s}", .{ctrls[c]});
     } else if (c >= 33 and c < 127 and c != '\\') {
-        try tty.setColor(writer, .green);
+        try tty.setColor(writer, .yellow);
         try writer.print("{c}", .{c});
     } else {
         try tty.setColor(writer, .yellow);
@@ -125,13 +142,13 @@ fn printChar(tty: std.Io.tty.Config, writer: *std.Io.Writer, c: u8) !void {
     try tty.setColor(writer, .reset);
 }
 
-pub fn main() !void {
+pub fn dumpCode(T: type) !void {
     const stdout_file = std.fs.File.stdout();
     var buffer: [4096]u8 = undefined;
     var stdout_writer = stdout_file.writer(&buffer);
     const stdout = &stdout_writer.interface;
 
-    const G = comptime Grammar(demoGrammar);
+    const G = comptime Grammar(T);
     const ops = comptime G.compile(false);
     const tty = std.Io.tty.detectConfig(stdout_file);
 
@@ -143,10 +160,96 @@ pub fn main() !void {
             try tty.setColor(stdout, .reset);
         }
 
+        try stdout.print("{d: >4} ", .{i});
         try op.dump(tty, stdout, i);
         i += 1;
     }
 
+    try stdout.flush();
+}
+
+pub fn main() !void {
+    const G = demoGrammar;
+    const VM = @import("pegvmfun_iter.zig").VM;
+
+    try dumpCode(G);
+
+    const stdout_file = std.fs.File.stdout();
+    var buffer: [4096]u8 = undefined;
+    var stdout_writer = stdout_file.writer(&buffer);
+    const stdout = &stdout_writer.interface;
+    const tty = std.Io.tty.detectConfig(stdout_file);
+
+    const P = Grammar(G);
+    const ops = comptime P.compile(false);
+
+    const TestVM = VM(ops);
+
+    var vm = TestVM{ .text = "[[1] [2]]" };
+
+    try tty.setColor(stdout, .bold);
+    try stdout.print("\n\nparsing \"{s}\"\n\n", .{vm.text});
+
+    try printChar(tty, stdout, vm.text[vm.sp]);
+    try tty.setColor(stdout, .reset);
+    try stdout.writeAll("    ");
+
+    var sp = vm.sp;
+
+    // Manually iterate through events
+    while (true) {
+        try tty.setColor(stdout, .cyan);
+        try stdout.print("{d: >4} ", .{vm.ip});
+        try tty.setColor(stdout, .reset);
+        try tty.setColor(stdout, .dim);
+        try stdout.splatBytesAll("┆", vm.calls.len + 1);
+        try stdout.writeAll(" ");
+        try ops[vm.ip].dump(tty, stdout, vm.ip);
+        if (vm.next()) |outcome| {
+            if (vm.sp != sp) {
+                try tty.setColor(stdout, .bold);
+            } else {
+                try tty.setColor(stdout, .dim);
+            }
+            if (vm.sp < vm.text.len) {
+                try printChar(tty, stdout, vm.text[vm.sp]);
+                try stdout.writeAll(" ");
+            } else {
+                try tty.setColor(stdout, .bright_green);
+                try stdout.print("⌀ ", .{});
+            }
+            try tty.setColor(stdout, .reset);
+
+            if (outcome) |ev| {
+                try tty.setColor(stdout, .red);
+                switch (ev) {
+                    .backtrack => try stdout.print("⎋ ", .{}),
+                    .match => try stdout.print("⇥ ", .{}),
+                    .invoke_rule => try stdout.print("❡ ", .{}),
+                    .return_rule => try stdout.print("⏎ ", .{}),
+                }
+                try tty.setColor(stdout, .reset);
+                try tty.setColor(stdout, .dim);
+                try stdout.writeAll(" ");
+                try tty.setColor(stdout, .reset);
+
+                try stdout.flush();
+            } else {
+                try tty.setColor(stdout, .bright_green);
+                try stdout.print("✓\n", .{});
+                try tty.setColor(stdout, .reset);
+                break;
+            }
+        } else |e| {
+            try tty.setColor(stdout, .red);
+            try stdout.print("✕ {t}\n", .{e});
+            break;
+        }
+
+        sp = vm.sp;
+    }
+
+    try tty.setColor(stdout, .reset);
     try stdout.flush();
 }
 
@@ -229,7 +332,7 @@ pub inline fn Grammar(rules: type) type {
                         }
                     }
                 }
-                code[i] = .{ .ret = {} };
+                code[i] = .{ .done = {} };
                 i += 1;
             }
 
@@ -292,6 +395,26 @@ pub inline fn Grammar(rules: type) type {
                 .optional => |opt| {
                     return Ops.optional(normalize(opt.child));
                 },
+                .@"struct" => |s| {
+                    if (@hasDecl(t, "compile")) {
+                        return t;
+                    }
+
+                    // Transform struct into sequence of its fields
+                    // Build nested sequences directly instead of using array
+                    if (s.fields.len == 0) {
+                        return Ops.empty();
+                    } else if (s.fields.len == 1) {
+                        return normalize(s.fields[0].type);
+                    } else {
+                        // Build sequence by nesting pairs
+                        var seq_type = normalize(s.fields[0].type);
+                        inline for (s.fields[1..]) |field| {
+                            seq_type = Ops.seq2(seq_type, normalize(field.type));
+                        }
+                        return seq_type;
+                    }
+                },
                 .@"union" => |u| {
                     if (u.tag_type != null) {
                         // Transform enum union into choice of its variants
@@ -319,20 +442,21 @@ pub inline fn Grammar(rules: type) type {
 
         // Compile a single pattern type to opcodes
         pub fn compilePattern(comptime t: type) []const Op {
-            return normalize(t).compile(rules);
+            const normalized = normalize(t);
+            return normalized.compile(rules);
         }
     };
 }
 
 pub const BranchAction = enum(u8) {
     /// Push backtrack frame, jump on fail
-    cope,
+    push,
     /// Pop frame and jump forward
-    commit,
+    drop,
     /// Update frame position and jump (for loops)
-    recope,
+    move,
     /// Pop frame, reset text position, and jump
-    rewind,
+    wipe,
 };
 
 pub const AbsoluteOp = OpG(void, false);
@@ -355,9 +479,9 @@ pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
         /// Fail and backtrack
         fail: void,
         /// Return from rule invocation
-        ret: void,
+        done: void,
         /// Successful parse completion
-        accept: void,
+        over: void,
 
         fn name(op: @This()) []const u8 {
             return switch (op) {
@@ -370,18 +494,16 @@ pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
             op: @This(),
             tty: std.Io.tty.Config,
             w: *std.Io.Writer,
-            ip: u32,
+            _: u32,
         ) !void {
-            try tty.setColor(w, .dim);
-            try w.print("  0x{x:0>4}  ", .{ip});
             try tty.setColor(w, .reset);
-            try w.print("{s: <6}  ", .{op.name()});
+            try w.print("{s} ", .{op.name()});
 
             switch (op) {
                 .branch => |ctrl| {
                     if (rel == false) {
                         try tty.setColor(w, .cyan);
-                        try w.print("0x{x:0>4}", .{ctrl.offset});
+                        try w.print("→{d}", .{ctrl.offset});
                     } else {
                         try tty.setColor(w, .cyan);
                         if (ctrl.offset > 0)
@@ -392,20 +514,16 @@ pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
                 .call => |target| {
                     if (@TypeOf(target) == u32) {
                         try tty.setColor(w, .cyan);
-                        try w.print("0x{x:0>4}", .{target});
+                        try w.print("→{d}", .{target});
                     } else {
                         try tty.setColor(w, .blue);
                         try w.print("&{s}", .{@tagName(target)});
                     }
                 },
                 .read => |cs| {
-                    var first = true;
                     var i: u32 = 0;
                     while (i < 256) : (i += 1) {
                         if (cs.isSet(i)) {
-                            if (!first) try w.writeAll(" ");
-                            first = false;
-
                             // Check for ranges - look ahead for consecutive characters
                             var range_end = i;
                             while (range_end + 1 < 256 and cs.isSet(range_end + 1)) : (range_end += 1) {}
@@ -415,7 +533,7 @@ pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
                                 // Print start of range
                                 try printChar(tty, w, @intCast(i));
                                 try tty.setColor(w, .dim);
-                                try w.writeAll("-");
+                                try w.writeAll("⋯");
                                 try tty.setColor(w, .reset);
                                 // Print end of range
                                 try printChar(tty, w, @intCast(range_end));
@@ -547,9 +665,9 @@ pub fn OpFor(comptime Rules: type) type {
                     var a = Assembler(part.len + 2, enum { loop, done }){};
                     return a
                         .mark(.loop)
-                        .ctrl(.cope, .done)
+                        .ctrl(.push, .done)
                         .emit(part)
-                        .ctrl(.recope, .loop)
+                        .ctrl(.move, .loop)
                         .mark(.done)
                         .build();
                 }
@@ -562,11 +680,39 @@ pub fn OpFor(comptime Rules: type) type {
                     const part = inner.compile(g);
                     var a = Assembler(part.len + 2, enum { done }){};
                     return a
-                        .ctrl(.cope, .done)
+                        .ctrl(.push, .done)
                         .emit(part)
-                        .ctrl(.commit, .done)
+                        .ctrl(.drop, .done)
                         .mark(.done)
                         .build();
+                }
+            };
+        }
+
+        pub fn empty() type {
+            return struct {
+                pub fn compile(_: type) []const Op {
+                    return &[_]Op{};
+                }
+            };
+        }
+
+        pub fn seq2(comptime first: type, comptime second: type) type {
+            return struct {
+                pub fn compile(g: type) []const Op {
+                    const ops1 = first.compile(g);
+                    const ops2 = second.compile(g);
+                    var ops: [ops1.len + ops2.len]Op = undefined;
+                    var i: usize = 0;
+                    for (ops1) |op| {
+                        ops[i] = op;
+                        i += 1;
+                    }
+                    for (ops2) |op| {
+                        ops[i] = op;
+                        i += 1;
+                    }
+                    return &ops;
                 }
             };
         }
@@ -579,9 +725,9 @@ pub fn OpFor(comptime Rules: type) type {
                     var a = Assembler(ops1.len + ops2.len + 2, enum { alt2, done }){};
 
                     return a
-                        .ctrl(.cope, .alt2)
+                        .ctrl(.push, .alt2)
                         .emit(ops1)
-                        .ctrl(.commit, .done)
+                        .ctrl(.drop, .done)
                         .mark(.alt2)
                         .emit(ops2)
                         .mark(.done)
@@ -596,9 +742,9 @@ pub fn OpFor(comptime Rules: type) type {
                     const part = inner.compile(g);
                     var a = Assembler(part.len + 3, enum { fail, success }){};
                     return a
-                        .ctrl(.cope, .fail)
+                        .ctrl(.push, .fail)
                         .emit(part)
-                        .ctrl(.rewind, .success)
+                        .ctrl(.wipe, .success)
                         .mark(.fail)
                         .reject()
                         .mark(.success)
@@ -613,9 +759,9 @@ pub fn OpFor(comptime Rules: type) type {
                     const part = inner.compile(g);
                     var a = Assembler(part.len + 3, enum { fail, success }){};
                     return a
-                        .ctrl(.cope, .success)
+                        .ctrl(.push, .success)
                         .emit(part)
-                        .ctrl(.rewind, .fail)
+                        .ctrl(.wipe, .fail)
                         .mark(.fail)
                         .reject()
                         .mark(.success)
