@@ -74,18 +74,145 @@ pub const demoGrammar = struct {
     pub fn skip(_: []Op.charset(" \t\n\r")) void {}
 };
 
+const AsciiCtrl = enum(u8) {
+    nul = 0x00,
+    soh = 0x01,
+    stx = 0x02,
+    etx = 0x03,
+    eot = 0x04,
+    enq = 0x05,
+    ack = 0x06,
+    bel = 0x07,
+    bs = 0x08,
+    ht = 0x09,
+    nl = 0x0a,
+    vt = 0x0b,
+    np = 0x0c,
+    cr = 0x0d,
+    so = 0x0e,
+    si = 0x0f,
+    dle = 0x10,
+    dc1 = 0x11,
+    dc2 = 0x12,
+    dc3 = 0x13,
+    dc4 = 0x14,
+    nak = 0x15,
+    syn = 0x16,
+    etb = 0x17,
+    can = 0x18,
+    em = 0x19,
+    sub = 0x1a,
+    esc = 0x1b,
+    fs = 0x1c,
+    gs = 0x1d,
+    rs = 0x1e,
+    us = 0x1f,
+    sp = 0x20,
+    _,
+};
+
+fn printChar(writer: anytype, c: u8) !void {
+    if (std.enums.tagName(AsciiCtrl, @enumFromInt(c))) |ctrl|
+        try writer.print("{s}", .{ctrl})
+    else if (c >= 33 and c < 127 and c != '\\')
+        try writer.print("{c}", .{c})
+    else
+        try writer.print("\\x{x:0>2}", .{c});
+}
+
+pub fn dumpInstruction(writer: anytype, ip: u32, op: anytype) !void {
+    // Print instruction address
+    try writer.print("  0x{x:0>4}    ", .{ip});
+
+    switch (op) {
+        .op_ctrl => |ctrl| {
+            const mode_str = switch (ctrl.mode) {
+                .rescue => "RESCUE",
+                .commit => "COMMIT",
+                .update => "UPDATE",
+                .rewind => "REWIND",
+            };
+            try writer.print("{s}  0x{x:0>4}\n", .{ mode_str, ctrl.offset });
+        },
+        .op_invoke => |target| {
+            if (@TypeOf(target) == u32) {
+                try writer.print("INVOKE  0x{x:0>4}\n", .{target});
+            } else {
+                try writer.print("INVOKE  {s}\n", .{@tagName(target)});
+            }
+        },
+        .op_return => {
+            try writer.print("RETURN\n", .{});
+        },
+        .op_reject => {
+            try writer.print("REJECT\n", .{});
+        },
+        .op_accept => {
+            try writer.print("ACCEPT\n", .{});
+        },
+        .op_charset => |cs| {
+            try writer.print("CHARSET ", .{});
+            var first = true;
+            var i: u32 = 0;
+            while (i < 256) : (i += 1) {
+                if (cs.isSet(i)) {
+                    if (!first) try writer.writeAll(" ");
+                    first = false;
+
+                    // Check for ranges - look ahead for consecutive characters
+                    var range_end = i;
+                    while (range_end + 1 < 256 and cs.isSet(range_end + 1)) : (range_end += 1) {}
+
+                    if (range_end > i + 1) {
+                        // We have a range of at least 3 characters
+                        // Print start of range
+                        try printChar(writer, @intCast(i));
+                        try writer.writeAll("-");
+                        // Print end of range
+                        try printChar(writer, @intCast(range_end));
+                        i = range_end;
+                    } else if (range_end == i + 1) {
+                        // Just two consecutive characters - print them separately
+                        try printChar(writer, @intCast(i));
+                        try writer.writeAll(" ");
+                        try printChar(writer, @intCast(range_end));
+                        i = range_end;
+                    } else {
+                        // Single character
+                        try printChar(writer, @intCast(i));
+                    }
+                }
+            }
+            try writer.print("\n", .{});
+        },
+        .op_range => |r| {
+            try writer.print("RANGE   ", .{});
+            try printChar(writer, r.min);
+            try writer.writeAll("-");
+            try printChar(writer, r.max);
+            try writer.print("\n", .{});
+        },
+    }
+}
+
 pub fn main() !void {
-    const stdout = std.fs.File.stdout();
-    var outbuf: [1024]u8 = undefined;
-    var outfs = stdout.writer(&outbuf);
-    var out = &outfs.interface;
+    const stdout_file = std.fs.File.stdout();
+    var buffer: [4096]u8 = undefined;
+    var stdout_writer = stdout_file.writer(&buffer);
+    const stdout = &stdout_writer.interface;
 
     const relops = comptime Grammar(demoGrammar).compile();
 
-    inline for (relops) |op| {
-        try out.print("{any}\n", .{op});
+    // Print header
+    try stdout.print("=== PEG VM Instructions ===\n", .{});
+    try stdout.print("Total: {} instructions\n\n", .{relops.len});
+
+    // Dump each instruction with proper formatting
+    inline for (relops, 0..) |op, i| {
+        try dumpInstruction(stdout, @intCast(i), op);
     }
-    try out.flush();
+
+    try stdout.flush();
 }
 
 pub inline fn Grammar(rules: type) type {
