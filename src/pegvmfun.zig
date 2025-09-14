@@ -75,49 +75,54 @@ pub const demoGrammar = struct {
 };
 
 const AsciiCtrl = enum(u8) {
-    nul = 0x00,
-    soh = 0x01,
-    stx = 0x02,
-    etx = 0x03,
-    eot = 0x04,
-    enq = 0x05,
-    ack = 0x06,
-    bel = 0x07,
-    bs = 0x08,
-    ht = 0x09,
-    nl = 0x0a,
-    vt = 0x0b,
-    np = 0x0c,
-    cr = 0x0d,
-    so = 0x0e,
-    si = 0x0f,
-    dle = 0x10,
-    dc1 = 0x11,
-    dc2 = 0x12,
-    dc3 = 0x13,
-    dc4 = 0x14,
-    nak = 0x15,
-    syn = 0x16,
-    etb = 0x17,
-    can = 0x18,
-    em = 0x19,
-    sub = 0x1a,
-    esc = 0x1b,
-    fs = 0x1c,
-    gs = 0x1d,
-    rs = 0x1e,
-    us = 0x1f,
-    sp = 0x20,
+    NUL = 0x00,
+    SOH = 0x01,
+    STK = 0x02,
+    ETX = 0x03,
+    EOT = 0x04,
+    ENQ = 0x05,
+    ACK = 0x06,
+    BEL = 0x07,
+    BS = 0x08,
+    @"\\t" = 0x09,
+    @"\\n" = 0x0a,
+    VT = 0x0b,
+    NP = 0x0c,
+    @"\\r" = 0x0d,
+    SO = 0x0e,
+    SI = 0x0f,
+    DLE = 0x10,
+    DC1 = 0x11,
+    DC2 = 0x12,
+    DC3 = 0x13,
+    DC4 = 0x14,
+    NAK = 0x15,
+    SYN = 0x16,
+    ETB = 0x17,
+    CAN = 0x18,
+    EM = 0x19,
+    SUB = 0x1a,
+    ESC = 0x1b,
+    FS = 0x1c,
+    GS = 0x1d,
+    RS = 0x1e,
+    US = 0x1f,
+    SP = 0x20,
     _,
 };
 
-fn printChar(writer: anytype, c: u8) !void {
-    if (std.enums.tagName(AsciiCtrl, @enumFromInt(c))) |ctrl|
-        try writer.print("{s}", .{ctrl})
-    else if (c >= 33 and c < 127 and c != '\\')
-        try writer.print("{c}", .{c})
-    else
+fn printChar(tty: std.Io.tty.Config, writer: *std.Io.Writer, c: u8) !void {
+    if (std.enums.tagName(AsciiCtrl, @enumFromInt(c))) |ctrl| {
+        try tty.setColor(writer, .bright_green);
+        try writer.print("{s}", .{ctrl});
+    } else if (c >= 33 and c < 127 and c != '\\') {
+        try tty.setColor(writer, .green);
+        try writer.print("{c}", .{c});
+    } else {
+        try tty.setColor(writer, .yellow);
         try writer.print("\\x{x:0>2}", .{c});
+    }
+    try tty.setColor(writer, .reset);
 }
 
 pub fn main() !void {
@@ -169,7 +174,7 @@ pub inline fn Grammar(rules: type) type {
 
             inline for (fn_info.params) |param| {
                 if (param.type) |param_type| {
-                    size += compilePattern(param_type).len;
+                    size += compilePattern(param_type).len + 1; // +1 for return
                 } else {
                     @compileError("Grammar rule parameters must have types");
                 }
@@ -193,7 +198,7 @@ pub inline fn Grammar(rules: type) type {
         }
 
         // Pass 2: Emit opcodes with resolved addresses (linking)
-        fn emitLinkedOpcodes(
+        fn emitOps(
             comptime rel: bool,
             comptime offset_map: RuleOffsetMap,
             comptime total_size: comptime_int,
@@ -217,6 +222,8 @@ pub inline fn Grammar(rules: type) type {
                         }
                     }
                 }
+                code[i] = .{ .ret = {} };
+                i += 1;
             }
 
             return code;
@@ -232,16 +239,16 @@ pub inline fn Grammar(rules: type) type {
         }
 
         // Helper: Convert relative opcode to absolute opcode (resolve symbols and addresses)
-        fn linkOpcode(op: Op, offset_map: RuleOffsetMap, current_ip: u32) AbsoluteOp {
+        fn linkOpcode(op: Op, map: RuleOffsetMap, ip: u32) AbsoluteOp {
             return switch (op) {
-                .INVOKE => |rule_tag| blk: {
-                    const absolute_offset = offset_map.getAssertContains(rule_tag);
-                    break :blk .{ .INVOKE = @intCast(absolute_offset) };
+                .call => |rule_tag| blk: {
+                    const absolute_offset = map.getAssertContains(rule_tag);
+                    break :blk .{ .call = @intCast(absolute_offset) };
                 },
-                .BRANCH => |c| .{
-                    .BRANCH = .{
+                .branch => |c| .{
+                    .branch = .{
                         .action = c.action,
-                        .offset = bump(current_ip + 1, c.offset),
+                        .offset = bump(ip + 1, c.offset),
                     },
                 },
                 // Non-address opcodes pass through unchanged
@@ -249,40 +256,32 @@ pub inline fn Grammar(rules: type) type {
             };
         }
 
-        // Main compilation entry point
         pub fn compile(comptime rel: bool) []const OpG(RuleEnum, rel) {
-            // Two-pass compilation:
-            // 1. Build symbol table (calculate offsets)
             const link_info = comptime buildRuleOffsetMap();
-
-            // 2. Emit and link opcodes
-            const linked_program = comptime emitLinkedOpcodes(rel, link_info.map, link_info.total_size);
-
-            return &linked_program;
+            const ops = comptime emitOps(rel, link_info.map, link_info.total_size);
+            return &ops;
         }
 
         // Normalize a pattern type (e.g., []T becomes kleene(T))
-        fn normalizePatternType(comptime t: type) type {
+        fn normalize(comptime t: type) type {
             switch (@typeInfo(t)) {
-                .pointer => |ptr_info| {
-                    if (ptr_info.size == .slice) {
-                        // Transform []T into kleene(T)
-                        return Ops.kleene(normalizePatternType(ptr_info.child));
+                .pointer => |ptr| {
+                    if (ptr.size == .slice) {
+                        return Ops.kleene(normalize(ptr.child));
                     } else {
-                        @compileError("Only slices are supported as pointer types in grammar patterns");
+                        @compileError("bad pattern type");
                     }
                 },
-                .optional => |opt_info| {
-                    // Transform ?T into optional(T)
-                    return Ops.optional(normalizePatternType(opt_info.child));
+                .optional => |opt| {
+                    return Ops.optional(normalize(opt.child));
                 },
-                .@"union" => |union_info| {
-                    if (union_info.tag_type != null) {
+                .@"union" => |u| {
+                    if (u.tag_type != null) {
                         // Transform enum union into choice of its variants
-                        var variants: [union_info.fields.len]type = undefined;
+                        var variants: [u.fields.len]type = undefined;
                         var idx: usize = 0;
-                        inline for (union_info.fields) |field| {
-                            variants[idx] = normalizePatternType(field.type);
+                        inline for (u.fields) |field| {
+                            variants[idx] = normalize(field.type);
                             idx += 1;
                         }
 
@@ -303,45 +302,43 @@ pub inline fn Grammar(rules: type) type {
 
         // Compile a single pattern type to opcodes
         pub fn compilePattern(comptime t: type) []const Op {
-            const normalized = normalizePatternType(t);
-            // After normalization, everything is a struct with compile method
-            return normalized.compile(rules);
+            return normalize(t).compile(rules);
         }
     };
 }
 
 pub const BranchAction = enum(u8) {
     /// Push backtrack frame, jump on fail
-    RESCUE,
+    cope,
     /// Pop frame and jump forward
-    COMMIT,
+    commit,
     /// Update frame position and jump (for loops)
-    UPDATE,
+    recope,
     /// Pop frame, reset text position, and jump
-    REWIND,
+    rewind,
 };
 
 pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
     return union(enum) {
         /// Consume any byte that matches the bitset
-        DEMAND: std.StaticBitSet(256),
+        read: std.StaticBitSet(256),
         /// Call a rule (by tag or absolute address)
-        INVOKE: if (rel) RuleTag else u32,
+        call: if (rel) RuleTag else u32,
         /// Frame-manipulating instruction
-        BRANCH: struct {
+        branch: struct {
             action: BranchAction,
             offset: if (rel) i32 else u32 = undefined,
         },
         /// Fail and backtrack
-        REJECT: void,
+        fail: void,
         /// Return from rule invocation
-        RETURN: void,
+        ret: void,
         /// Successful parse completion
-        ACCEPT: void,
+        accept: void,
 
         fn name(op: @This()) []const u8 {
             return switch (op) {
-                .BRANCH => |x| @tagName(x.action),
+                .branch => |x| @tagName(x.action),
                 inline else => @tagName(op),
             };
         }
@@ -355,21 +352,21 @@ pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
             try tty.setColor(w, .dim);
             try w.print("  0x{x:0>4}  ", .{ip});
             try tty.setColor(w, .reset);
-            try w.print("{s}  ", .{op.name()});
+            try w.print("{s: <6}  ", .{op.name()});
 
             switch (op) {
-                .BRANCH => |ctrl| {
+                .branch => |ctrl| {
                     if (rel == false) {
                         try tty.setColor(w, .cyan);
                         try w.print("0x{x:0>4}", .{ctrl.offset});
                     } else {
-                        try tty.setColor(w, .green);
+                        try tty.setColor(w, .cyan);
                         if (ctrl.offset > 0)
                             try w.writeByte('+');
                         try w.print("{d}", .{ctrl.offset});
                     }
                 },
-                .INVOKE => |target| {
+                .call => |target| {
                     if (@TypeOf(target) == u32) {
                         try tty.setColor(w, .cyan);
                         try w.print("0x{x:0>4}", .{target});
@@ -378,7 +375,7 @@ pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
                         try w.print("&{s}", .{@tagName(target)});
                     }
                 },
-                .DEMAND => |cs| {
+                .read => |cs| {
                     var first = true;
                     var i: u32 = 0;
                     while (i < 256) : (i += 1) {
@@ -393,22 +390,22 @@ pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
                             if (range_end > i + 1) {
                                 // We have a range of at least 3 characters
                                 // Print start of range
-                                try printChar(w, @intCast(i));
+                                try printChar(tty, w, @intCast(i));
                                 try tty.setColor(w, .dim);
                                 try w.writeAll("-");
                                 try tty.setColor(w, .reset);
                                 // Print end of range
-                                try printChar(w, @intCast(range_end));
+                                try printChar(tty, w, @intCast(range_end));
                                 i = range_end;
                             } else if (range_end == i + 1) {
                                 // Just two consecutive characters - print them separately
-                                try printChar(w, @intCast(i));
+                                try printChar(tty, w, @intCast(i));
                                 try w.writeAll(" ");
-                                try printChar(w, @intCast(range_end));
+                                try printChar(tty, w, @intCast(range_end));
                                 i = range_end;
                             } else {
                                 // Single character
-                                try printChar(w, @intCast(i));
+                                try printChar(tty, w, @intCast(i));
                             }
                         }
                     }
@@ -425,9 +422,9 @@ pub fn OpG(comptime RuleTag: type, comptime rel: bool) type {
 
 pub fn OpFor(comptime Rules: type) type {
     return struct {
-        pub const RuleTag = std.meta.DeclEnum(Rules);
-        pub const Rel = OpG(RuleTag, true);
-        pub const Abs = OpG(RuleTag, false);
+        pub const Tag = std.meta.DeclEnum(Rules);
+        pub const Rel = OpG(Tag, true);
+        pub const Abs = OpG(Tag, false);
 
         const Op = Rel;
 
@@ -438,7 +435,7 @@ pub fn OpFor(comptime Rules: type) type {
                     for (s) |c| {
                         bs.set(c);
                     }
-                    return &[_]Op{.{ .DEMAND = bs }};
+                    return &[_]Op{.{ .read = bs }};
                 }
             };
         }
@@ -450,74 +447,57 @@ pub fn OpFor(comptime Rules: type) type {
                     for (a..b + 1) |c| {
                         bs.set(c);
                     }
-                    return &[_]Op{.{ .DEMAND = bs }};
+                    return &[_]Op{.{ .read = bs }};
                 }
             };
         }
 
-        pub fn call(r: RuleTag) type {
+        pub fn call(r: Tag) type {
             return struct {
                 pub fn compile(_: type) []const Op {
-                    return &[_]Op{.{ .INVOKE = r }};
+                    return &[_]Op{.{ .call = r }};
                 }
             };
         }
 
-        // Parameterized comptime assembler
-        pub fn AsmComptime(comptime max_ops: usize, comptime labels: type) type {
+        pub fn Assembler(comptime max_ops: usize, comptime labels: type) type {
             const max_labels = @typeInfo(labels).@"enum".fields.len;
             return struct {
                 const Self = @This();
 
                 ops: [max_ops]Op = undefined,
-                op_count: usize = 0,
-                labels: std.EnumMap(labels, i32) = std.EnumMap(labels, i32).init(.{}),
+                n: usize = 0,
+                map: std.EnumMap(labels, i32) = std.EnumMap(labels, i32).init(.{}),
                 forwards: [max_labels * 2]struct { op_index: usize, label_id: labels } = undefined,
                 forward_count: usize = 0,
 
                 pub fn mark(self: *Self, lbl: labels) *Self {
-                    self.labels.put(lbl, @intCast(self.op_count));
+                    self.map.put(lbl, @intCast(self.n));
                     return self;
                 }
 
-                fn addCtrl(self: *Self, mode: BranchAction, lbl: labels) *Self {
+                fn ctrl(self: *Self, mode: BranchAction, lbl: labels) *Self {
                     self.forwards[self.forward_count] = .{
-                        .op_index = self.op_count,
+                        .op_index = self.n,
                         .label_id = lbl,
                     };
                     self.forward_count += 1;
-                    self.ops[self.op_count] = .{ .BRANCH = .{ .action = mode } };
-                    self.op_count += 1;
+                    self.ops[self.n] = .{ .branch = .{ .action = mode } };
+                    self.n += 1;
                     return self;
-                }
-
-                pub fn rescue(self: *Self, lbl: labels) *Self {
-                    return self.addCtrl(.RESCUE, lbl);
-                }
-
-                pub fn commit(self: *Self, lbl: labels) *Self {
-                    return self.addCtrl(.COMMIT, lbl);
-                }
-
-                pub fn update(self: *Self, lbl: labels) *Self {
-                    return self.addCtrl(.UPDATE, lbl);
-                }
-
-                pub fn rewind(self: *Self, lbl: labels) *Self {
-                    return self.addCtrl(.REWIND, lbl);
                 }
 
                 pub fn emit(self: *Self, new_ops: []const Op) *Self {
                     for (new_ops) |op| {
-                        self.ops[self.op_count] = op;
-                        self.op_count += 1;
+                        self.ops[self.n] = op;
+                        self.n += 1;
                     }
                     return self;
                 }
 
                 pub fn reject(self: *Self) *Self {
-                    self.ops[self.op_count] = .{ .REJECT = {} };
-                    self.op_count += 1;
+                    self.ops[self.n] = .{ .fail = {} };
+                    self.n += 1;
                     return self;
                 }
 
@@ -525,68 +505,60 @@ pub fn OpFor(comptime Rules: type) type {
                     // Resolve forward references
                     for (0..self.forward_count) |i| {
                         const fwd = self.forwards[i];
-                        const target = self.labels.getAssertContains(fwd.label_id);
+                        const target = self.map.getAssertContains(fwd.label_id);
                         const from = @as(i32, @intCast(fwd.op_index));
-                        self.ops[fwd.op_index].BRANCH.offset = target - from - 1;
+                        self.ops[fwd.op_index].branch.offset = target - from - 1;
                     }
 
                     // Return slice of actual ops
-                    const result = self.ops[0..self.op_count];
+                    const result = self.ops[0..self.n];
                     return result;
                 }
             };
         }
 
-        // Kleene star using fluent assembly
         pub fn kleene(comptime inner: type) type {
             return struct {
                 pub fn compile(g: type) []const Op {
-                    const inner_ops = inner.compile(g);
-
-                    // kleene needs: inner.len + 2 ops (rescue, update), 2 labels
-                    var a = AsmComptime(inner_ops.len + 2, enum { loop, done }){};
-
+                    const part = inner.compile(g);
+                    var a = Assembler(part.len + 2, enum { loop, done }){};
                     return a
                         .mark(.loop)
-                        .rescue(.done)
-                        .emit(inner_ops)
-                        .update(.loop)
+                        .ctrl(.cope, .done)
+                        .emit(part)
+                        .ctrl(.recope, .loop)
                         .mark(.done)
                         .build();
                 }
             };
         }
 
-        // Optional using fluent assembly
         pub fn optional(comptime inner: type) type {
             return struct {
                 pub fn compile(g: type) []const Op {
-                    const inner_ops = inner.compile(g);
-
-                    var a = AsmComptime(inner_ops.len + 2, enum { done }){};
-
+                    const part = inner.compile(g);
+                    var a = Assembler(part.len + 2, enum { done }){};
                     return a
-                        .rescue(.done)
-                        .emit(inner_ops)
-                        .commit(.done)
+                        .ctrl(.cope, .done)
+                        .emit(part)
+                        .ctrl(.commit, .done)
                         .mark(.done)
                         .build();
                 }
             };
         }
 
-        // Choice using fluent assembly
         pub fn choice(comptime alt1: type, comptime alt2: type) type {
             return struct {
                 pub fn compile(g: type) []const Op {
                     const ops1 = alt1.compile(g);
                     const ops2 = alt2.compile(g);
-                    var a = AsmComptime(ops1.len + ops2.len + 2, enum { alt2, done }){};
+                    var a = Assembler(ops1.len + ops2.len + 2, enum { alt2, done }){};
 
                     return a
-                        .rescue(.alt2)
+                        .ctrl(.cope, .alt2)
                         .emit(ops1)
-                        .commit(.done)
+                        .ctrl(.commit, .done)
                         .mark(.alt2)
                         .emit(ops2)
                         .mark(.done)
@@ -595,17 +567,15 @@ pub fn OpFor(comptime Rules: type) type {
             };
         }
 
-        // Positive lookahead using fluent assembly
         pub fn lookahead(comptime inner: type) type {
             return struct {
                 pub fn compile(g: type) []const Op {
-                    const inner_ops = inner.compile(g);
-                    var a = AsmComptime(inner_ops.len + 3, enum { fail, success }){};
-
+                    const part = inner.compile(g);
+                    var a = Assembler(part.len + 3, enum { fail, success }){};
                     return a
-                        .rescue(.fail)
-                        .emit(inner_ops)
-                        .rewind(.success)
+                        .ctrl(.cope, .fail)
+                        .emit(part)
+                        .ctrl(.rewind, .success)
                         .mark(.fail)
                         .reject()
                         .mark(.success)
@@ -614,17 +584,15 @@ pub fn OpFor(comptime Rules: type) type {
             };
         }
 
-        // Negative lookahead using fluent assembly
         pub fn neglookahead(comptime inner: type) type {
             return struct {
                 pub fn compile(g: type) []const Op {
-                    const inner_ops = inner.compile(g);
-                    var a = AsmComptime(inner_ops.len + 3, enum { fail, success }){};
-
+                    const part = inner.compile(g);
+                    var a = Assembler(part.len + 3, enum { fail, success }){};
                     return a
-                        .rescue(.success)
-                        .emit(inner_ops)
-                        .rewind(.fail)
+                        .ctrl(.cope, .success)
+                        .emit(part)
+                        .ctrl(.rewind, .fail)
                         .mark(.fail)
                         .reject()
                         .mark(.success)
