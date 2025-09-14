@@ -77,74 +77,130 @@ pub fn main() !void {
 
 pub inline fn Grammar(rules: type) type {
     return struct {
-        pub fn compile() []const AbsoluteOp {
-            comptime var i = 0;
-            const rulekind = std.meta.DeclEnum(rules);
-            comptime var map = std.enums.EnumMap(rulekind, comptime_int).init(.{});
-
-            inline for (comptime std.meta.tags(rulekind)) |tag| {
-                const rule = @field(rules, @tagName(tag));
-                map.put(tag, i);
-                switch (@typeInfo(@TypeOf(rule))) {
-                    .@"fn" => |f| {
-                        inline for (f.params) |param| {
-                            if (param.type) |t| {
-                                i += compile1(t).len;
-                            } else {
-                                @compileError("Grammar rule parameters must have types");
-                            }
-                        }
-                    },
-                    else => {
-                        @compileError("Grammar rules must be functions");
-                    },
-                }
-            }
-
-            var ops: [i]AbsoluteOp = undefined;
-            var pos: usize = 0;
-            inline for (comptime std.meta.declarations(rules)) |decl| {
-                const rule = @field(rules, decl.name);
-                switch (@typeInfo(@TypeOf(rule))) {
-                    .@"fn" => |f| {
-                        inline for (f.params) |param| {
-                            if (param.type) |t| {
-                                const part = compile1(t);
-                                for (part) |op| {
-                                    ops[pos] = switch (op) {
-                                        .op_invoke => |s| .{ .op_invoke = map.getAssertContains(@field(rulekind, s)) },
-                                        inline else => |opi, tag| @unionInit(AbsoluteOp, @tagName(tag), opi),
-                                    };
-                                    pos += 1;
-                                }
-                            } else {
-                                @compileError("Grammar rule parameters must have types");
-                            }
-                        }
-                    },
-                    else => {
-                        @compileError("Grammar rules must be functions");
-                    },
-                }
-            }
-
-            return &ops;
+        const RuleEnum = std.meta.DeclEnum(rules);
+        const RuleOffsetMap = std.enums.EnumMap(RuleEnum, comptime_int);
+        
+        // Helper: Check if a declaration is a valid rule function
+        fn isRuleFunction(comptime decl_type: type) bool {
+            return switch (@typeInfo(decl_type)) {
+                .@"fn" => true,
+                else => false,
+            };
         }
-
-        pub fn compile1(t: type) []const Op {
+        
+        // Helper: Get the function info for a rule, with validation
+        fn getRuleFunctionInfo(comptime rule: anytype) std.builtin.Type.Fn {
+            const T = @TypeOf(rule);
+            switch (@typeInfo(T)) {
+                .@"fn" => |f| return f,
+                else => @compileError("Grammar rules must be functions"),
+            }
+        }
+        
+        // Helper: Calculate total size needed for a rule's opcodes
+        fn calculateRuleSize(comptime rule: anytype) comptime_int {
+            const fn_info = getRuleFunctionInfo(rule);
+            var size: comptime_int = 0;
+            
+            inline for (fn_info.params) |param| {
+                if (param.type) |param_type| {
+                    size += compilePattern(param_type).len;
+                } else {
+                    @compileError("Grammar rule parameters must have types");
+                }
+            }
+            
+            return size;
+        }
+        
+        // Pass 1: Calculate offsets for each rule (symbol table construction)
+        fn buildRuleOffsetMap() struct { map: RuleOffsetMap, total_size: comptime_int } {
+            comptime var offset_map = RuleOffsetMap.init(.{});
+            comptime var current_offset: comptime_int = 0;
+            
+            inline for (comptime std.meta.tags(RuleEnum)) |rule_tag| {
+                const rule_fn = @field(rules, @tagName(rule_tag));
+                offset_map.put(rule_tag, current_offset);
+                current_offset += calculateRuleSize(rule_fn);
+            }
+            
+            return .{ .map = offset_map, .total_size = current_offset };
+        }
+        
+        // Pass 2: Emit opcodes with resolved addresses (linking)
+        fn emitLinkedOpcodes(comptime offset_map: RuleOffsetMap, comptime total_size: comptime_int) [total_size]AbsoluteOp {
+            var linked_ops: [total_size]AbsoluteOp = undefined;
+            var write_position: usize = 0;
+            
+            inline for (comptime std.meta.declarations(rules)) |decl| {
+                const rule_fn = @field(rules, decl.name);
+                if (!isRuleFunction(@TypeOf(rule_fn))) {
+                    @compileError("Grammar member '" ++ decl.name ++ "' must be a function");
+                }
+                
+                const fn_info = getRuleFunctionInfo(rule_fn);
+                inline for (fn_info.params) |param| {
+                    if (param.type) |param_type| {
+                        const relative_ops = compilePattern(param_type);
+                        
+                        // Link each opcode (resolve symbolic references)
+                        for (relative_ops) |op| {
+                            linked_ops[write_position] = linkOpcode(op, offset_map);
+                            write_position += 1;
+                        }
+                    }
+                }
+            }
+            
+            return linked_ops;
+        }
+        
+        // Helper: Convert relative opcode to absolute opcode (resolve symbols)
+        fn linkOpcode(op: Op, offset_map: RuleOffsetMap) AbsoluteOp {
+            return switch (op) {
+                .op_invoke => |rule_name| blk: {
+                    const rule_tag = @field(RuleEnum, rule_name);
+                    const absolute_offset = offset_map.getAssertContains(rule_tag);
+                    break :blk .{ .op_invoke = absolute_offset };
+                },
+                inline else => |payload, tag| @unionInit(AbsoluteOp, @tagName(tag), payload),
+            };
+        }
+        
+        // Main compilation entry point
+        pub fn compile() []const AbsoluteOp {
+            // Two-pass compilation:
+            // 1. Build symbol table (calculate offsets)
+            const link_info = comptime buildRuleOffsetMap();
+            
+            // 2. Emit and link opcodes
+            const linked_program = comptime emitLinkedOpcodes(link_info.map, link_info.total_size);
+            
+            return &linked_program;
+        }
+        
+        // Compile a single pattern type to opcodes
+        pub fn compilePattern(comptime t: type) []const Op {
             switch (@typeInfo(t)) {
-                .pointer => |pt| {
-                    if (pt.size == .slice) {
-                        return &[1]Op{.{ .op_rescue = 1 }} ++ compile1(pt.child) ++ &[1]Op{.{ .op_commit = 1 }};
+                .pointer => |ptr_info| {
+                    if (ptr_info.size == .slice) {
+                        // Slice represents Kleene star (zero or more)
+                        const inner = compilePattern(ptr_info.child);
+                        return &[_]Op{.{ .op_rescue = 1 }} ++ inner ++ &[_]Op{.{ .op_commit = 1 }};
                     } else {
-                        @compileError("Grammar type must be a struct of slice-returning functions");
+                        @compileError("Only slices are supported as pointer types in grammar patterns");
                     }
                 },
                 .@"struct" => {
-                    return t.compile(rules);
+                    // Structs with a compile method are custom pattern types
+                    if (@hasDecl(t, "compile")) {
+                        return t.compile(rules);
+                    } else {
+                        @compileError("Pattern struct must have a 'compile' method");
+                    }
                 },
-                else => |_| {
-                    @compileError("Grammar type must be a struct of slice-returning functions");
+                else => {
+                    @compileError("Unsupported pattern type: " ++ @typeName(t));
                 },
             }
         }
