@@ -37,181 +37,6 @@ pub const demoGrammar = struct {
     pub fn skip(_: []CharSet(" \t\n\r")) void {}
 };
 
-const ctrls = [_][]const u8{
-    "␀",
-    "␁",
-    "␂",
-    "␃",
-    "␄",
-    "␅",
-    "␆",
-    "␇",
-    "␈",
-    "␉",
-    "␤",
-    "␋",
-    "␌",
-    "␍",
-    "␎",
-    "␏",
-    "␐",
-    "␑",
-    "␒",
-    "␓",
-    "␔",
-    "␕",
-    "␖",
-    "␗",
-    "␘",
-    "␙",
-    "␚",
-    "␛",
-    "␜",
-    "␝",
-    "␞",
-    "␟",
-    "␠",
-};
-
-fn printChar(tty: std.Io.tty.Config, writer: *std.Io.Writer, c: u8) !void {
-    if (c < ctrls.len) {
-        try tty.setColor(writer, .magenta);
-        try writer.print("{s}", .{ctrls[c]});
-    } else if (c >= 33 and c < 127 and c != '\\') {
-        try tty.setColor(writer, .yellow);
-        try writer.print("{c}", .{c});
-    } else {
-        try tty.setColor(writer, .yellow);
-        try writer.print("\\x{x:0>2}", .{c});
-    }
-    try tty.setColor(writer, .reset);
-}
-
-var stdoutbuf: [4096]u8 = undefined;
-const stdout_file = std.fs.File.stdout();
-var stdout_writer = stdout_file.writer(&stdoutbuf);
-const stdout = &stdout_writer.interface;
-
-pub fn dumpCode(T: type) !void {
-    const G = comptime Grammar(T);
-    const ops = comptime G.compile(false);
-    const tty = std.Io.tty.detectConfig(stdout_file);
-
-    comptime var i = 0;
-    inline for (ops) |op| {
-        if (G.isStartOfRule(i)) |rule| {
-            try tty.setColor(stdout, .bold);
-            try stdout.print("\n&{t}:\n", .{rule});
-            try tty.setColor(stdout, .reset);
-        }
-
-        try stdout.print("{d: >4} ", .{i});
-        try op.dump(tty, stdout, i);
-        i += 1;
-    }
-
-    try stdout.flush();
-}
-
-pub fn main() !void {
-    const G = demoGrammar;
-    const VM = @import("vm.zig").VM;
-
-    try dumpCode(G);
-
-    const tty = std.Io.tty.detectConfig(stdout_file);
-
-    const P = Grammar(G);
-    const ops = comptime P.compile(false);
-
-    const TestVM = VM(ops);
-
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    const allocator = arena.allocator();
-
-    var vm = try TestVM.initAlloc("[[1] [2]]", allocator, 16, 16);
-
-    try stdout.print("\n\nparsing \"{s}\"\n\n", .{vm.text});
-
-    var sp: ?u32 = null;
-    var ip: u32 = 0;
-    var lastrule: ?P.RuleEnum = null;
-    var justcalled = true;
-
-    // Manually iterate through events
-    while (true) {
-        try tty.setColor(stdout, .reset);
-
-        const rule = P.ruleContainingIp(ip);
-        if (rule != lastrule) {
-            if (justcalled) {
-                try tty.setColor(stdout, .bright_blue);
-                try tty.setColor(stdout, .bold);
-                try stdout.print("{?t: >8} ", .{rule});
-            } else {
-                try tty.setColor(stdout, .dim);
-                try stdout.print("{?t: >8} ", .{rule});
-            }
-        } else {
-            try tty.setColor(stdout, .dim);
-            try stdout.splatByteAll(' ', 9);
-        }
-        lastrule = rule;
-        try tty.setColor(stdout, .reset);
-
-        try tty.setColor(stdout, .cyan);
-        try stdout.print("{d:0>4} ", .{ip});
-        try tty.setColor(stdout, .reset);
-
-        if (vm.sp != sp) {
-            try tty.setColor(stdout, .bold);
-            sp = vm.sp;
-            if (vm.sp < vm.text.len) {
-                try printChar(tty, stdout, vm.text[vm.sp]);
-            } else {
-                try tty.setColor(stdout, .bright_green);
-                try stdout.print("⌀", .{});
-            }
-        } else {
-            try stdout.writeAll(" ");
-        }
-        try tty.setColor(stdout, .reset);
-        try stdout.writeAll(" ");
-
-        try tty.setColor(stdout, .dim);
-        try stdout.splatBytesAll("│", vm.calls.items.len + 1);
-        try stdout.writeAll(" ");
-        try tty.setColor(stdout, .reset);
-
-        try ops[ip].dump(tty, stdout, ip);
-        if (vm.next(ip, .Step)) |outcome| {
-            if (outcome) |ipnext| {
-                if (ops[ip] == .call) {
-                    justcalled = true;
-                } else {
-                    justcalled = false;
-                }
-
-                ip = ipnext;
-            } else {
-                try tty.setColor(stdout, .bright_green);
-                try stdout.print("✓\n", .{});
-                try tty.setColor(stdout, .reset);
-                break;
-            }
-        } else |e| {
-            try tty.setColor(stdout, .red);
-            try stdout.print("✕ {t}\n", .{e});
-            break;
-        }
-    }
-
-    try tty.setColor(stdout, .reset);
-    try stdout.flush();
-}
-
 pub inline fn compile(comptime rules: type) []const Abs {
     return Grammar(rules).compile(false);
 }
@@ -735,4 +560,179 @@ pub fn Shun(comptime inner: type) type {
                 .build();
         }
     };
+}
+
+const ctrls = [_][]const u8{
+    "␀",
+    "␁",
+    "␂",
+    "␃",
+    "␄",
+    "␅",
+    "␆",
+    "␇",
+    "␈",
+    "␉",
+    "␤",
+    "␋",
+    "␌",
+    "␍",
+    "␎",
+    "␏",
+    "␐",
+    "␑",
+    "␒",
+    "␓",
+    "␔",
+    "␕",
+    "␖",
+    "␗",
+    "␘",
+    "␙",
+    "␚",
+    "␛",
+    "␜",
+    "␝",
+    "␞",
+    "␟",
+    "␠",
+};
+
+fn printChar(tty: std.Io.tty.Config, writer: *std.Io.Writer, c: u8) !void {
+    if (c < ctrls.len) {
+        try tty.setColor(writer, .magenta);
+        try writer.print("{s}", .{ctrls[c]});
+    } else if (c >= 33 and c < 127 and c != '\\') {
+        try tty.setColor(writer, .yellow);
+        try writer.print("{c}", .{c});
+    } else {
+        try tty.setColor(writer, .yellow);
+        try writer.print("\\x{x:0>2}", .{c});
+    }
+    try tty.setColor(writer, .reset);
+}
+
+var stdoutbuf: [4096]u8 = undefined;
+const stdout_file = std.fs.File.stdout();
+var stdout_writer = stdout_file.writer(&stdoutbuf);
+const stdout = &stdout_writer.interface;
+
+pub fn dumpCode(T: type) !void {
+    const G = comptime Grammar(T);
+    const ops = comptime G.compile(false);
+    const tty = std.Io.tty.detectConfig(stdout_file);
+
+    comptime var i = 0;
+    inline for (ops) |op| {
+        if (G.isStartOfRule(i)) |rule| {
+            try tty.setColor(stdout, .bold);
+            try stdout.print("\n&{t}:\n", .{rule});
+            try tty.setColor(stdout, .reset);
+        }
+
+        try stdout.print("{d: >4} ", .{i});
+        try op.dump(tty, stdout, i);
+        i += 1;
+    }
+
+    try stdout.flush();
+}
+
+pub fn main() !void {
+    const G = demoGrammar;
+    const VM = @import("vm.zig").VM;
+
+    try dumpCode(G);
+
+    const tty = std.Io.tty.detectConfig(stdout_file);
+
+    const P = Grammar(G);
+    const ops = comptime P.compile(false);
+
+    const TestVM = VM(ops);
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    var vm = try TestVM.initAlloc("[[1] [2]]", allocator, 16, 16);
+
+    try stdout.print("\n\nparsing \"{s}\"\n\n", .{vm.text});
+
+    var sp: ?u32 = null;
+    var ip: u32 = 0;
+    var lastrule: ?P.RuleEnum = null;
+    var justcalled = true;
+
+    // Manually iterate through events
+    while (true) {
+        try tty.setColor(stdout, .reset);
+
+        const rule = P.ruleContainingIp(ip);
+        if (rule != lastrule) {
+            if (justcalled) {
+                try tty.setColor(stdout, .bright_blue);
+                try tty.setColor(stdout, .bold);
+                try stdout.print("{?t: >8} ", .{rule});
+            } else {
+                try tty.setColor(stdout, .dim);
+                try stdout.print("{?t: >8} ", .{rule});
+            }
+        } else {
+            try tty.setColor(stdout, .dim);
+            try stdout.splatByteAll(' ', 9);
+        }
+        lastrule = rule;
+        try tty.setColor(stdout, .reset);
+
+        try tty.setColor(stdout, .cyan);
+        try stdout.print("{d:0>4} ", .{ip});
+        try tty.setColor(stdout, .reset);
+
+        if (vm.sp != sp) {
+            try tty.setColor(stdout, .bold);
+            sp = vm.sp;
+            if (vm.sp < vm.text.len) {
+                try printChar(tty, stdout, vm.text[vm.sp]);
+            } else {
+                try tty.setColor(stdout, .bright_green);
+                try stdout.print("⌀", .{});
+            }
+        } else {
+            try stdout.writeAll(" ");
+        }
+        try tty.setColor(stdout, .reset);
+        try stdout.writeAll(" ");
+
+        try tty.setColor(stdout, .dim);
+        try stdout.splatBytesAll("│", vm.calls.items.len + 1);
+        try stdout.writeAll(" ");
+        try tty.setColor(stdout, .reset);
+
+        try ops[ip].dump(tty, stdout, ip);
+        if (vm.next(ip, .Step)) |outcome| {
+            if (outcome) |ipnext| {
+                if (ops[ip] == .call) {
+                    justcalled = true;
+                } else {
+                    justcalled = false;
+                }
+
+                ip = ipnext;
+            } else {
+                try tty.setColor(stdout, .bright_green);
+                try stdout.print("✓\n", .{});
+                try tty.setColor(stdout, .reset);
+                break;
+            }
+        } else |e| {
+            try tty.setColor(stdout, .red);
+            try stdout.print("✕ {t}\n", .{e});
+            break;
+        }
+    }
+
+    try tty.setColor(stdout, .reset);
+    try stdout.flush();
 }
