@@ -1,7 +1,7 @@
 const std = @import("std");
 const zisp = @import("zisp");
-const pegiter = zisp.pegvmfun_iter;
-const pegvmfun = zisp.pegvmfun;
+const pegiter = zisp.vm;
+const peg = zisp.peg;
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -12,7 +12,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len > 1 and std.mem.eql(u8, args[1], "--fun")) {
-        try zisp.pegvmfun.main();
+        try peg.main();
         return;
     }
 

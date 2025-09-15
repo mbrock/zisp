@@ -115,7 +115,7 @@ pub fn dumpCode(T: type) !void {
 
 pub fn main() !void {
     const G = demoGrammar;
-    const VM = @import("pegvmfun_iter.zig").VM;
+    const VM = @import("vm.zig").VM;
 
     try dumpCode(G);
 

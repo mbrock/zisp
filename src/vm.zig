@@ -1,5 +1,5 @@
 const std = @import("std");
-const peg = @import("pegvmfun.zig");
+const peg = @import("peg.zig");
 
 pub const Mode = enum {
     Step,
@@ -164,4 +164,169 @@ pub fn BoundedStack(comptime T: type, comptime capacity: usize) type {
             return self.items[self.len];
         }
     };
+}
+
+pub const SimpleGrammar = struct {
+    pub fn main(_: peg.CharSet("a"), _: peg.CharSet("b")) void {}
+};
+
+const ChoiceGrammar = struct {
+    pub fn main(
+        _: union(enum) {
+            ab: struct { a: peg.CharSet("a"), b: peg.CharSet("b") },
+            ac: struct { a: peg.CharSet("a"), c: peg.CharSet("c") },
+        },
+    ) void {}
+};
+
+pub const RecursiveGrammar = struct {
+    pub fn main(_: peg.Call(.expr)) void {}
+
+    pub fn expr(
+        _: union(enum) {
+            number: peg.Call(.number),
+            parens: struct {
+                open: peg.CharSet("("),
+                expr: peg.Call(.expr),
+                close: peg.CharSet(")"),
+            },
+        },
+    ) void {}
+
+    pub fn number(
+        _: peg.CharRange('0', '9'),
+        _: []peg.CharRange('0', '9'),
+    ) void {}
+};
+
+const KleeneGrammar = struct {
+    pub fn main(
+        _: []peg.CharSet("a"), // Zero or more 'a's
+        _: peg.CharSet("b"),
+    ) void {}
+};
+
+const OptionalGrammar = struct {
+    pub fn main(
+        _: ?peg.CharSet("a"),
+        _: peg.CharSet("b"),
+    ) void {}
+};
+
+fn step(vm: anytype, ip: *u32) !bool {
+    if (try vm.next(ip.*, .Step)) |new_ip| {
+        ip.* = new_ip;
+        return true;
+    } else {
+        return false;
+    }
+}
+
+fn expectParseSuccess(comptime P: peg.Opcodes, text: [:0]const u8) !void {
+    try VM(P).parse(text);
+    _ = try VM(P).countSteps(text);
+}
+
+fn expectParseFailure(comptime P: peg.Opcodes, text: [:0]const u8) !void {
+    try std.testing.expectError(error.ParseFailed, VM(P).parse(text));
+    try std.testing.expectError(error.ParseFailed, VM(P).countSteps(text));
+}
+
+// Test the manual construction for now
+test "basic VM iteration" {
+    const TestProgram = comptime [_]peg.Abs{
+        .{ .read = charSet('a') },
+        .{ .read = charSet('b') },
+        .over,
+    };
+
+    try expectParseSuccess(&TestProgram, "ab");
+    try expectParseFailure(&TestProgram, "ac");
+}
+
+test "VM with backtracking" {
+    // Program: (a b) / (a c)
+    // Using rescue/commit for backtracking
+    const BacktrackProgram = comptime [_]peg.Abs{
+        .{ .frob = .{ .fx = .push, .ip = 4 } }, // rescue to 4
+        .{ .read = charSet('a') }, // match 'a'
+        .{ .read = charSet('b') }, // match 'b'
+        .{ .frob = .{ .fx = .drop, .ip = 6 } }, // commit to 6
+        .{ .read = charSet('a') }, // match 'a'
+        .{ .read = charSet('c') }, // match 'c'
+        .over,
+    };
+
+    try expectParseSuccess(&BacktrackProgram, "ab");
+    try expectParseSuccess(&BacktrackProgram, "ac");
+    try expectParseFailure(&BacktrackProgram, "ad");
+}
+
+test "VM event iteration" {
+    const SimpleProgram = comptime [_]peg.Abs{
+        .{ .read = charSet('a') },
+        .{ .read = charSet('b') },
+        .over,
+    };
+
+    try std.testing.expectEqual(3, try VM(&SimpleProgram).countSteps("ab"));
+}
+
+// Helper to create a charset with one character
+fn charSet(comptime c: u8) std.StaticBitSet(256) {
+    comptime var set = std.StaticBitSet(256).initEmpty();
+    set.set(c);
+    return set;
+}
+
+// Tests using the grammar compiler
+test "simple grammar compilation" {
+    const ops = comptime peg.compile(SimpleGrammar);
+
+    try expectParseSuccess(ops, "ab");
+    try expectParseFailure(ops, "ac");
+    try expectParseFailure(ops, "a");
+}
+
+test "choice grammar compilation" {
+    const ops = comptime peg.compile(ChoiceGrammar);
+
+    try expectParseSuccess(ops, "ab");
+    try expectParseSuccess(ops, "ac");
+    try expectParseFailure(ops, "ad");
+}
+
+test "kleene star grammar compilation" {
+    const ops = comptime peg.compile(KleeneGrammar);
+
+    try expectParseSuccess(ops, "b");
+    try expectParseSuccess(ops, "ab");
+    try expectParseSuccess(ops, "aaab");
+    try expectParseFailure(ops, "aaa");
+}
+
+test "optional grammar compilation" {
+    const ops = comptime peg.compile(OptionalGrammar);
+
+    try expectParseSuccess(ops, "ab");
+    try expectParseSuccess(ops, "b");
+    try expectParseFailure(ops, "ac");
+}
+
+test "recursive grammar compilation" {
+    const ops = comptime peg.compile(RecursiveGrammar);
+
+    try expectParseSuccess(ops, "42");
+    try expectParseSuccess(ops, "(123)");
+    try expectParseSuccess(ops, "((99))");
+    try expectParseFailure(ops, "(42");
+}
+
+test "demo grammar from pegvmfun" {
+    const ops = comptime peg.compile(peg.demoGrammar);
+
+    try expectParseSuccess(ops, "123   ");
+    try expectParseSuccess(ops, "[123 456 789]");
+    try expectParseSuccess(ops, "[[1] [2]]");
+    try expectParseSuccess(ops, "[]");
 }
