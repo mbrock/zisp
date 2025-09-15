@@ -10,36 +10,52 @@ const ctrls = [_][]const u8{
     "␠",
 };
 
-fn colorPrint(
+const ColorPrinter = struct {
     writer: *std.Io.Writer,
     tty: std.Io.tty.Config,
-    color: anytype,
-    comptime fmt: []const u8,
-    args: anytype,
-) !void {
-    try tty.setColor(writer, color);
-    defer tty.setColor(writer, .reset) catch {};
-    try writer.print(fmt, args);
-}
 
-pub fn printChar(tty: std.Io.tty.Config, writer: *std.Io.Writer, c: u8) !void {
+    pub fn init(writer: *std.Io.Writer, tty: std.Io.tty.Config) ColorPrinter {
+        return .{ .writer = writer, .tty = tty };
+    }
+
+    pub fn print(
+        self: *ColorPrinter,
+        color: anytype,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) !void {
+        try self.setColor(color);
+        defer self.reset() catch {};
+        try self.writer.print(fmt, args);
+    }
+
+    pub fn setColor(self: *ColorPrinter, color: anytype) !void {
+        try self.tty.setColor(self.writer, color);
+    }
+
+    pub fn reset(self: *ColorPrinter) !void {
+        try self.tty.setColor(self.writer, .reset);
+    }
+};
+
+pub fn printChar(printer: *ColorPrinter, c: u8) !void {
     if (c < ctrls.len) {
-        try colorPrint(writer, tty, .magenta, "{s}", .{ctrls[c]});
+        try printer.print(.magenta, "{s}", .{ctrls[c]});
     } else if (c >= 33 and c < 127 and c != '\\') {
-        try colorPrint(writer, tty, .yellow, "{c}", .{c});
+        try printer.print(.yellow, "{c}", .{c});
     } else {
-        try colorPrint(writer, tty, .yellow, "\\x{x:0>2}", .{c});
+        try printer.print(.yellow, "\\x{x:0>2}", .{c});
     }
 }
 
 pub fn dumpOp(
     comptime rel: bool,
     op: peg.OpG(rel),
-    tty: std.Io.tty.Config,
-    w: *std.Io.Writer,
+    printer: *ColorPrinter,
     _: u32,
 ) !void {
-    try w.print("{s} ", .{switch (op) {
+    const writer = printer.writer;
+    try writer.print("{s} ", .{switch (op) {
         .frob => |x| @tagName(x.fx),
         inline else => @tagName(op),
     }});
@@ -47,20 +63,20 @@ pub fn dumpOp(
     switch (op) {
         .frob => |ctrl| {
             if (rel == false) {
-                try colorPrint(w, tty, .cyan, "→{d}", .{ctrl.ip});
+                try printer.print(.cyan, "→{d}", .{ctrl.ip});
             } else {
                 if (ctrl.ip > 0) {
-                    try colorPrint(w, tty, .cyan, "+{d}", .{ctrl.ip});
+                    try printer.print(.cyan, "+{d}", .{ctrl.ip});
                 } else {
-                    try colorPrint(w, tty, .cyan, "{d}", .{ctrl.ip});
+                    try printer.print(.cyan, "{d}", .{ctrl.ip});
                 }
             }
         },
         .call => |target| {
             if (@TypeOf(target) == u32) {
-                try colorPrint(w, tty, .cyan, "→{d}", .{target});
+                try printer.print(.cyan, "→{d}", .{target});
             } else {
-                try colorPrint(w, tty, .blue, "&{s}", .{@tagName(target)});
+                try printer.print(.blue, "&{s}", .{@tagName(target)});
             }
         },
         .read => |cs| {
@@ -74,19 +90,19 @@ pub fn dumpOp(
                     if (range_end > i + 1) {
                         // We have a range of at least 3 characters
                         // Print start of range
-                        try printChar(tty, w, @intCast(i));
-                        try colorPrint(w, tty, .dim, "{s}", .{"⋯"});
+                        try printChar(printer, @intCast(i));
+                        try printer.print(.dim, "{s}", .{"⋯"});
                         // Print end of range
-                        try printChar(tty, w, @intCast(range_end));
+                        try printChar(printer, @intCast(range_end));
                         i = range_end;
                     } else if (range_end == i + 1) {
                         // Just two consecutive characters - print them separately
-                        try printChar(tty, w, @intCast(i));
-                        try printChar(tty, w, @intCast(range_end));
+                        try printChar(printer, @intCast(i));
+                        try printChar(printer, @intCast(range_end));
                         i = range_end;
                     } else {
                         // Single character
-                        try printChar(tty, w, @intCast(i));
+                        try printChar(printer, @intCast(i));
                     }
                 }
             }
@@ -95,22 +111,24 @@ pub fn dumpOp(
         inline else => {},
     }
 
-    try tty.setColor(w, .reset);
-    try w.writeAll("\n");
+    try printer.reset();
+    try writer.writeAll("\n");
 }
 
 pub fn dumpCode(comptime T: type, writer: *std.Io.Writer, tty: std.Io.tty.Config) !void {
     const G = comptime peg.Grammar(T);
     const ops = comptime G.compile(false);
 
+    var printer = ColorPrinter.init(writer, tty);
+
     comptime var i = 0;
     inline for (ops) |op| {
         if (G.isStartOfRule(i)) |rule| {
-            try colorPrint(writer, tty, .bold, "\n&{t}:\n", .{rule});
+            try printer.print(.bold, "\n&{t}:\n", .{rule});
         }
 
         try writer.print("{d: >4} ", .{i});
-        try dumpOp(false, op, tty, writer, i);
+        try dumpOp(false, op, &printer, i);
         i += 1;
     }
 
@@ -121,41 +139,41 @@ fn traceStep(
     machine: anytype,
     ip: u32,
     last_sp: *?u32,
-    writer: *std.Io.Writer,
-    tty: std.Io.tty.Config,
+    printer: *ColorPrinter,
     cache_hit: bool,
 ) !void {
     const Program = @TypeOf(machine.*).Ops;
+    const writer = printer.writer;
 
     // Show current position in text
     if (machine.sp != last_sp.*) {
-        try tty.setColor(writer, .bold);
+        try printer.setColor(.bold);
         if (machine.sp < machine.text.len) {
-            try printChar(tty, writer, machine.text[machine.sp]);
+            try printChar(printer, machine.text[machine.sp]);
         } else {
-            try colorPrint(writer, tty, .bright_green, "⌀", .{});
+            try printer.print(.bright_green, "⌀", .{});
         }
         last_sp.* = machine.sp;
     } else {
         try writer.writeAll(" ");
     }
-    try tty.setColor(writer, .reset);
+    try printer.reset();
     try writer.writeAll(" ");
 
     // Show call stack depth
-    try tty.setColor(writer, .dim);
+    try printer.setColor(.dim);
     try writer.splatBytesAll("│", machine.calls.items.len + 1);
     try writer.writeAll(" ");
-    try tty.setColor(writer, .reset);
+    try printer.reset();
 
     // Show instruction
-    try colorPrint(writer, tty, .cyan, "{d:0>4} ", .{ip});
+    try printer.print(.cyan, "{d:0>4} ", .{ip});
 
     if (ip < Program.len) {
         if (cache_hit) {
-            try colorPrint(writer, tty, .green, "{s}", .{"⚡ "});
+            try printer.print(.green, "{s}", .{"⚡ "});
         }
-        try dumpOp(false, Program[ip], tty, writer, ip);
+        try dumpOp(false, Program[ip], printer, ip);
     }
 }
 
@@ -167,6 +185,8 @@ pub fn trace(
     const VMType = @TypeOf(machine.*);
     const Program = VMType.Ops;
     const has_memo = machine.memo != null;
+
+    var printer = ColorPrinter.init(writer, tty);
 
     if (has_memo) {
         try writer.print("\nParsing with memoization: \"{s}\"\n\n", .{machine.text});
@@ -190,7 +210,7 @@ pub fn trace(
             break :blk false;
         } else false;
 
-        try traceStep(machine, ip, &last_sp, writer, tty, is_cache_hit);
+        try traceStep(machine, ip, &last_sp, &printer, is_cache_hit);
 
         // Execute step
         if (machine.next(ip, .Step)) |outcome| {
@@ -198,14 +218,14 @@ pub fn trace(
                 ip = next_ip;
             } else {
                 if (has_memo) {
-                    try colorPrint(writer, tty, .bright_green, "\n✓ ({d} steps, {d} hits)\n", .{ step_count + 1, cache_hits });
+                    try printer.print(.bright_green, "\n✓ ({d} steps, {d} hits)\n", .{ step_count + 1, cache_hits });
                 } else {
-                    try colorPrint(writer, tty, .bright_green, "\n✓ ({d} steps)\n", .{step_count + 1});
+                    try printer.print(.bright_green, "\n✓ ({d} steps)\n", .{step_count + 1});
                 }
                 break;
             }
         } else |err| {
-            try colorPrint(writer, tty, .red, "\n✕ {t} at step {d}\n", .{ err, step_count + 1 });
+            try printer.print(.red, "\n✕ {t} at step {d}\n", .{ err, step_count + 1 });
             return err;
         }
     }
