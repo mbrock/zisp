@@ -225,7 +225,7 @@ pub fn main() !void {
                 switch (ev) {
                     .backtrack => try stdout.print("⎋ ", .{}),
                     .match => try stdout.print("⇥ ", .{}),
-                    .invoke_rule => try stdout.print("❡ ", .{}),
+                    .called => try stdout.print("❡ ", .{}),
                     .return_rule => try stdout.print("⏎ ", .{}),
                 }
                 try tty.setColor(stdout, .reset);
