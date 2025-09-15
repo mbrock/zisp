@@ -1,21 +1,25 @@
-// Simple internal iteration design - coroutines as stateful function composition
-//
-// Instead of complex yielding, each layer is just a stateful iterator
-// that drives its inner layer and does something with the results.
-
 const std = @import("std");
-const pegvmfun = @import("pegvmfun.zig");
+const peg = @import("pegvmfun.zig");
 
-// Core VM - just an iterator that returns events
-pub fn VM(comptime Program: []const pegvmfun.AbsoluteOp) type {
+pub const Mode = enum {
+    Step,
+    Loop,
+};
+
+pub fn VM(comptime Program: []const peg.Abs) type {
     return struct {
         const Self = @This();
 
-        ip: u32 = 0,
         sp: u32 = 0,
         text: [:0]const u8,
         saves: BoundedStack(SaveFrame, 128) = .{},
         calls: BoundedStack(CallFrame, 32) = .{},
+
+        pub fn init(text: [:0]const u8) Self {
+            return Self{
+                .text = text,
+            };
+        }
 
         pub const SaveFrame = struct {
             ip: u32,
@@ -29,119 +33,94 @@ pub fn VM(comptime Program: []const pegvmfun.AbsoluteOp) type {
             start_sp: u32,
         };
 
-        pub const Event = union(enum) {
-            called: struct { id: u32, pos: u32 },
-            return_rule: struct { id: u32, start: u32, end: u32 },
-            backtrack: struct { from: u32, to: u32 },
-            match: struct { pos: u32, len: u32 },
-        };
+        pub fn next(self: *Self, ip: u32, comptime mode: Mode) !(if (mode == .Loop) void else ?u32) {
+            const loop = switch (mode) {
+                .Step => false,
+                .Loop => true,
+            };
 
-        // Simple next() function - returns null when done
-        pub fn next(self: *Self) !?Event {
-            // The simple inline switch VM core
-            vm: switch (self.ip) {
-                inline 0...Program.len - 1 => |ip| {
-                    const op = Program[ip];
-                    self.ip = ip + 1;
+            vm: switch (ip) {
+                inline 0...Program.len - 1 => |IP| {
+                    const OP = Program[IP];
+                    const IP1 = IP + 1;
                     const ch = self.text[self.sp];
 
-                    switch (op) {
+                    switch (OP) {
                         .read => |set| {
                             if (set.isSet(ch)) {
-                                const ev = Event{ .match = .{ .pos = self.sp, .len = 1 } };
                                 self.sp += 1;
-                                return ev;
+                                if (loop) continue :vm IP1 else return IP1;
                             }
-                            return self.fail();
                         },
 
                         .call => |target| {
                             try self.calls.push(.{
-                                .return_ip = self.ip,
+                                .return_ip = IP1,
                                 .rule_id = target,
                                 .start_sp = self.sp,
                             });
 
-                            const ev = Event{ .called = .{ .id = target, .pos = self.sp } };
-                            self.ip = target;
-                            return ev;
+                            if (loop) continue :vm target else return target;
                         },
 
-                        .branch => |ctrl| switch (ctrl.action) {
+                        .frob => |ctrl| switch (ctrl.fx) {
                             .push => {
                                 try self.saves.push(.{
-                                    .ip = ctrl.offset,
+                                    .ip = ctrl.ip,
                                     .sp = self.sp,
                                     .call_depth = @intCast(self.calls.len),
                                 });
-                                continue :vm ip + 1;
+                                if (loop) continue :vm IP1 else return IP1;
                             },
 
                             .drop => {
                                 _ = self.saves.pop();
-                                continue :vm ctrl.offset;
+                                if (loop) continue :vm ctrl.ip else return ctrl.ip;
                             },
 
                             .move => {
-                                if (self.saves.len > 0) {
-                                    self.saves.items[self.saves.len - 1].sp = self.sp;
-                                }
-                                continue :vm ctrl.offset;
+                                self.saves.items[self.saves.len - 1].sp = self.sp;
+                                if (loop) continue :vm ctrl.ip else return ctrl.ip;
                             },
 
                             .wipe => {
-                                const save = self.saves.pop();
+                                const save = self.saves.pop().?;
                                 self.sp = save.sp;
-                                continue :vm ctrl.offset;
+                                if (loop) continue :vm ctrl.ip else return ctrl.ip;
                             },
                         },
 
                         .done => {
                             if (self.calls.pop()) |frame| {
-                                self.ip = frame.return_ip;
-                                return .{
-                                    .return_rule = .{
-                                        .id = frame.rule_id,
-                                        .start = frame.start_sp,
-                                        .end = self.sp,
-                                    },
-                                };
+                                if (loop) continue :vm frame.return_ip else return frame.return_ip;
                             } else {
                                 if (self.sp == self.text.len) {
-                                    return null;
+                                    return (if (mode == .Loop) {} else null);
                                 } else {
                                     return error.UnconsumedInput;
                                 }
                             }
                         },
 
-                        .over => return null,
-                        .fail => return self.fail(),
+                        .over => return (if (mode == .Loop) {} else null),
+                        .fail => {},
                     }
+
+                    if (self.saves.pop()) |save| {
+                        self.sp = save.sp;
+                        self.calls.len = save.call_depth;
+
+                        if (loop) continue :vm save.ip else return save.ip;
+                    }
+
+                    return error.ParseFailed;
                 },
-                else => return null,
+                else => return (if (mode == .Loop) {} else null),
             }
         }
 
-        fn fail(self: *Self) !?Event {
-            // Backtrack if we can
-            if (self.saves.pop()) |save| {
-                const from = self.sp;
-
-                self.ip = save.ip;
-                self.sp = save.sp;
-                self.calls.len = save.call_depth;
-
-                return .{ .backtrack = .{ .from = from, .to = save.sp } };
-            }
-
-            return error.ParseFailed;
-        }
-
-        // Simple run to completion
-        pub fn run(self: *Self) !bool {
-            while (try self.next()) |_| {}
-            return true;
+        pub fn run(self: *Self) !void {
+            try self.next(0, .Loop);
         }
 
         pub fn parse(
@@ -151,6 +130,19 @@ pub fn VM(comptime Program: []const pegvmfun.AbsoluteOp) type {
                 .text = text,
             };
             _ = try vm.run();
+        }
+
+        pub fn countSteps(text: [:0]const u8) !u32 {
+            var self = Self.init(text);
+            var ip: u32 = 0;
+            var count: u32 = 1;
+
+            while (try self.next(ip, .Step)) |new_ip| {
+                ip = new_ip;
+                count += 1;
+            }
+
+            return count;
         }
     };
 }
