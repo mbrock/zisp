@@ -6,39 +6,44 @@ pub const Mode = enum {
     Loop,
 };
 
-pub fn VM(comptime Program: []const peg.Abs) type {
+pub fn VM(comptime GrammarType: type) type {
     return struct {
         const Self = @This();
-        pub const Ops = Program;
+        pub const Grammar = peg.Grammar(GrammarType);
+        pub const RuleEnum = Grammar.RuleEnum;
+        pub const Ops = Grammar.compile(false);
+
+        pub const Node = struct {
+            rule_index: u32,
+            start: u32,
+            end: u32,
+            first_child: ?u32,
+            next_sibling: ?u32,
+        };
 
         sp: u32 = 0,
         text: [:0]const u8,
         saves: std.ArrayList(SaveFrame),
         calls: std.ArrayList(CallFrame),
+        nodes: std.ArrayList(Node),
         memo: ?*MemoTable = null,
-
-        pub fn init(
-            text: [:0]const u8,
-            saves: []SaveFrame,
-            calls: []CallFrame,
-        ) Self {
-            return Self{
-                .text = text,
-                .saves = .initBuffer(saves),
-                .calls = .initBuffer(calls),
-            };
-        }
+        root_node: ?u32 = null,
 
         pub const SaveFrame = struct {
             ip: u32,
             sp: u32,
             call_depth: u32,
+            node_len: usize,
         };
 
         pub const CallFrame = struct {
             return_ip: u32,
-            rule_id: u32,
+            target_ip: u32,
+            rule: RuleEnum,
             start_sp: u32,
+            first_child: ?u32,
+            last_child: ?u32,
+            node_len_on_entry: usize,
         };
 
         pub const MemoKey = struct {
@@ -53,6 +58,74 @@ pub fn VM(comptime Program: []const peg.Abs) type {
 
         pub const MemoTable = std.AutoHashMap(MemoKey, MemoEntry);
 
+        pub fn init(
+            text: [:0]const u8,
+            saves: []SaveFrame,
+            calls: []CallFrame,
+            nodes: []Node,
+        ) Self {
+            return Self{
+                .sp = 0,
+                .text = text,
+                .saves = .initBuffer(saves),
+                .calls = .initBuffer(calls),
+                .nodes = .initBuffer(nodes),
+                .memo = null,
+                .root_node = null,
+            };
+        }
+
+        fn appendNode(self: *Self, frame: CallFrame, end_sp: u32) !u32 {
+            const idx = self.nodes.items.len;
+            try self.nodes.appendBounded(.{
+                .rule_index = @intFromEnum(frame.rule),
+                .start = frame.start_sp,
+                .end = end_sp,
+                .first_child = frame.first_child,
+                .next_sibling = null,
+            });
+            return std.math.cast(u32, idx) orelse return error.ParseFailed;
+        }
+
+        fn attachChild(self: *Self, node_index: u32) void {
+            if (self.calls.items.len == 0) return;
+            var parent = &self.calls.items[self.calls.items.len - 1];
+            if (parent.first_child) |first| {
+                const last = parent.last_child.?;
+                self.nodes.items[last].next_sibling = node_index;
+                parent.last_child = node_index;
+                _ = first;
+            } else {
+                parent.first_child = node_index;
+                parent.last_child = node_index;
+            }
+        }
+
+        fn truncateNodes(self: *Self, new_len: usize) void {
+            if (new_len >= self.nodes.items.len) return;
+            for (self.nodes.items[0..new_len]) |*node| {
+                if (node.first_child) |child| {
+                    if (child >= new_len) node.first_child = null;
+                }
+                if (node.next_sibling) |sib| {
+                    if (sib >= new_len) node.next_sibling = null;
+                }
+            }
+            self.nodes.items.len = new_len;
+            if (self.root_node) |root| {
+                if (root >= new_len) self.root_node = null;
+            }
+            for (self.calls.items) |*frame| {
+                if (frame.first_child) |child| {
+                    if (child >= new_len) frame.first_child = null;
+                }
+                if (frame.last_child) |child| {
+                    if (child >= new_len) frame.last_child = null;
+                }
+                if (frame.node_len_on_entry > new_len) frame.node_len_on_entry = new_len;
+            }
+        }
+
         pub fn next(
             self: *Self,
             ip: u32,
@@ -64,8 +137,8 @@ pub fn VM(comptime Program: []const peg.Abs) type {
             };
 
             vm: switch (ip) {
-                inline 0...Program.len - 1 => |IP| {
-                    const OP = Program[IP];
+                inline 0...Ops.len - 1 => |IP| {
+                    const OP = Ops[IP];
                     const IP1 = IP + 1;
                     const ch = self.text[self.sp];
 
@@ -78,19 +151,17 @@ pub fn VM(comptime Program: []const peg.Abs) type {
                         },
 
                         .call => |target| {
-                            // Check memo table if available
                             if (self.memo) |memo| {
                                 const key = MemoKey{ .ip = target, .sp = self.sp };
                                 if (memo.get(key)) |entry| {
                                     if (entry.success) {
-                                        // Cache hit - success
                                         self.sp = entry.end_sp;
                                         if (loop) continue :vm IP1 else return IP1;
                                     } else {
-                                        // Cache hit - failure, trigger backtrack
                                         if (self.saves.pop()) |save| {
                                             self.sp = save.sp;
                                             self.calls.items.len = save.call_depth;
+                                            self.truncateNodes(save.node_len);
                                             if (loop) continue :vm save.ip else return save.ip;
                                         }
                                         return error.ParseFailed;
@@ -98,10 +169,16 @@ pub fn VM(comptime Program: []const peg.Abs) type {
                                 }
                             }
 
+                            const rule = Grammar.ruleContainingIp(target) orelse unreachable;
+
                             try self.calls.appendBounded(.{
                                 .return_ip = IP1,
-                                .rule_id = target,
+                                .target_ip = target,
+                                .rule = rule,
                                 .start_sp = self.sp,
+                                .first_child = null,
+                                .last_child = null,
+                                .node_len_on_entry = self.nodes.items.len,
                             });
 
                             if (loop) continue :vm target else return target;
@@ -113,6 +190,7 @@ pub fn VM(comptime Program: []const peg.Abs) type {
                                     .ip = ctrl.ip,
                                     .sp = self.sp,
                                     .call_depth = @intCast(self.calls.items.len),
+                                    .node_len = self.nodes.items.len,
                                 });
                                 if (loop) continue :vm IP1 else return IP1;
                             },
@@ -124,23 +202,32 @@ pub fn VM(comptime Program: []const peg.Abs) type {
 
                             .move => {
                                 self.saves.items[self.saves.items.len - 1].sp = self.sp;
+                                self.saves.items[self.saves.items.len - 1].node_len = self.nodes.items.len;
                                 if (loop) continue :vm ctrl.ip else return ctrl.ip;
                             },
 
                             .wipe => {
                                 const save = self.saves.pop().?;
                                 self.sp = save.sp;
+                                self.truncateNodes(save.node_len);
                                 if (loop) continue :vm ctrl.ip else return ctrl.ip;
                             },
                         },
 
                         .done => {
                             if (self.calls.pop()) |frame| {
-                                // Memoize successful return
+                                const node_index = try self.appendNode(frame, self.sp);
+
                                 if (self.memo) |memo| {
-                                    const key = MemoKey{ .ip = frame.rule_id, .sp = frame.start_sp };
+                                    const key = MemoKey{ .ip = frame.target_ip, .sp = frame.start_sp };
                                     try memo.put(key, .{ .success = true, .end_sp = self.sp });
                                 }
+
+                                self.attachChild(node_index);
+                                if (self.calls.items.len == 0) {
+                                    self.root_node = node_index;
+                                }
+
                                 if (loop) continue :vm frame.return_ip else return frame.return_ip;
                             } else {
                                 if (self.sp == self.text.len) {
@@ -156,19 +243,19 @@ pub fn VM(comptime Program: []const peg.Abs) type {
                     }
 
                     if (self.saves.pop()) |save| {
-                        // Memoize failures for any rules we're abandoning
                         if (self.memo) |memo| {
                             var i = self.calls.items.len;
                             while (i > save.call_depth) {
                                 i -= 1;
                                 const frame = self.calls.items[i];
-                                const key = MemoKey{ .ip = frame.rule_id, .sp = frame.start_sp };
+                                const key = MemoKey{ .ip = frame.target_ip, .sp = frame.start_sp };
                                 memo.put(key, .{ .success = false, .end_sp = frame.start_sp }) catch {};
                             }
                         }
 
                         self.sp = save.sp;
                         self.calls.items.len = save.call_depth;
+                        self.truncateNodes(save.node_len);
 
                         if (loop) continue :vm save.ip else return save.ip;
                     }
@@ -188,30 +275,33 @@ pub fn VM(comptime Program: []const peg.Abs) type {
             gpa: std.mem.Allocator,
             maxsaves: usize,
             maxcalls: usize,
+            maxnodes: usize,
         ) !Self {
             return Self.init(
                 text,
                 try gpa.alloc(SaveFrame, maxsaves),
                 try gpa.alloc(CallFrame, maxcalls),
+                try gpa.alloc(Node, maxnodes),
             );
         }
 
         pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
             self.saves.deinit(gpa);
             self.calls.deinit(gpa);
+            self.nodes.deinit(gpa);
         }
 
         pub fn parse(
             text: [:0]const u8,
             gpa: std.mem.Allocator,
         ) !void {
-            var vm = try Self.initAlloc(text, gpa, 16, 16);
+            var vm = try Self.initAlloc(text, gpa, 32, 32, 256);
             defer vm.deinit(gpa);
             _ = try vm.run();
         }
 
         pub fn countSteps(text: [:0]const u8, gpa: std.mem.Allocator) !u32 {
-            var self = try Self.initAlloc(text, gpa, 16, 16);
+            var self = try Self.initAlloc(text, gpa, 32, 32, 256);
             defer self.deinit(gpa);
 
             var ip: u32 = 0;
@@ -229,7 +319,7 @@ pub fn VM(comptime Program: []const peg.Abs) type {
             text: [:0]const u8,
             gpa: std.mem.Allocator,
         ) !void {
-            var vm = try Self.initAlloc(text, gpa, 16, 16);
+            var vm = try Self.initAlloc(text, gpa, 32, 32, 256);
             defer vm.deinit(gpa);
 
             var memo = MemoTable.init(gpa);
@@ -240,7 +330,7 @@ pub fn VM(comptime Program: []const peg.Abs) type {
         }
 
         pub fn countStepsWithMemo(text: [:0]const u8, gpa: std.mem.Allocator) !struct { steps: u32, hits: u32, misses: u32 } {
-            var self = try Self.initAlloc(text, gpa, 16, 16);
+            var self = try Self.initAlloc(text, gpa, 32, 32, 256);
             defer self.deinit(gpa);
 
             var memo = MemoTable.init(gpa);
@@ -253,9 +343,8 @@ pub fn VM(comptime Program: []const peg.Abs) type {
             var misses: u32 = 0;
 
             while (true) {
-                // Check BEFORE executing the step
-                if (ip < Program.len and Program[ip] == .call) {
-                    const key = MemoKey{ .ip = Program[ip].call, .sp = self.sp };
+                if (ip < Ops.len and Ops[ip] == .call) {
+                    const key = MemoKey{ .ip = Ops[ip].call, .sp = self.sp };
                     if (memo.contains(key)) {
                         hits += 1;
                     } else {
@@ -273,6 +362,7 @@ pub fn VM(comptime Program: []const peg.Abs) type {
 
             return .{ .steps = count, .hits = hits, .misses = misses };
         }
+
     };
 }
 
@@ -332,122 +422,78 @@ fn step(vm: anytype, ip: *u32) !bool {
     }
 }
 
-fn expectParseSuccess(comptime P: peg.Opcodes, text: [:0]const u8) !void {
-    try VM(P).parse(text, std.testing.allocator);
-    _ = try VM(P).countSteps(text, std.testing.allocator);
+fn expectParseSuccess(comptime G: type, text: [:0]const u8) !void {
+    const TestVM = VM(G);
+    try TestVM.parse(text, std.testing.allocator);
+    _ = try TestVM.countSteps(text, std.testing.allocator);
 }
 
-fn expectParseFailure(comptime P: peg.Opcodes, text: [:0]const u8) !void {
-    try std.testing.expectError(error.ParseFailed, VM(P).parse(text, std.testing.allocator));
-    try std.testing.expectError(error.ParseFailed, VM(P).countSteps(text, std.testing.allocator));
+fn expectParseFailure(comptime G: type, text: [:0]const u8) !void {
+    const TestVM = VM(G);
+    try std.testing.expectError(error.ParseFailed, TestVM.parse(text, std.testing.allocator));
+    try std.testing.expectError(error.ParseFailed, TestVM.countSteps(text, std.testing.allocator));
 }
 
-// Test the manual construction for now
 test "basic VM iteration" {
-    const TestProgram = comptime [_]peg.Abs{
-        .{ .read = charSet('a') },
-        .{ .read = charSet('b') },
-        .over,
-    };
-
-    try expectParseSuccess(&TestProgram, "ab");
-    try expectParseFailure(&TestProgram, "ac");
+    try expectParseSuccess(SimpleGrammar, "ab");
+    try expectParseFailure(SimpleGrammar, "ac");
 }
 
 test "VM with backtracking" {
-    // Program: (a b) / (a c)
-    // Using rescue/commit for backtracking
-    const BacktrackProgram = comptime [_]peg.Abs{
-        .{ .frob = .{ .fx = .push, .ip = 4 } }, // rescue to 4
-        .{ .read = charSet('a') }, // match 'a'
-        .{ .read = charSet('b') }, // match 'b'
-        .{ .frob = .{ .fx = .drop, .ip = 6 } }, // commit to 6
-        .{ .read = charSet('a') }, // match 'a'
-        .{ .read = charSet('c') }, // match 'c'
-        .over,
-    };
-
-    try expectParseSuccess(&BacktrackProgram, "ab");
-    try expectParseSuccess(&BacktrackProgram, "ac");
-    try expectParseFailure(&BacktrackProgram, "ad");
+    try expectParseSuccess(ChoiceGrammar, "ab");
+    try expectParseSuccess(ChoiceGrammar, "ac");
+    try expectParseFailure(ChoiceGrammar, "ad");
 }
 
 test "VM event iteration" {
-    const SimpleProgram = comptime [_]peg.Abs{
-        .{ .read = charSet('a') },
-        .{ .read = charSet('b') },
-        .over,
-    };
-
     try std.testing.expectEqual(
         3,
-        try VM(&SimpleProgram).countSteps("ab", std.testing.allocator),
+        try VM(SimpleGrammar).countSteps("ab", std.testing.allocator),
     );
-}
-
-// Helper to create a charset with one character
-fn charSet(comptime c: u8) std.StaticBitSet(256) {
-    comptime var set = std.StaticBitSet(256).initEmpty();
-    set.set(c);
-    return set;
 }
 
 // Tests using the grammar compiler
 test "simple grammar compilation" {
-    const ops = comptime peg.compile(SimpleGrammar);
-
-    try expectParseSuccess(ops, "ab");
-    try expectParseFailure(ops, "ac");
-    try expectParseFailure(ops, "a");
+    try expectParseSuccess(SimpleGrammar, "ab");
+    try expectParseFailure(SimpleGrammar, "ac");
+    try expectParseFailure(SimpleGrammar, "a");
 }
 
 test "choice grammar compilation" {
-    const ops = comptime peg.compile(ChoiceGrammar);
-
-    try expectParseSuccess(ops, "ab");
-    try expectParseSuccess(ops, "ac");
-    try expectParseFailure(ops, "ad");
+    try expectParseSuccess(ChoiceGrammar, "ab");
+    try expectParseSuccess(ChoiceGrammar, "ac");
+    try expectParseFailure(ChoiceGrammar, "ad");
 }
 
 test "kleene star grammar compilation" {
-    const ops = comptime peg.compile(KleeneGrammar);
-
-    try expectParseSuccess(ops, "b");
-    try expectParseSuccess(ops, "ab");
-    try expectParseSuccess(ops, "aaab");
-    try expectParseFailure(ops, "aaa");
+    try expectParseSuccess(KleeneGrammar, "b");
+    try expectParseSuccess(KleeneGrammar, "ab");
+    try expectParseSuccess(KleeneGrammar, "aaab");
+    try expectParseFailure(KleeneGrammar, "aaa");
 }
 
 test "optional grammar compilation" {
-    const ops = comptime peg.compile(OptionalGrammar);
-
-    try expectParseSuccess(ops, "ab");
-    try expectParseSuccess(ops, "b");
-    try expectParseFailure(ops, "ac");
+    try expectParseSuccess(OptionalGrammar, "ab");
+    try expectParseSuccess(OptionalGrammar, "b");
+    try expectParseFailure(OptionalGrammar, "ac");
 }
 
 test "recursive grammar compilation" {
-    const ops = comptime peg.compile(RecursiveGrammar);
-
-    try expectParseSuccess(ops, "42");
-    try expectParseSuccess(ops, "(123)");
-    try expectParseSuccess(ops, "((99))");
-    try expectParseFailure(ops, "(42");
+    try expectParseSuccess(RecursiveGrammar, "42");
+    try expectParseSuccess(RecursiveGrammar, "(123)");
+    try expectParseSuccess(RecursiveGrammar, "((99))");
+    try expectParseFailure(RecursiveGrammar, "(42");
 }
 
 test "demo grammar from pegvmfun" {
-    const ops = comptime peg.compile(peg.demoGrammar);
-
-    try expectParseSuccess(ops, "123   ");
-    try expectParseSuccess(ops, "[123 456 789]");
-    try expectParseSuccess(ops, "[[1] [2]]");
-    try expectParseSuccess(ops, "[]");
+    try expectParseSuccess(peg.demoGrammar, "123   ");
+    try expectParseSuccess(peg.demoGrammar, "[123 456 789]");
+    try expectParseSuccess(peg.demoGrammar, "[[1] [2]]");
+    try expectParseSuccess(peg.demoGrammar, "[]");
 }
 
 test "memoization reduces steps" {
-    // Use the recursive grammar which has repeated rule calls
-    const ops = comptime peg.compile(RecursiveGrammar);
-    const TestVM = VM(ops);
+    const TestVM = VM(RecursiveGrammar);
 
     // Deeply nested expression that would benefit from memoization
     const input = "((((42))))";
@@ -466,8 +512,7 @@ test "memoization reduces steps" {
 }
 
 test "memoization correctness" {
-    const ops = comptime peg.compile(RecursiveGrammar);
-    const TestVM = VM(ops);
+    const TestVM = VM(RecursiveGrammar);
 
     // Both should succeed
     try TestVM.parse("((42))", std.testing.allocator);
@@ -479,8 +524,7 @@ test "memoization correctness" {
 }
 
 test "memoization statistics" {
-    const ops = comptime peg.compile(RecursiveGrammar);
-    const TestVM = VM(ops);
+    const TestVM = VM(RecursiveGrammar);
 
     // Parse with memoization and check stats
     const stats = try TestVM.countStepsWithMemo("(((42)))", std.testing.allocator);

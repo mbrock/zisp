@@ -34,8 +34,7 @@ const DemoGrammar = struct {
 };
 
 pub fn main() !void {
-    const ops = comptime peg.compile(DemoGrammar);
-    const TestVM = vm.VM(ops);
+    const TestVM = vm.VM(DemoGrammar);
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -50,12 +49,12 @@ pub fn main() !void {
     const input = "aaay";
 
     // Create VM and trace without memoization
-    var machine1 = try TestVM.initAlloc(input, allocator, 16, 16);
+    var machine1 = try TestVM.initAlloc(input, allocator, 16, 16, 256);
     defer machine1.deinit(allocator);
     try trace.trace(&machine1, stdout, tty);
     
     // Create VM with memoization and trace
-    var machine2 = try TestVM.initAlloc(input, allocator, 16, 16);
+    var machine2 = try TestVM.initAlloc(input, allocator, 16, 16, 256);
     defer machine2.deinit(allocator);
     var memo = TestVM.MemoTable.init(allocator);
     defer memo.deinit();

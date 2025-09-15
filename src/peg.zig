@@ -46,6 +46,241 @@ pub inline fn Grammar(rules: type) type {
         pub const RuleEnum = std.meta.DeclEnum(rules);
         const RuleOffsetMap = std.enums.EnumMap(RuleEnum, comptime_int);
 
+        pub const TextRange = struct {
+            start: usize,
+            len: usize,
+        };
+
+        pub fn NodeRefType(comptime rule: RuleEnum) type {
+            return struct {
+                pub const rule_tag = rule;
+                pub const node_ref_kind = .single;
+                index: usize,
+            };
+        }
+
+        pub fn NodeSliceType(comptime rule: RuleEnum) type {
+            return struct {
+                pub const rule_tag = rule;
+                pub const node_ref_kind = .slice;
+                start: usize,
+                len: usize,
+            };
+        }
+
+        fn isNodeRefType(comptime T: type) bool {
+            return switch (@typeInfo(T)) {
+                .@"struct" => @hasDecl(T, "node_ref_kind") and T.node_ref_kind == .single,
+                else => false,
+            };
+        }
+
+        fn isNodeSliceType(comptime T: type) bool {
+            return switch (@typeInfo(T)) {
+                .@"struct" => @hasDecl(T, "node_ref_kind") and T.node_ref_kind == .slice,
+                else => false,
+            };
+        }
+
+        fn ruleFromName(comptime name: []const u8) RuleEnum {
+            inline for (comptime std.meta.tags(RuleEnum)) |rule_tag| {
+                if (std.mem.eql(u8, @tagName(rule_tag), name)) {
+                    return rule_tag;
+                }
+            }
+            @compileError("Unknown grammar rule '" ++ name ++ "'");
+        }
+
+        fn primitiveValueType(comptime t: type) type {
+            if (@hasDecl(t, "Value")) {
+                return t.Value;
+            }
+
+            if (@hasDecl(t, "TargetName")) {
+                const name = t.TargetName;
+                return NodeRefType(ruleFromName(name));
+            }
+
+            @compileError("Unsupported primitive pattern type when inferring AST value");
+        }
+
+        fn valueTypeForStruct(comptime info: std.builtin.Type.Struct) type {
+            comptime var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
+            inline for (info.fields, 0..) |field, i| {
+                const field_type = valueTypeForPattern(field.type);
+                fields[i] = .{
+                    .name = field.name,
+                    .type = field_type,
+                    .default_value_ptr = null,
+                    .is_comptime = false,
+                    .alignment = if (info.is_tuple) 0 else field.alignment,
+                };
+            }
+
+            return @Type(.{ .@"struct" = .{
+                .layout = .auto,
+                .backing_integer = null,
+                .fields = &fields,
+                .decls = &.{},
+                .is_tuple = info.is_tuple,
+            } });
+        }
+
+        fn valueTypeForUnion(comptime info: std.builtin.Type.Union) type {
+            if (info.tag_type == null) {
+                @compileError("Untagged unions are not supported in grammar patterns");
+            }
+
+            comptime var fields: [info.fields.len]std.builtin.Type.UnionField = undefined;
+            inline for (info.fields, 0..) |field, i| {
+                const field_type = valueTypeForPattern(field.type);
+                fields[i] = .{
+                    .name = field.name,
+                    .type = field_type,
+                    .alignment = field.alignment,
+                };
+            }
+
+            return @Type(.{ .@"union" = .{
+                .layout = .auto,
+                .tag_type = info.tag_type,
+                .fields = &fields,
+                .decls = &.{},
+            } });
+        }
+
+        fn valueTypeForSlice(comptime child: type) type {
+            const inner = valueTypeForPattern(child);
+
+            if (isNodeRefType(inner)) {
+                return NodeSliceType(inner.rule_tag);
+            }
+
+            if (isNodeSliceType(inner)) {
+                return NodeSliceType(inner.rule_tag);
+            }
+
+            if (inner == u8 or inner == TextRange) {
+                return TextRange;
+            }
+
+            @compileError("Unsupported slice pattern for AST inference");
+        }
+
+        fn valueTypeForPattern(comptime t: type) type {
+            return switch (@typeInfo(t)) {
+                .pointer => |ptr| blk: {
+                    if (ptr.size == .slice) {
+                        break :blk valueTypeForSlice(ptr.child);
+                    }
+                    @compileError("Only slice pointers are supported in grammar patterns");
+                },
+                .optional => |opt| ?valueTypeForPattern(opt.child),
+                .@"struct" => |info| blk: {
+                    if (@hasDecl(t, "TargetName") or @hasDecl(t, "Value")) {
+                        break :blk primitiveValueType(t);
+                    }
+                    break :blk valueTypeForStruct(info);
+                },
+                .@"union" => |info| valueTypeForUnion(info),
+                else => primitiveValueType(t),
+            };
+        }
+
+        fn ruleValueType(comptime rule: RuleEnum) type {
+            const fn_info = getRuleFunctionInfo(@field(rules, @tagName(rule)));
+
+            comptime var tmp: [fn_info.params.len]type = undefined;
+            comptime var count: usize = 0;
+
+            inline for (fn_info.params) |param| {
+                const param_type = param.type orelse @compileError("Grammar rule parameters must have types");
+                tmp[count] = valueTypeForPattern(param_type);
+                count += 1;
+            }
+
+            if (count == 0) {
+                return void;
+            }
+
+            if (count == 1) {
+                return tmp[0];
+            }
+
+            comptime var tuple_types: [count]type = undefined;
+            inline for (0..count) |i| {
+                tuple_types[i] = tmp[i];
+            }
+
+            return std.meta.Tuple(&tuple_types);
+        }
+
+        pub fn RuleValueType(comptime rule: RuleEnum) type {
+            return ruleValueType(rule);
+        }
+
+        pub fn NodeListType(comptime rule: RuleEnum) type {
+            return std.ArrayList(RuleValueType(rule));
+        }
+
+        fn forestFieldsType() type {
+            const tags = comptime std.meta.tags(RuleEnum);
+            comptime var fields: [tags.len]std.builtin.Type.StructField = undefined;
+            inline for (tags, 0..) |rule_tag, i| {
+                const ListType = NodeListType(rule_tag);
+                fields[i] = .{
+                    .name = @tagName(rule_tag),
+                    .type = ListType,
+                    .default_value_ptr = null,
+                    .is_comptime = false,
+                    .alignment = @alignOf(ListType),
+                };
+            }
+
+            return @Type(.{ .@"struct" = .{
+                .layout = .auto,
+                .backing_integer = null,
+                .fields = &fields,
+                .decls = &.{},
+                .is_tuple = false,
+            } });
+        }
+
+        pub const Forest = forestFieldsType();
+
+        pub fn initForest() Forest {
+            var forest: Forest = undefined;
+            inline for (comptime std.meta.tags(RuleEnum)) |rule_tag| {
+                @field(forest, @tagName(rule_tag)) = NodeListType(rule_tag).empty;
+            }
+            return forest;
+        }
+
+        pub fn deinitForest(forest: *Forest, allocator: std.mem.Allocator) void {
+            inline for (comptime std.meta.tags(RuleEnum)) |rule_tag| {
+                @field(forest.*, @tagName(rule_tag)).deinit(allocator);
+            }
+        }
+
+        pub fn appendNode(
+            forest: *Forest,
+            allocator: std.mem.Allocator,
+            comptime rule: RuleEnum,
+            value: RuleValueType(rule),
+        ) !NodeRefType(rule) {
+            var list = &@field(forest.*, @tagName(rule));
+            try list.append(allocator, value);
+            return NodeRefType(rule){ .index = list.items.len - 1 };
+        }
+
+        pub fn getNode(
+            forest: *const Forest,
+            comptime rule: RuleEnum,
+            ref: NodeRefType(rule),
+        ) *const RuleValueType(rule) {
+            return &@field(forest.*, @tagName(rule)).items[ref.index];
+        }
+
         // Helper: Check if a declaration is a valid rule function
         fn isRuleFunction(comptime decl_type: type) bool {
             return switch (@typeInfo(decl_type)) {
@@ -266,7 +501,6 @@ pub fn OpG(comptime rel: bool) type {
         done: void,
         /// Successful parse completion
         over: void,
-
     };
 }
 
@@ -278,6 +512,8 @@ const Op = Rel;
 
 pub fn CharSet(s: []const u8) type {
     return struct {
+        pub const Value = u8;
+
         pub fn compile(_: type) []const Op {
             var bs = std.bit_set.ArrayBitSet(usize, 256).initEmpty();
             for (s) |c| {
@@ -290,6 +526,8 @@ pub fn CharSet(s: []const u8) type {
 
 pub fn CharRange(a: u8, b: u8) type {
     return struct {
+        pub const Value = u8;
+
         pub fn compile(_: type) []const Op {
             var bs = std.bit_set.ArrayBitSet(usize, 256).initEmpty();
             for (a..b + 1) |c| {
@@ -302,9 +540,11 @@ pub fn CharRange(a: u8, b: u8) type {
 
 pub fn Call(r: anytype) type {
     return struct {
+        pub const TargetName = if (@TypeOf(r) == []const u8) r else @tagName(r);
+
         pub fn compile(_: type) []const Op {
             return &[_]Op{.{
-                .call = if (@TypeOf(r) == []const u8) r else @tagName(r),
+                .call = TargetName,
             }};
         }
     };
@@ -414,6 +654,8 @@ pub fn Maybe(comptime inner: type) type {
 
 pub fn Noop() type {
     return struct {
+        pub const Value = void;
+
         pub fn compile(_: type) []const Op {
             return &[_]Op{};
         }
@@ -456,6 +698,8 @@ pub fn Choice(comptime alt1: type, comptime alt2: type) type {
 
 pub fn Peek(comptime inner: type) type {
     return struct {
+        pub const Value = void;
+
         pub fn compile(g: type) []const Op {
             const part = inner.compile(g);
             var a = Assembler(part.len + 3, enum { fail, success }){};
@@ -473,6 +717,8 @@ pub fn Peek(comptime inner: type) type {
 
 pub fn Shun(comptime inner: type) type {
     return struct {
+        pub const Value = void;
+
         pub fn compile(g: type) []const Op {
             const part = inner.compile(g);
             var a = Assembler(part.len + 3, enum { fail, success }){};
@@ -488,11 +734,42 @@ pub fn Shun(comptime inner: type) type {
     };
 }
 
-
 var stdoutbuf: [4096]u8 = undefined;
 const stdout_file = std.fs.File.stdout();
 var stdout_writer = stdout_file.writer(&stdoutbuf);
 const stdout = &stdout_writer.interface;
+
+test "Grammar AST inference" {
+    const G = Grammar(demoGrammar);
+
+    const ValueType = G.RuleValueType(.value);
+    const value_info = @typeInfo(ValueType).@"union";
+    try std.testing.expectEqual(@as(usize, 2), value_info.fields.len);
+    try std.testing.expect(std.mem.eql(u8, value_info.fields[0].name, "integer"));
+    try std.testing.expect(value_info.fields[0].type == G.NodeRefType(.integer));
+    try std.testing.expect(std.mem.eql(u8, value_info.fields[1].name, "array"));
+    try std.testing.expect(value_info.fields[1].type == G.NodeRefType(.array));
+
+    const ArrayType = G.RuleValueType(.array);
+    const array_info = @typeInfo(ArrayType).@"struct";
+    try std.testing.expect(array_info.is_tuple);
+    try std.testing.expectEqual(@as(usize, 6), array_info.fields.len);
+    try std.testing.expect(array_info.fields[0].type == u8);
+    try std.testing.expect(array_info.fields[2].type == G.NodeSliceType(.value));
+
+    const SkipType = G.RuleValueType(.skip);
+    try std.testing.expect(SkipType == G.TextRange);
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    var forest = G.initForest();
+    defer G.deinitForest(&forest, arena.allocator());
+
+    try std.testing.expect(forest.value.items.len == 0);
+    const node_ref = try G.appendNode(&forest, arena.allocator(), .value, ValueType{ .integer = G.NodeRefType(.integer){ .index = 0 } });
+    try std.testing.expect(node_ref.index == 0);
+}
 
 pub fn main() !void {
     const G = demoGrammar;
@@ -500,22 +777,27 @@ pub fn main() !void {
     const trace = @import("trace.zig");
 
     const tty = std.Io.tty.detectConfig(stdout_file);
-    
+
     try trace.dumpCode(G, stdout, tty);
 
-    const ops = comptime compile(G);
-    const TestVM = VM(ops);
+    const TestVM = VM(G);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
     const allocator = arena.allocator();
 
-    var vm = try TestVM.initAlloc("[[1] [2]]", allocator, 16, 16);
+    var vm = try TestVM.initAlloc("[[1] [2]]", allocator, 32, 32, 256);
     defer vm.deinit(allocator);
 
     // Use the trace function from trace.zig
     try trace.trace(&vm, stdout, tty);
+
+    // Parse again to build the AST and print it
+    var ast_vm = try TestVM.initAlloc("[[1] [2]]", allocator, 32, 32, 256);
+    defer ast_vm.deinit(allocator);
+    try ast_vm.run();
+    try trace.dumpAst(&ast_vm, stdout, allocator);
 
     try stdout.flush();
 }

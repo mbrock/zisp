@@ -34,8 +34,7 @@ test "memoization saves steps on backtracking" {
         ) void {}
     };
 
-    const ops = comptime peg.compile(BacktrackGrammar);
-    const TestVM = vm.VM(ops);
+    const TestVM = vm.VM(BacktrackGrammar);
 
     // Test shows linear growth in savings as input grows
     const test_cases = [_]struct { input: [:0]const u8, no_memo: u32, with_memo: u32, saved: u32 }{
@@ -82,8 +81,7 @@ test "memoization caches both success and failure" {
         ) void {}
     };
 
-    const ops = comptime peg.compile(CacheTestGrammar);
-    const TestVM = vm.VM(ops);
+    const TestVM = vm.VM(CacheTestGrammar);
 
     // "abcx" succeeds on first try, no cache benefit
     {
@@ -120,8 +118,7 @@ test "step count stability check" {
         ) void {}
     };
 
-    const ops = comptime peg.compile(SimpleGrammar);
-    const TestVM = vm.VM(ops);
+    const TestVM = vm.VM(SimpleGrammar);
 
     const steps = try TestVM.countSteps("abc", std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 4), steps);
@@ -161,8 +158,7 @@ test "memoization works with nested rules" {
         ) void {}
     };
 
-    const ops = comptime peg.compile(NestedGrammar);
-    const TestVM = vm.VM(ops);
+    const TestVM = vm.VM(NestedGrammar);
 
     // Input "ab-" will:
     // 1. Try expr '+' (parse expr successfully, fail on '+')
@@ -188,8 +184,7 @@ test "memoization disabled by default" {
         pub fn start(_: peg.CharSet("a")) void {}
     };
 
-    const ops = comptime peg.compile(SimpleGrammar);
-    const TestVM = vm.VM(ops);
+    const TestVM = vm.VM(SimpleGrammar);
 
     // parse() should not use memoization
     try TestVM.parse("a", std.testing.allocator);

@@ -53,6 +53,8 @@ const default_trace_theme = TracePrinter.Theme.init(.{
     .failure = SGR.fg(.red),
 });
 
+const MaxAstDepth: usize = 256;
+
 pub fn printChar(printer: *TracePrinter, c: u8) !void {
     if (c < ctrls.len) {
         try printer.print(.control_char, "{s}", .{ctrls[c]});
@@ -243,5 +245,60 @@ pub fn trace(
             try printer.print(.failure, "\n✕ {t} at step {d}\n", .{ err, step_count + 1 });
             return err;
         }
+    }
+}
+
+pub fn dumpAst(machine: anytype, writer: *std.Io.Writer, gpa: std.mem.Allocator) !void {
+    const VMType = @TypeOf(machine.*);
+    if (machine.root_node) |root| {
+        var prefix = std.BitStack.init(gpa);
+        try printAstNode(VMType, machine, writer, root, true, &prefix);
+    } else {
+        try writer.writeAll("<no ast>\n");
+    }
+}
+
+fn printAstNode(
+    comptime VMType: type,
+    machine: *const VMType,
+    writer: *std.Io.Writer,
+    index: u32,
+    is_last: bool,
+    prefix: *std.BitStack,
+) !void {
+    const node = machine.nodes.items[index];
+    const depth = prefix.bit_len;
+
+    var level: usize = 0;
+    while (level < depth) : (level += 1) {
+        const byte_index = level >> 3;
+        const bit_index: u3 = @intCast(level & 7);
+        const has_more = ((prefix.bytes.items[byte_index] >> bit_index) & 1) == 1;
+        try writer.writeAll(if (has_more) "│ " else "  ");
+    }
+    if (depth > 0) {
+        try writer.writeAll(if (is_last) "└─" else "├─");
+    }
+
+    const rule: VMType.RuleEnum = @enumFromInt(node.rule_index);
+    const span = machine.text[node.start..node.end];
+    try writer.print("{s} [{d}..{d}) \"{s}\"\n", .{
+        @tagName(rule),
+        node.start,
+        node.end,
+        span,
+    });
+
+    if (node.first_child) |first| {
+        try prefix.push(@intFromBool(!is_last));
+        var current = first;
+        while (true) {
+            const next = machine.nodes.items[current].next_sibling;
+            try printAstNode(VMType, machine, writer, current, next == null, prefix);
+            if (next) |n| {
+                current = n;
+            } else break;
+        }
+        _ = prefix.pop();
     }
 }
