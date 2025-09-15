@@ -12,12 +12,18 @@ pub fn VM(comptime Program: []const peg.Abs) type {
 
         sp: u32 = 0,
         text: [:0]const u8,
-        saves: BoundedStack(SaveFrame, 128) = .{},
-        calls: BoundedStack(CallFrame, 32) = .{},
+        saves: std.ArrayList(SaveFrame),
+        calls: std.ArrayList(CallFrame),
 
-        pub fn init(text: [:0]const u8) Self {
+        pub fn init(
+            text: [:0]const u8,
+            saves: []SaveFrame,
+            calls: []CallFrame,
+        ) Self {
             return Self{
                 .text = text,
+                .saves = .initBuffer(saves),
+                .calls = .initBuffer(calls),
             };
         }
 
@@ -33,7 +39,11 @@ pub fn VM(comptime Program: []const peg.Abs) type {
             start_sp: u32,
         };
 
-        pub fn next(self: *Self, ip: u32, comptime mode: Mode) !(if (mode == .Loop) void else ?u32) {
+        pub fn next(
+            self: *Self,
+            ip: u32,
+            comptime mode: Mode,
+        ) !(if (mode == .Loop) void else ?u32) {
             const loop = switch (mode) {
                 .Step => false,
                 .Loop => true,
@@ -54,7 +64,7 @@ pub fn VM(comptime Program: []const peg.Abs) type {
                         },
 
                         .call => |target| {
-                            try self.calls.push(.{
+                            try self.calls.appendBounded(.{
                                 .return_ip = IP1,
                                 .rule_id = target,
                                 .start_sp = self.sp,
@@ -65,10 +75,10 @@ pub fn VM(comptime Program: []const peg.Abs) type {
 
                         .frob => |ctrl| switch (ctrl.fx) {
                             .push => {
-                                try self.saves.push(.{
+                                try self.saves.appendBounded(.{
                                     .ip = ctrl.ip,
                                     .sp = self.sp,
-                                    .call_depth = @intCast(self.calls.len),
+                                    .call_depth = @intCast(self.calls.items.len),
                                 });
                                 if (loop) continue :vm IP1 else return IP1;
                             },
@@ -79,7 +89,7 @@ pub fn VM(comptime Program: []const peg.Abs) type {
                             },
 
                             .move => {
-                                self.saves.items[self.saves.len - 1].sp = self.sp;
+                                self.saves.items[self.saves.items.len - 1].sp = self.sp;
                                 if (loop) continue :vm ctrl.ip else return ctrl.ip;
                             },
 
@@ -108,7 +118,7 @@ pub fn VM(comptime Program: []const peg.Abs) type {
 
                     if (self.saves.pop()) |save| {
                         self.sp = save.sp;
-                        self.calls.len = save.call_depth;
+                        self.calls.items.len = save.call_depth;
 
                         if (loop) continue :vm save.ip else return save.ip;
                     }
@@ -123,17 +133,37 @@ pub fn VM(comptime Program: []const peg.Abs) type {
             try self.next(0, .Loop);
         }
 
+        pub fn initAlloc(
+            text: [:0]const u8,
+            gpa: std.mem.Allocator,
+            maxsaves: usize,
+            maxcalls: usize,
+        ) !Self {
+            return Self.init(
+                text,
+                try gpa.alloc(SaveFrame, maxsaves),
+                try gpa.alloc(CallFrame, maxcalls),
+            );
+        }
+
+        pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
+            self.saves.deinit(gpa);
+            self.calls.deinit(gpa);
+        }
+
         pub fn parse(
             text: [:0]const u8,
+            gpa: std.mem.Allocator,
         ) !void {
-            var vm = Self{
-                .text = text,
-            };
+            var vm = try Self.initAlloc(text, gpa, 16, 16);
+            defer vm.deinit(gpa);
             _ = try vm.run();
         }
 
-        pub fn countSteps(text: [:0]const u8) !u32 {
-            var self = Self.init(text);
+        pub fn countSteps(text: [:0]const u8, gpa: std.mem.Allocator) !u32 {
+            var self = try Self.initAlloc(text, gpa, 16, 16);
+            defer self.deinit(gpa);
+
             var ip: u32 = 0;
             var count: u32 = 1;
 
@@ -143,25 +173,6 @@ pub fn VM(comptime Program: []const peg.Abs) type {
             }
 
             return count;
-        }
-    };
-}
-
-pub fn BoundedStack(comptime T: type, comptime capacity: usize) type {
-    return struct {
-        items: [capacity]T = undefined,
-        len: usize = 0,
-
-        pub fn push(self: *@This(), item: T) !void {
-            if (self.len >= capacity) return error.StackOverflow;
-            self.items[self.len] = item;
-            self.len += 1;
-        }
-
-        pub fn pop(self: *@This()) ?T {
-            if (self.len == 0) return null;
-            self.len -= 1;
-            return self.items[self.len];
         }
     };
 }
@@ -223,13 +234,13 @@ fn step(vm: anytype, ip: *u32) !bool {
 }
 
 fn expectParseSuccess(comptime P: peg.Opcodes, text: [:0]const u8) !void {
-    try VM(P).parse(text);
-    _ = try VM(P).countSteps(text);
+    try VM(P).parse(text, std.testing.allocator);
+    _ = try VM(P).countSteps(text, std.testing.allocator);
 }
 
 fn expectParseFailure(comptime P: peg.Opcodes, text: [:0]const u8) !void {
-    try std.testing.expectError(error.ParseFailed, VM(P).parse(text));
-    try std.testing.expectError(error.ParseFailed, VM(P).countSteps(text));
+    try std.testing.expectError(error.ParseFailed, VM(P).parse(text, std.testing.allocator));
+    try std.testing.expectError(error.ParseFailed, VM(P).countSteps(text, std.testing.allocator));
 }
 
 // Test the manual construction for now
@@ -269,7 +280,10 @@ test "VM event iteration" {
         .over,
     };
 
-    try std.testing.expectEqual(3, try VM(&SimpleProgram).countSteps("ab"));
+    try std.testing.expectEqual(
+        3,
+        try VM(&SimpleProgram).countSteps("ab", std.testing.allocator),
+    );
 }
 
 // Helper to create a charset with one character

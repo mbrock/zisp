@@ -87,12 +87,12 @@ fn printChar(tty: std.Io.tty.Config, writer: *std.Io.Writer, c: u8) !void {
     try tty.setColor(writer, .reset);
 }
 
-pub fn dumpCode(T: type) !void {
-    const stdout_file = std.fs.File.stdout();
-    var buffer: [4096]u8 = undefined;
-    var stdout_writer = stdout_file.writer(&buffer);
-    const stdout = &stdout_writer.interface;
+var stdoutbuf: [4096]u8 = undefined;
+const stdout_file = std.fs.File.stdout();
+var stdout_writer = stdout_file.writer(&stdoutbuf);
+const stdout = &stdout_writer.interface;
 
+pub fn dumpCode(T: type) !void {
     const G = comptime Grammar(T);
     const ops = comptime G.compile(false);
     const tty = std.Io.tty.detectConfig(stdout_file);
@@ -119,10 +119,6 @@ pub fn main() !void {
 
     try dumpCode(G);
 
-    const stdout_file = std.fs.File.stdout();
-    var buffer: [4096]u8 = undefined;
-    var stdout_writer = stdout_file.writer(&buffer);
-    const stdout = &stdout_writer.interface;
     const tty = std.Io.tty.detectConfig(stdout_file);
 
     const P = Grammar(G);
@@ -130,7 +126,12 @@ pub fn main() !void {
 
     const TestVM = VM(ops);
 
-    var vm = TestVM{ .text = "[[1] [2]]" };
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    var vm = try TestVM.initAlloc("[[1] [2]]", allocator, 16, 16);
 
     try stdout.print("\n\nparsing \"{s}\"\n\n", .{vm.text});
 
@@ -180,7 +181,7 @@ pub fn main() !void {
         try stdout.writeAll(" ");
 
         try tty.setColor(stdout, .dim);
-        try stdout.splatBytesAll("│", vm.calls.len + 1);
+        try stdout.splatBytesAll("│", vm.calls.items.len + 1);
         try stdout.writeAll(" ");
         try tty.setColor(stdout, .reset);
 
@@ -360,70 +361,56 @@ pub inline fn Grammar(rules: type) type {
             return last_rule;
         }
 
-        // Normalize a pattern type (e.g., []T becomes kleene(T))
-        fn normalize(comptime t: type) type {
-            switch (@typeInfo(t)) {
-                .pointer => |ptr| {
-                    if (ptr.size == .slice) {
-                        return Kleene(normalize(ptr.child));
-                    } else {
-                        @compileError("bad pattern type");
-                    }
-                },
-                .optional => |opt| {
-                    return Maybe(normalize(opt.child));
-                },
-                .@"struct" => |s| {
-                    if (@hasDecl(t, "compile")) {
-                        return t;
-                    }
-
-                    // Transform struct into sequence of its fields
-                    // Build nested sequences directly instead of using array
-                    if (s.fields.len == 0) {
-                        return Noop();
-                    } else if (s.fields.len == 1) {
-                        return normalize(s.fields[0].type);
-                    } else {
-                        // Build sequence by nesting pairs
-                        var seq_type = normalize(s.fields[0].type);
-                        inline for (s.fields[1..]) |field| {
-                            seq_type = Seq2(seq_type, normalize(field.type));
-                        }
-                        return seq_type;
-                    }
-                },
-                .@"union" => |u| {
-                    if (u.tag_type != null) {
-                        // Transform enum union into choice of its variants
-                        var variants: [u.fields.len]type = undefined;
-                        var idx: usize = 0;
-                        inline for (u.fields) |field| {
-                            variants[idx] = normalize(field.type);
-                            idx += 1;
-                        }
-
-                        // Build nested choices
-                        var choice_type = variants[0];
-                        for (1..idx) |i| {
-                            choice_type = Choice(choice_type, variants[i]);
-                        }
-                        return choice_type;
-                    } else {
-                        @compileError("Only tagged unions (enums) are supported in grammar patterns");
-                    }
-                },
-                // Already normalized types pass through
-                else => return t,
-            }
-        }
-
         // Compile a single pattern type to opcodes
         pub fn compilePattern(comptime t: type) []const Op {
             const normalized = normalize(t);
             return normalized.compile(rules);
         }
     };
+}
+// Normalize a pattern type (e.g., []T becomes kleene(T))
+fn normalize(comptime t: type) type {
+    switch (@typeInfo(t)) {
+        .pointer => |ptr| {
+            if (ptr.size == .slice) {
+                return Kleene(normalize(ptr.child));
+            } else {
+                @compileError("bad pattern type");
+            }
+        },
+        .optional => |opt| {
+            return Maybe(normalize(opt.child));
+        },
+        .@"struct" => {
+            if (@hasDecl(t, "compile")) {
+                return t;
+            }
+
+            return Struct(t);
+        },
+        .@"union" => |u| {
+            if (u.tag_type != null) {
+                // Transform enum union into choice of its variants
+                var variants: [u.fields.len]type = undefined;
+                var idx: usize = 0;
+                inline for (u.fields) |field| {
+                    variants[idx] = normalize(field.type);
+                    idx += 1;
+                }
+
+                // Build nested choices
+                var choice_type = variants[0];
+                for (1..idx) |i| {
+                    choice_type = Choice(choice_type, variants[i]);
+                }
+                return choice_type;
+            } else {
+                @compileError("Only tagged unions (enums) are supported in grammar patterns");
+            }
+        },
+        // Already normalized types pass through
+        else => return t,
+    }
 }
 
 pub const FrameEffect = enum(u8) {
@@ -565,7 +552,9 @@ pub fn CharRange(a: u8, b: u8) type {
 pub fn Call(r: anytype) type {
     return struct {
         pub fn compile(_: type) []const Op {
-            return &[_]Op{.{ .call = if (@TypeOf(r) == []const u8) r else @tagName(r) }};
+            return &[_]Op{.{
+                .call = if (@TypeOf(r) == []const u8) r else @tagName(r),
+            }};
         }
     };
 }
@@ -680,22 +669,17 @@ pub fn Noop() type {
     };
 }
 
-pub fn Seq2(comptime first: type, comptime second: type) type {
+pub fn Struct(comptime parts: type) type {
     return struct {
         pub fn compile(g: type) []const Op {
-            const ops1 = first.compile(g);
-            const ops2 = second.compile(g);
-            var ops: [ops1.len + ops2.len]Op = undefined;
-            var i: usize = 0;
-            for (ops1) |op| {
-                ops[i] = op;
-                i += 1;
+            comptime var ops: []const Op = &[_]Op{};
+
+            inline for (comptime std.meta.fields(parts)) |decl| {
+                const part_type = @FieldType(parts, decl.name);
+                const part_ops = normalize(part_type).compile(g);
+                ops = ops ++ part_ops;
             }
-            for (ops2) |op| {
-                ops[i] = op;
-                i += 1;
-            }
-            return &ops;
+            return ops;
         }
     };
 }
