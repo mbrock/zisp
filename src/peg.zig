@@ -43,7 +43,7 @@ pub inline fn compile(comptime rules: type) []const Abs {
 
 pub inline fn Grammar(rules: type) type {
     return struct {
-        const RuleEnum = std.meta.DeclEnum(rules);
+        pub const RuleEnum = std.meta.DeclEnum(rules);
         const RuleOffsetMap = std.enums.EnumMap(RuleEnum, comptime_int);
 
         // Helper: Check if a declaration is a valid rule function
@@ -267,80 +267,6 @@ pub fn OpG(comptime rel: bool) type {
         /// Successful parse completion
         over: void,
 
-        fn name(op: @This()) []const u8 {
-            return switch (op) {
-                .frob => |x| @tagName(x.fx),
-                inline else => @tagName(op),
-            };
-        }
-
-        pub fn dump(
-            op: @This(),
-            tty: std.Io.tty.Config,
-            w: *std.Io.Writer,
-            _: u32,
-        ) !void {
-            try tty.setColor(w, .reset);
-            try w.print("{s} ", .{op.name()});
-
-            switch (op) {
-                .frob => |ctrl| {
-                    if (rel == false) {
-                        try tty.setColor(w, .cyan);
-                        try w.print("→{d}", .{ctrl.ip});
-                    } else {
-                        try tty.setColor(w, .cyan);
-                        if (ctrl.ip > 0)
-                            try w.writeByte('+');
-                        try w.print("{d}", .{ctrl.ip});
-                    }
-                },
-                .call => |target| {
-                    if (@TypeOf(target) == u32) {
-                        try tty.setColor(w, .cyan);
-                        try w.print("→{d}", .{target});
-                    } else {
-                        try tty.setColor(w, .blue);
-                        try w.print("&{s}", .{@tagName(target)});
-                    }
-                },
-                .read => |cs| {
-                    var i: u32 = 0;
-                    while (i < 256) : (i += 1) {
-                        if (cs.isSet(i)) {
-                            // Check for ranges - look ahead for consecutive characters
-                            var range_end = i;
-                            while (range_end + 1 < 256 and cs.isSet(range_end + 1)) : (range_end += 1) {}
-
-                            if (range_end > i + 1) {
-                                // We have a range of at least 3 characters
-                                // Print start of range
-                                try printChar(tty, w, @intCast(i));
-                                try tty.setColor(w, .dim);
-                                try w.writeAll("⋯");
-                                try tty.setColor(w, .reset);
-                                // Print end of range
-                                try printChar(tty, w, @intCast(range_end));
-                                i = range_end;
-                            } else if (range_end == i + 1) {
-                                // Just two consecutive characters - print them separately
-                                try printChar(tty, w, @intCast(i));
-                                try printChar(tty, w, @intCast(range_end));
-                                i = range_end;
-                            } else {
-                                // Single character
-                                try printChar(tty, w, @intCast(i));
-                            }
-                        }
-                    }
-                },
-
-                inline else => {},
-            }
-
-            try tty.setColor(w, .reset);
-            try w.writeAll("\n");
-        }
     };
 }
 
@@ -562,93 +488,22 @@ pub fn Shun(comptime inner: type) type {
     };
 }
 
-const ctrls = [_][]const u8{
-    "␀",
-    "␁",
-    "␂",
-    "␃",
-    "␄",
-    "␅",
-    "␆",
-    "␇",
-    "␈",
-    "␉",
-    "␤",
-    "␋",
-    "␌",
-    "␍",
-    "␎",
-    "␏",
-    "␐",
-    "␑",
-    "␒",
-    "␓",
-    "␔",
-    "␕",
-    "␖",
-    "␗",
-    "␘",
-    "␙",
-    "␚",
-    "␛",
-    "␜",
-    "␝",
-    "␞",
-    "␟",
-    "␠",
-};
-
-fn printChar(tty: std.Io.tty.Config, writer: *std.Io.Writer, c: u8) !void {
-    if (c < ctrls.len) {
-        try tty.setColor(writer, .magenta);
-        try writer.print("{s}", .{ctrls[c]});
-    } else if (c >= 33 and c < 127 and c != '\\') {
-        try tty.setColor(writer, .yellow);
-        try writer.print("{c}", .{c});
-    } else {
-        try tty.setColor(writer, .yellow);
-        try writer.print("\\x{x:0>2}", .{c});
-    }
-    try tty.setColor(writer, .reset);
-}
 
 var stdoutbuf: [4096]u8 = undefined;
 const stdout_file = std.fs.File.stdout();
 var stdout_writer = stdout_file.writer(&stdoutbuf);
 const stdout = &stdout_writer.interface;
 
-pub fn dumpCode(T: type) !void {
-    const G = comptime Grammar(T);
-    const ops = comptime G.compile(false);
-    const tty = std.Io.tty.detectConfig(stdout_file);
-
-    comptime var i = 0;
-    inline for (ops) |op| {
-        if (G.isStartOfRule(i)) |rule| {
-            try tty.setColor(stdout, .bold);
-            try stdout.print("\n&{t}:\n", .{rule});
-            try tty.setColor(stdout, .reset);
-        }
-
-        try stdout.print("{d: >4} ", .{i});
-        try op.dump(tty, stdout, i);
-        i += 1;
-    }
-
-    try stdout.flush();
-}
-
 pub fn main() !void {
     const G = demoGrammar;
     const VM = @import("vm.zig").VM;
-
-    try dumpCode(G);
+    const trace = @import("trace.zig");
 
     const tty = std.Io.tty.detectConfig(stdout_file);
+    
+    try trace.dumpCode(G, stdout, tty);
 
-    const P = Grammar(G);
-    const ops = comptime P.compile(false);
-
+    const ops = comptime compile(G);
     const TestVM = VM(ops);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -657,82 +512,10 @@ pub fn main() !void {
     const allocator = arena.allocator();
 
     var vm = try TestVM.initAlloc("[[1] [2]]", allocator, 16, 16);
+    defer vm.deinit(allocator);
 
-    try stdout.print("\n\nparsing \"{s}\"\n\n", .{vm.text});
+    // Use the trace function from trace.zig
+    try trace.trace(&vm, stdout, tty);
 
-    var sp: ?u32 = null;
-    var ip: u32 = 0;
-    var lastrule: ?P.RuleEnum = null;
-    var justcalled = true;
-
-    // Manually iterate through events
-    while (true) {
-        try tty.setColor(stdout, .reset);
-
-        const rule = P.ruleContainingIp(ip);
-        if (rule != lastrule) {
-            if (justcalled) {
-                try tty.setColor(stdout, .bright_blue);
-                try tty.setColor(stdout, .bold);
-                try stdout.print("{?t: >8} ", .{rule});
-            } else {
-                try tty.setColor(stdout, .dim);
-                try stdout.print("{?t: >8} ", .{rule});
-            }
-        } else {
-            try tty.setColor(stdout, .dim);
-            try stdout.splatByteAll(' ', 9);
-        }
-        lastrule = rule;
-        try tty.setColor(stdout, .reset);
-
-        try tty.setColor(stdout, .cyan);
-        try stdout.print("{d:0>4} ", .{ip});
-        try tty.setColor(stdout, .reset);
-
-        if (vm.sp != sp) {
-            try tty.setColor(stdout, .bold);
-            sp = vm.sp;
-            if (vm.sp < vm.text.len) {
-                try printChar(tty, stdout, vm.text[vm.sp]);
-            } else {
-                try tty.setColor(stdout, .bright_green);
-                try stdout.print("⌀", .{});
-            }
-        } else {
-            try stdout.writeAll(" ");
-        }
-        try tty.setColor(stdout, .reset);
-        try stdout.writeAll(" ");
-
-        try tty.setColor(stdout, .dim);
-        try stdout.splatBytesAll("│", vm.calls.items.len + 1);
-        try stdout.writeAll(" ");
-        try tty.setColor(stdout, .reset);
-
-        try ops[ip].dump(tty, stdout, ip);
-        if (vm.next(ip, .Step)) |outcome| {
-            if (outcome) |ipnext| {
-                if (ops[ip] == .call) {
-                    justcalled = true;
-                } else {
-                    justcalled = false;
-                }
-
-                ip = ipnext;
-            } else {
-                try tty.setColor(stdout, .bright_green);
-                try stdout.print("✓\n", .{});
-                try tty.setColor(stdout, .reset);
-                break;
-            }
-        } else |e| {
-            try tty.setColor(stdout, .red);
-            try stdout.print("✕ {t}\n", .{e});
-            break;
-        }
-    }
-
-    try tty.setColor(stdout, .reset);
     try stdout.flush();
 }

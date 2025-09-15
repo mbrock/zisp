@@ -3,6 +3,7 @@ comptime {
     _ = @import("pegvm.zig");
     _ = @import("peg.zig");
     _ = @import("vm.zig");
+    _ = @import("packrat_test.zig");
 }
 
 pub const parse = @import("pegvm.zig");
