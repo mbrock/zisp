@@ -6,21 +6,30 @@ const ctrls = [_][]const u8{
     "␀", "␁", "␂", "␃", "␄", "␅", "␆", "␇",
     "␈", "␉", "␤", "␋", "␌", "␍", "␎", "␏",
     "␐", "␑", "␒", "␓", "␔", "␕", "␖", "␗",
-    "␘", "␙", "␚", "␛", "␜", "␝", "␞", "␟", "␠",
+    "␘", "␙", "␚", "␛", "␜", "␝", "␞", "␟",
+    "␠",
 };
+
+fn colorPrint(
+    writer: *std.Io.Writer,
+    tty: std.Io.tty.Config,
+    color: anytype,
+    comptime fmt: []const u8,
+    args: anytype,
+) !void {
+    try tty.setColor(writer, color);
+    defer tty.setColor(writer, .reset) catch {};
+    try writer.print(fmt, args);
+}
 
 pub fn printChar(tty: std.Io.tty.Config, writer: *std.Io.Writer, c: u8) !void {
     if (c < ctrls.len) {
-        try tty.setColor(writer, .magenta);
-        try writer.print("{s}", .{ctrls[c]});
+        try colorPrint(writer, tty, .magenta, "{s}", .{ctrls[c]});
     } else if (c >= 33 and c < 127 and c != '\\') {
-        try tty.setColor(writer, .yellow);
-        try writer.print("{c}", .{c});
+        try colorPrint(writer, tty, .yellow, "{c}", .{c});
     } else {
-        try tty.setColor(writer, .yellow);
-        try writer.print("\\x{x:0>2}", .{c});
+        try colorPrint(writer, tty, .yellow, "\\x{x:0>2}", .{c});
     }
-    try tty.setColor(writer, .reset);
 }
 
 pub fn dumpOp(
@@ -38,22 +47,20 @@ pub fn dumpOp(
     switch (op) {
         .frob => |ctrl| {
             if (rel == false) {
-                try tty.setColor(w, .cyan);
-                try w.print("→{d}", .{ctrl.ip});
+                try colorPrint(w, tty, .cyan, "→{d}", .{ctrl.ip});
             } else {
-                try tty.setColor(w, .cyan);
-                if (ctrl.ip > 0)
-                    try w.writeByte('+');
-                try w.print("{d}", .{ctrl.ip});
+                if (ctrl.ip > 0) {
+                    try colorPrint(w, tty, .cyan, "+{d}", .{ctrl.ip});
+                } else {
+                    try colorPrint(w, tty, .cyan, "{d}", .{ctrl.ip});
+                }
             }
         },
         .call => |target| {
             if (@TypeOf(target) == u32) {
-                try tty.setColor(w, .cyan);
-                try w.print("→{d}", .{target});
+                try colorPrint(w, tty, .cyan, "→{d}", .{target});
             } else {
-                try tty.setColor(w, .blue);
-                try w.print("&{s}", .{@tagName(target)});
+                try colorPrint(w, tty, .blue, "&{s}", .{@tagName(target)});
             }
         },
         .read => |cs| {
@@ -68,9 +75,7 @@ pub fn dumpOp(
                         // We have a range of at least 3 characters
                         // Print start of range
                         try printChar(tty, w, @intCast(i));
-                        try tty.setColor(w, .dim);
-                        try w.writeAll("⋯");
-                        try tty.setColor(w, .reset);
+                        try colorPrint(w, tty, .dim, "{s}", .{"⋯"});
                         // Print end of range
                         try printChar(tty, w, @intCast(range_end));
                         i = range_end;
@@ -101,9 +106,7 @@ pub fn dumpCode(comptime T: type, writer: *std.Io.Writer, tty: std.Io.tty.Config
     comptime var i = 0;
     inline for (ops) |op| {
         if (G.isStartOfRule(i)) |rule| {
-            try tty.setColor(writer, .bold);
-            try writer.print("\n&{t}:\n", .{rule});
-            try tty.setColor(writer, .reset);
+            try colorPrint(writer, tty, .bold, "\n&{t}:\n", .{rule});
         }
 
         try writer.print("{d: >4} ", .{i});
@@ -123,15 +126,14 @@ fn traceStep(
     cache_hit: bool,
 ) !void {
     const Program = @TypeOf(machine.*).Ops;
-    
+
     // Show current position in text
     if (machine.sp != last_sp.*) {
         try tty.setColor(writer, .bold);
         if (machine.sp < machine.text.len) {
             try printChar(tty, writer, machine.text[machine.sp]);
         } else {
-            try tty.setColor(writer, .bright_green);
-            try writer.print("⌀", .{});
+            try colorPrint(writer, tty, .bright_green, "⌀", .{});
         }
         last_sp.* = machine.sp;
     } else {
@@ -139,25 +141,21 @@ fn traceStep(
     }
     try tty.setColor(writer, .reset);
     try writer.writeAll(" ");
-    
+
     // Show call stack depth
     try tty.setColor(writer, .dim);
     try writer.splatBytesAll("│", machine.calls.items.len + 1);
     try writer.writeAll(" ");
     try tty.setColor(writer, .reset);
-    
+
     // Show instruction
-    try tty.setColor(writer, .cyan);
-    try writer.print("{d:0>4} ", .{ip});
-    try tty.setColor(writer, .reset);
-    
+    try colorPrint(writer, tty, .cyan, "{d:0>4} ", .{ip});
+
     if (ip < Program.len) {
         if (cache_hit) {
-            try tty.setColor(writer, .green);
-            try writer.writeAll("⚡ ");
+            try colorPrint(writer, tty, .green, "{s}", .{"⚡ "});
         }
         try dumpOp(false, Program[ip], tty, writer, ip);
-        try tty.setColor(writer, .reset);
     }
 }
 
@@ -169,18 +167,18 @@ pub fn trace(
     const VMType = @TypeOf(machine.*);
     const Program = VMType.Ops;
     const has_memo = machine.memo != null;
-    
+
     if (has_memo) {
         try writer.print("\nParsing with memoization: \"{s}\"\n\n", .{machine.text});
     } else {
         try writer.print("\nParsing: \"{s}\"\n\n", .{machine.text});
     }
-    
+
     var ip: u32 = 0;
     var last_sp: ?u32 = null;
     var step_count: u32 = 0;
     var cache_hits: u32 = 0;
-    
+
     while (true) : (step_count += 1) {
         // Check for cache hit when memoization is enabled
         const is_cache_hit = if (has_memo and ip < Program.len and Program[ip] == .call) blk: {
@@ -191,27 +189,23 @@ pub fn trace(
             }
             break :blk false;
         } else false;
-        
+
         try traceStep(machine, ip, &last_sp, writer, tty, is_cache_hit);
-        
+
         // Execute step
         if (machine.next(ip, .Step)) |outcome| {
             if (outcome) |next_ip| {
                 ip = next_ip;
             } else {
-                try tty.setColor(writer, .bright_green);
                 if (has_memo) {
-                    try writer.print("\n✓ ({d} steps, {d} hits)\n", .{ step_count + 1, cache_hits });
+                    try colorPrint(writer, tty, .bright_green, "\n✓ ({d} steps, {d} hits)\n", .{ step_count + 1, cache_hits });
                 } else {
-                    try writer.print("\n✓ ({d} steps)\n", .{step_count + 1});
+                    try colorPrint(writer, tty, .bright_green, "\n✓ ({d} steps)\n", .{step_count + 1});
                 }
-                try tty.setColor(writer, .reset);
                 break;
             }
         } else |err| {
-            try tty.setColor(writer, .red);
-            try writer.print("\n✕ {t} at step {d}\n", .{ err, step_count + 1 });
-            try tty.setColor(writer, .reset);
+            try colorPrint(writer, tty, .red, "\n✕ {t} at step {d}\n", .{ err, step_count + 1 });
             return err;
         }
     }
