@@ -1,6 +1,9 @@
 const std = @import("std");
 const peg = @import("peg.zig");
-const vm = @import("vm.zig");
+const ansi = @import("ansitty.zig");
+
+const SGR = ansi.SGR;
+const ColorPrinter = ansi.ColorPrinter;
 
 const ctrls = [_][]const u8{
     "␀", "␁", "␂", "␃", "␄", "␅", "␆", "␇",
@@ -10,48 +13,60 @@ const ctrls = [_][]const u8{
     "␠",
 };
 
-const ColorPrinter = struct {
-    writer: *std.Io.Writer,
-    tty: std.Io.tty.Config,
-
-    pub fn init(writer: *std.Io.Writer, tty: std.Io.tty.Config) ColorPrinter {
-        return .{ .writer = writer, .tty = tty };
-    }
-
-    pub fn print(
-        self: *ColorPrinter,
-        color: anytype,
-        comptime fmt: []const u8,
-        args: anytype,
-    ) !void {
-        try self.setColor(color);
-        defer self.reset() catch {};
-        try self.writer.print(fmt, args);
-    }
-
-    pub fn setColor(self: *ColorPrinter, color: anytype) !void {
-        try self.tty.setColor(self.writer, color);
-    }
-
-    pub fn reset(self: *ColorPrinter) !void {
-        try self.tty.setColor(self.writer, .reset);
-    }
+pub const TraceStyle = enum {
+    control_char,
+    literal_char,
+    escape_char,
+    rule_name,
+    absolute_ip,
+    relative_ip,
+    call_ip,
+    call_name,
+    range_ellipsis,
+    cursor,
+    end_marker,
+    stack_depth,
+    opcode_ip,
+    cache_hit,
+    success,
+    failure,
 };
 
-pub fn printChar(printer: *ColorPrinter, c: u8) !void {
+const TracePrinter = ColorPrinter(TraceStyle);
+
+const default_trace_theme = TracePrinter.Theme.init(.{
+    .control_char = SGR.fg(.magenta),
+    .literal_char = SGR.fg(.yellow),
+    .escape_char = SGR.fg(.yellow),
+    .rule_name = SGR.attr(.bold),
+    .absolute_ip = SGR.fg(.cyan),
+    .relative_ip = SGR.fg(.cyan),
+    .call_ip = SGR.fg(.cyan),
+    .call_name = SGR.fg(.blue),
+    .range_ellipsis = SGR.attr(.dim),
+    .cursor = SGR.attr(.bold),
+    .end_marker = SGR.fg(.green).bright(),
+    .stack_depth = SGR.attr(.dim),
+    .opcode_ip = SGR.fg(.cyan),
+    .cache_hit = SGR.fg(.green),
+    .success = SGR.fg(.green).bright(),
+    .failure = SGR.fg(.red),
+});
+
+pub fn printChar(printer: *TracePrinter, c: u8) !void {
     if (c < ctrls.len) {
-        try printer.print(.magenta, "{s}", .{ctrls[c]});
+        try printer.print(.control_char, "{s}", .{ctrls[c]});
     } else if (c >= 33 and c < 127 and c != '\\') {
-        try printer.print(.yellow, "{c}", .{c});
+        try printer.print(.literal_char, "{c}", .{c});
     } else {
-        try printer.print(.yellow, "\\x{x:0>2}", .{c});
+        try printer.print(.escape_char, "\\x{x:0>2}", .{c});
     }
 }
 
 pub fn dumpOp(
     comptime rel: bool,
     op: peg.OpG(rel),
-    printer: *ColorPrinter,
+    printer: *TracePrinter,
     _: u32,
 ) !void {
     const writer = printer.writer;
@@ -63,20 +78,20 @@ pub fn dumpOp(
     switch (op) {
         .frob => |ctrl| {
             if (rel == false) {
-                try printer.print(.cyan, "→{d}", .{ctrl.ip});
+                try printer.print(.absolute_ip, "→{d}", .{ctrl.ip});
             } else {
                 if (ctrl.ip > 0) {
-                    try printer.print(.cyan, "+{d}", .{ctrl.ip});
+                    try printer.print(.relative_ip, "+{d}", .{ctrl.ip});
                 } else {
-                    try printer.print(.cyan, "{d}", .{ctrl.ip});
+                    try printer.print(.relative_ip, "{d}", .{ctrl.ip});
                 }
             }
         },
         .call => |target| {
             if (@TypeOf(target) == u32) {
-                try printer.print(.cyan, "→{d}", .{target});
+                try printer.print(.call_ip, "→{d}", .{target});
             } else {
-                try printer.print(.blue, "&{s}", .{@tagName(target)});
+                try printer.print(.call_name, "&{s}", .{@tagName(target)});
             }
         },
         .read => |cs| {
@@ -91,7 +106,7 @@ pub fn dumpOp(
                         // We have a range of at least 3 characters
                         // Print start of range
                         try printChar(printer, @intCast(i));
-                        try printer.print(.dim, "{s}", .{"⋯"});
+                        try printer.print(.range_ellipsis, "{s}", .{"⋯"});
                         // Print end of range
                         try printChar(printer, @intCast(range_end));
                         i = range_end;
@@ -119,12 +134,12 @@ pub fn dumpCode(comptime T: type, writer: *std.Io.Writer, tty: std.Io.tty.Config
     const G = comptime peg.Grammar(T);
     const ops = comptime G.compile(false);
 
-    var printer = ColorPrinter.init(writer, tty);
+    var printer = TracePrinter.init(writer, tty, default_trace_theme);
 
     comptime var i = 0;
     inline for (ops) |op| {
         if (G.isStartOfRule(i)) |rule| {
-            try printer.print(.bold, "\n&{t}:\n", .{rule});
+            try printer.print(.rule_name, "\n&{t}:\n", .{rule});
         }
 
         try writer.print("{d: >4} ", .{i});
@@ -139,7 +154,7 @@ fn traceStep(
     machine: anytype,
     ip: u32,
     last_sp: *?u32,
-    printer: *ColorPrinter,
+    printer: *TracePrinter,
     cache_hit: bool,
 ) !void {
     const Program = @TypeOf(machine.*).Ops;
@@ -147,11 +162,11 @@ fn traceStep(
 
     // Show current position in text
     if (machine.sp != last_sp.*) {
-        try printer.setColor(.bold);
+        try printer.setStyle(.cursor);
         if (machine.sp < machine.text.len) {
             try printChar(printer, machine.text[machine.sp]);
         } else {
-            try printer.print(.bright_green, "⌀", .{});
+            try printer.print(.end_marker, "⌀", .{});
         }
         last_sp.* = machine.sp;
     } else {
@@ -161,17 +176,17 @@ fn traceStep(
     try writer.writeAll(" ");
 
     // Show call stack depth
-    try printer.setColor(.dim);
+    try printer.setStyle(.stack_depth);
     try writer.splatBytesAll("│", machine.calls.items.len + 1);
     try writer.writeAll(" ");
     try printer.reset();
 
     // Show instruction
-    try printer.print(.cyan, "{d:0>4} ", .{ip});
+    try printer.print(.opcode_ip, "{d:0>4} ", .{ip});
 
     if (ip < Program.len) {
         if (cache_hit) {
-            try printer.print(.green, "{s}", .{"⚡ "});
+            try printer.print(.cache_hit, "{s}", .{"⚡ "});
         }
         try dumpOp(false, Program[ip], printer, ip);
     }
@@ -186,7 +201,7 @@ pub fn trace(
     const Program = VMType.Ops;
     const has_memo = machine.memo != null;
 
-    var printer = ColorPrinter.init(writer, tty);
+    var printer = TracePrinter.init(writer, tty, default_trace_theme);
 
     if (has_memo) {
         try writer.print("\nParsing with memoization: \"{s}\"\n\n", .{machine.text});
@@ -218,14 +233,14 @@ pub fn trace(
                 ip = next_ip;
             } else {
                 if (has_memo) {
-                    try printer.print(.bright_green, "\n✓ ({d} steps, {d} hits)\n", .{ step_count + 1, cache_hits });
+                    try printer.print(.success, "\n✓ ({d} steps, {d} hits)\n", .{ step_count + 1, cache_hits });
                 } else {
-                    try printer.print(.bright_green, "\n✓ ({d} steps)\n", .{step_count + 1});
+                    try printer.print(.success, "\n✓ ({d} steps)\n", .{step_count + 1});
                 }
                 break;
             }
         } else |err| {
-            try printer.print(.red, "\n✕ {t} at step {d}\n", .{ err, step_count + 1 });
+            try printer.print(.failure, "\n✕ {t} at step {d}\n", .{ err, step_count + 1 });
             return err;
         }
     }
