@@ -248,11 +248,17 @@ pub fn trace(
     }
 }
 
-pub fn dumpAst(machine: anytype, writer: *std.Io.Writer, gpa: std.mem.Allocator) !void {
+pub fn dumpAst(
+    machine: anytype,
+    writer: *std.Io.Writer,
+    tty: std.Io.tty.Config,
+    gpa: std.mem.Allocator,
+) !void {
     const VMType = @TypeOf(machine.*);
     if (machine.root_node) |root| {
         var prefix = std.BitStack.init(gpa);
-        try printAstNode(VMType, machine, writer, root, true, &prefix);
+        var printer = TracePrinter.init(writer, tty, default_trace_theme);
+        try printAstNode(VMType, machine, &printer, root, true, &prefix);
     } else {
         try writer.writeAll("<no ast>\n");
     }
@@ -261,13 +267,14 @@ pub fn dumpAst(machine: anytype, writer: *std.Io.Writer, gpa: std.mem.Allocator)
 fn printAstNode(
     comptime VMType: type,
     machine: *const VMType,
-    writer: *std.Io.Writer,
+    printer: *TracePrinter,
     index: u32,
     is_last: bool,
     prefix: *std.BitStack,
 ) !void {
     const node = machine.nodes.items[index];
     const depth = prefix.bit_len;
+    const writer = printer.writer;
 
     var level: usize = 0;
     while (level < depth) : (level += 1) {
@@ -282,19 +289,24 @@ fn printAstNode(
 
     const rule: VMType.RuleEnum = @enumFromInt(node.rule_index);
     const span = machine.text[node.start..node.end];
-    try writer.print("{s} [{d}..{d}) \"{s}\"\n", .{
-        @tagName(rule),
-        node.start,
-        node.end,
-        span,
-    });
+    try printer.print(.rule_name, "{s}", .{@tagName(rule)});
+    try writer.writeAll(" [");
+    try printer.print(.absolute_ip, "{d}", .{node.start});
+    try printer.print(.range_ellipsis, "..", .{});
+    try printer.print(.absolute_ip, "{d}", .{node.end});
+    try writer.writeAll(") ");
+    try writer.writeAll("\"");
+    for (span) |ch| {
+        try printChar(printer, ch);
+    }
+    try writer.writeAll("\"\n");
 
     if (node.first_child) |first| {
         try prefix.push(@intFromBool(!is_last));
         var current = first;
         while (true) {
             const next = machine.nodes.items[current].next_sibling;
-            try printAstNode(VMType, machine, writer, current, next == null, prefix);
+            try printAstNode(VMType, machine, printer, current, next == null, prefix);
             if (next) |n| {
                 current = n;
             } else break;
