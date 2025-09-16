@@ -20,8 +20,10 @@ pub const demoGrammar = struct {
     ) void {}
 
     pub fn integer(
-        _: CharRange('1', '9'),
-        _: []CharRange('0', '9'),
+        _: struct {
+            d: CharRange('1', '9'),
+            ds: []CharRange('0', '9'),
+        },
         _: Call(R.skip),
     ) void {}
 
@@ -83,10 +85,8 @@ pub inline fn Grammar(rules: type) type {
         }
 
         fn ruleFromName(comptime name: []const u8) RuleEnum {
-            inline for (comptime std.meta.tags(RuleEnum)) |rule_tag| {
-                if (std.mem.eql(u8, @tagName(rule_tag), name)) {
-                    return rule_tag;
-                }
+            if (@hasField(RuleEnum, name)) {
+                return @field(RuleEnum, name);
             }
             @compileError("Unknown grammar rule '" ++ name ++ "'");
         }
@@ -113,7 +113,7 @@ pub inline fn Grammar(rules: type) type {
                     .type = field_type,
                     .default_value_ptr = null,
                     .is_comptime = false,
-                    .alignment = if (info.is_tuple) 0 else field.alignment,
+                    .alignment = if (info.is_tuple) 0 else @alignOf(field_type),
                 };
             }
 
@@ -137,7 +137,7 @@ pub inline fn Grammar(rules: type) type {
                 fields[i] = .{
                     .name = field.name,
                     .type = field_type,
-                    .alignment = field.alignment,
+                    .alignment = @alignOf(field_type),
                 };
             }
 
@@ -152,11 +152,11 @@ pub inline fn Grammar(rules: type) type {
         fn valueTypeForSlice(comptime child: type) type {
             const inner = valueTypeForPattern(child);
 
-            if (isNodeRefType(inner)) {
+            if (comptime isNodeRefType(inner)) {
                 return NodeSliceType(inner.rule_tag);
             }
 
-            if (isNodeSliceType(inner)) {
+            if (comptime isNodeSliceType(inner)) {
                 return NodeSliceType(inner.rule_tag);
             }
 
@@ -281,7 +281,14 @@ pub inline fn Grammar(rules: type) type {
             return &@field(forest.*, @tagName(rule)).items[ref.index];
         }
 
-        const BuildError = error{ InvalidAst, UnsupportedPattern, OutOfMemory };
+        pub const BuildError = error{ InvalidAst, UnsupportedPattern, OutOfMemory };
+
+        pub fn BuildResult(comptime rule: RuleEnum) type {
+            return struct {
+                forest: Forest,
+                root: NodeRefType(rule),
+            };
+        }
 
         fn NodeState(comptime NodeType: type) type {
             return struct {
@@ -355,7 +362,8 @@ pub inline fn Grammar(rules: type) type {
             state.pos = end_pos;
             state.next_child = childToIndex(child.next_sibling);
 
-            return NodeRefType(rule){ .index = ctx.positions[child_idx] };
+            const index = ctx.positions[child_idx];
+            return NodeRefType(rule){ .index = index };
         }
 
         fn gatherNodeSlice(
@@ -435,11 +443,11 @@ pub inline fn Grammar(rules: type) type {
             const ChildType = pointer_info.child;
             const InnerType = valueTypeForPattern(ChildType);
 
-            if (isNodeRefType(InnerType)) {
+            if (comptime isNodeRefType(InnerType)) {
                 return gatherNodeSlice(NodeType, InnerType.rule_tag, ctx, state);
             }
 
-            if (isNodeSliceType(InnerType)) {
+            if (comptime isNodeSliceType(InnerType)) {
                 return gatherNodeSlice(NodeType, InnerType.rule_tag, ctx, state);
             }
 
@@ -534,7 +542,7 @@ pub inline fn Grammar(rules: type) type {
                 .optional => |opt| return evalOptional(NodeType, opt.child, ctx, state),
                 .@"struct" => {
                     if (@hasDecl(PatternType, "TargetName")) {
-                        const rule = ruleFromName(PatternType.TargetName);
+                        const rule = comptime ruleFromName(PatternType.TargetName);
                         return expectCall(NodeType, rule, ctx, state);
                     }
 
@@ -644,7 +652,7 @@ pub inline fn Grammar(rules: type) type {
             nodes: []const NodeType,
             root_index: u32,
             comptime root_rule: RuleEnum,
-        ) BuildError!struct { forest: Forest, root: NodeRefType(root_rule) } {
+        ) BuildError!BuildResult(root_rule) {
             const node_count = nodes.len;
             if (node_count == 0) {
                 return error.InvalidAst;
@@ -686,9 +694,7 @@ pub inline fn Grammar(rules: type) type {
 
             inline for (rule_tags, 0..) |_, ri| {
                 const slice = buckets[ri].items;
-                for (slice, 0..) |node_idx, pos| {
-                    positions[node_idx] = pos;
-                }
+                for (slice, 0..) |node_idx, pos| positions[node_idx] = pos;
             }
 
             var forest = initForest();
@@ -714,7 +720,7 @@ pub inline fn Grammar(rules: type) type {
             }
 
             const root_ref = NodeRefType(root_rule){ .index = positions[ensured_root] };
-            return .{ .forest = forest, .root = root_ref };
+            return BuildResult(root_rule){ .forest = forest, .root = root_ref };
         }
 
         // Helper: Check if a declaration is a valid rule function
@@ -1234,6 +1240,7 @@ pub fn main() !void {
     defer ast_vm.deinit(allocator);
     try ast_vm.run();
     try trace.dumpAst(&ast_vm, stdout, tty, allocator);
+    try trace.dumpForest(&ast_vm, stdout, tty, allocator, .array);
 
     try stdout.flush();
 }

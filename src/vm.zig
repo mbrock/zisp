@@ -333,7 +333,7 @@ pub fn VM(comptime GrammarType: type) type {
             self: *const Self,
             allocator: std.mem.Allocator,
             comptime root_rule: RuleEnum,
-        ) !struct { forest: Grammar.Forest, root: Grammar.NodeRefType(root_rule) } {
+        ) (Grammar.BuildError || error{NoAst})!Grammar.BuildResult(root_rule) {
             const root_index = self.root_node orelse return error.NoAst;
             const text_slice = self.text[0..self.text.len];
             return Grammar.buildForestForRoot(

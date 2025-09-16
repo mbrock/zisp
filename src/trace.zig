@@ -314,3 +314,193 @@ fn printAstNode(
         _ = prefix.pop();
     }
 }
+
+fn writeIndent(writer: *std.Io.Writer, depth: usize) !void {
+    var i: usize = 0;
+    while (i < depth) : (i += 1) {
+        try writer.writeAll("  ");
+    }
+}
+
+fn dumpForestValue(
+    comptime VMType: type,
+    forest: *const VMType.Grammar.Forest,
+    printer: *TracePrinter,
+    text: []const u8,
+    depth: usize,
+    value: anytype,
+) anyerror!void {
+    const Grammar = VMType.Grammar;
+    const writer = printer.writer;
+    const T = @TypeOf(value);
+
+    if (T == void) {
+        try writer.writeAll("\n");
+        return;
+    }
+
+    const has_node_ref_kind = comptime switch (@typeInfo(T)) {
+        .@"struct" => @hasDecl(T, "node_ref_kind"),
+        else => false,
+    };
+
+    if (has_node_ref_kind) {
+        if (T.node_ref_kind == .single) {
+            try writer.writeAll(" ->\n");
+            try dumpForestNode(VMType, forest, printer, text, depth + 1, T.rule_tag, value);
+            return;
+        }
+
+        try writer.print(" (len {d})\n", .{value.len});
+        var i: usize = 0;
+        while (i < value.len) : (i += 1) {
+            try writeIndent(writer, depth + 1);
+            try writer.print("[{d}]\n", .{i});
+            const child_ref = Grammar.NodeRefType(T.rule_tag){ .index = value.start + i };
+            try dumpForestNode(VMType, forest, printer, text, depth + 2, T.rule_tag, child_ref);
+        }
+        return;
+    }
+
+    if (T == u8) {
+        if (value >= 32 and value < 127) {
+            try writer.print(" = '{c}'\n", .{value});
+        } else {
+            try writer.print(" = 0x{x}\n", .{value});
+        }
+        return;
+    }
+
+    if (T == Grammar.TextRange) {
+        const start = value.start;
+        const end = @min(start + value.len, text.len);
+        try writer.writeAll(" = \"");
+        var i: usize = start;
+        while (i < end) : (i += 1) {
+            try printChar(printer, text[i]);
+        }
+        try writer.print("\" [{d}..{d})\n", .{ start, end });
+        return;
+    }
+
+    switch (@typeInfo(T)) {
+        .optional => {
+            if (value) |payload| {
+                try writer.writeAll("\n");
+                try writeIndent(writer, depth + 1);
+                try writer.writeAll("? ");
+                try dumpForestValue(VMType, forest, printer, text, depth + 1, payload);
+            } else {
+                try writer.writeAll(" (none)\n");
+            }
+            return;
+        },
+        .@"union" => |info| {
+            const Tag = info.tag_type.?;
+            const tag = std.meta.activeTag(value);
+            try writer.print(" .{s}", .{@tagName(tag)});
+            inline for (info.fields) |field| {
+                if (tag == @field(Tag, field.name)) {
+                    const payload = @field(value, field.name);
+                    try dumpForestValue(VMType, forest, printer, text, depth, payload);
+                    return;
+                }
+            }
+            try writer.writeAll("\n");
+            return;
+        },
+        .@"struct" => |info| {
+            if (info.is_tuple) {
+                try writer.writeAll("\n");
+                inline for (info.fields) |field| {
+                    try writeIndent(writer, depth + 1);
+                    try writer.print(".{s} = ", .{field.name});
+                    const elem = @field(value, field.name);
+                    try dumpForestValue(VMType, forest, printer, text, depth + 1, elem);
+                }
+                return;
+            }
+
+            if (info.fields.len == 0) {
+                try writer.writeAll(" {}");
+                try writer.writeAll("\n");
+                return;
+            }
+
+            try writer.writeAll("\n");
+            inline for (info.fields) |field| {
+                try writeIndent(writer, depth + 1);
+                try writer.print("{s}: ", .{field.name});
+                const field_value = @field(value, field.name);
+                try dumpForestValue(VMType, forest, printer, text, depth + 1, field_value);
+            }
+            return;
+        },
+        .int, .comptime_int => {
+            try writer.print(" = {d}\n", .{value});
+            return;
+        },
+        .bool => {
+            try writer.print(" = {}\n", .{value});
+            return;
+        },
+        .float => {
+            try writer.print(" = {d}\n", .{value});
+            return;
+        },
+        .pointer => |ptr| {
+            if (ptr.size == .slice and ptr.child == u8) {
+                try writer.print(" = \"{s}\"\n", .{value});
+                return;
+            }
+        },
+        else => {},
+    }
+
+    try writer.print(" = {?}\n", .{value});
+}
+
+fn dumpForestNode(
+    comptime VMType: type,
+    forest: *const VMType.Grammar.Forest,
+    printer: *TracePrinter,
+    text: []const u8,
+    depth: usize,
+    comptime rule: VMType.RuleEnum,
+    ref: VMType.Grammar.NodeRefType(rule),
+) anyerror!void {
+    const Grammar = VMType.Grammar;
+    const writer = printer.writer;
+    try writeIndent(writer, depth);
+    try printer.print(.rule_name, "{s}", .{@tagName(rule)});
+
+    const ValueType = Grammar.RuleValueType(rule);
+    if (comptime ValueType == void) {
+        try writer.writeAll("\n");
+        return;
+    }
+
+    const value_ptr = Grammar.getNode(forest, rule, ref);
+    const value = value_ptr.*;
+    try dumpForestValue(VMType, forest, printer, text, depth, value);
+}
+
+pub fn dumpForest(
+    machine: anytype,
+    writer: *std.Io.Writer,
+    tty: std.Io.tty.Config,
+    allocator: std.mem.Allocator,
+    comptime root_rule: @TypeOf(machine.*).RuleEnum,
+) !void {
+    const VMType = @TypeOf(machine.*);
+    const Grammar = VMType.Grammar;
+
+    var built = try machine.buildForest(allocator, root_rule);
+    defer Grammar.deinitForest(&built.forest, allocator);
+
+    try writer.writeAll("\nTyped Forest:\n");
+    var printer = TracePrinter.init(writer, tty, default_trace_theme);
+    const text = machine.text[0..machine.text.len];
+    try dumpForestNode(VMType, &built.forest, &printer, text, 0, root_rule, built.root);
+    try writer.writeAll("\n");
+}
