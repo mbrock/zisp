@@ -329,6 +329,23 @@ pub fn VM(comptime GrammarType: type) type {
             _ = try vm.run();
         }
 
+        pub fn buildForest(
+            self: *const Self,
+            allocator: std.mem.Allocator,
+            comptime root_rule: RuleEnum,
+        ) !struct { forest: Grammar.Forest, root: Grammar.NodeRefType(root_rule) } {
+            const root_index = self.root_node orelse return error.NoAst;
+            const text_slice = self.text[0..self.text.len];
+            return Grammar.buildForestForRoot(
+                Node,
+                allocator,
+                text_slice,
+                self.nodes.items,
+                root_index,
+                root_rule,
+            );
+        }
+
         pub fn countStepsWithMemo(text: [:0]const u8, gpa: std.mem.Allocator) !struct { steps: u32, hits: u32, misses: u32 } {
             var self = try Self.initAlloc(text, gpa, 32, 32, 256);
             defer self.deinit(gpa);
