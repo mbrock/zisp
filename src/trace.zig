@@ -413,6 +413,7 @@ fn dumpForestValue(
             if (info.is_tuple) {
                 try writer.writeAll("\n");
                 inline for (info.fields) |field| {
+                    if (comptime field.type == void) continue;
                     try writeIndent(writer, depth + 1);
                     try writer.print(".{s} = ", .{field.name});
                     const elem = @field(value, field.name);
@@ -429,6 +430,7 @@ fn dumpForestValue(
 
             try writer.writeAll("\n");
             inline for (info.fields) |field| {
+                if (comptime field.type == void) continue;
                 try writeIndent(writer, depth + 1);
                 try writer.print("{s}: ", .{field.name});
                 const field_value = @field(value, field.name);

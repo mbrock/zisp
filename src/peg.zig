@@ -24,16 +24,16 @@ pub const demoGrammar = struct {
             d: CharRange('1', '9'),
             ds: []CharRange('0', '9'),
         },
-        _: Call(R.skip),
+        _: Hide(Call(R.skip)),
     ) void {}
 
     pub fn array(_: Seq(.{
         CharSet("["),
-        Call(R.skip),
+        Hide(Call(R.skip)),
         []Call(R.value),
-        Call(R.skip),
+        Hide(Call(R.skip)),
         CharSet("]"),
-        Call(R.skip),
+        Hide(Call(R.skip)),
     })) void {}
 
     pub fn skip(_: []CharSet(" \t\n\r")) void {}
@@ -95,7 +95,6 @@ pub inline fn Grammar(rules: type) type {
             if (@hasDecl(t, "Value")) {
                 return t.Value;
             }
-
             if (@hasDecl(t, "TargetName")) {
                 const name = t.TargetName;
                 return NodeRefType(ruleFromName(name));
@@ -105,24 +104,46 @@ pub inline fn Grammar(rules: type) type {
         }
 
         fn valueTypeForStruct(comptime info: std.builtin.Type.Struct) type {
-            comptime var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
-            inline for (info.fields, 0..) |field, i| {
+            if (info.is_tuple) {
+                comptime var tuple_buf: [info.fields.len]type = undefined;
+                comptime var tuple_count: usize = 0;
+                inline for (info.fields) |field| {
+                    const field_type = valueTypeForPattern(field.type);
+                    if (field_type == void) continue;
+                    tuple_buf[tuple_count] = field_type;
+                    tuple_count += 1;
+                }
+                if (tuple_count == 0) return void;
+                const used = tuple_buf[0..tuple_count];
+                return std.meta.Tuple(used);
+            }
+
+            comptime var fields_buf: [info.fields.len]std.builtin.Type.StructField = undefined;
+            comptime var count: usize = 0;
+            inline for (info.fields) |field| {
                 const field_type = valueTypeForPattern(field.type);
-                fields[i] = .{
+                if (field_type == void) continue;
+                fields_buf[count] = .{
                     .name = field.name,
                     .type = field_type,
                     .default_value_ptr = null,
                     .is_comptime = false,
-                    .alignment = if (info.is_tuple) 0 else @alignOf(field_type),
+                    .alignment = field.alignment,
                 };
+                count += 1;
             }
 
+            if (count == 0) {
+                return void;
+            }
+
+            const used_fields = fields_buf[0..count];
             return @Type(.{ .@"struct" = .{
                 .layout = .auto,
                 .backing_integer = null,
-                .fields = &fields,
+                .fields = used_fields,
                 .decls = &.{},
-                .is_tuple = info.is_tuple,
+                .is_tuple = false,
             } });
         }
 
@@ -151,6 +172,10 @@ pub inline fn Grammar(rules: type) type {
 
         fn valueTypeForSlice(comptime child: type) type {
             const inner = valueTypeForPattern(child);
+
+            if (inner == void) {
+                return void;
+            }
 
             if (comptime isNodeRefType(inner)) {
                 return NodeSliceType(inner.rule_tag);
@@ -195,7 +220,9 @@ pub inline fn Grammar(rules: type) type {
 
             inline for (fn_info.params) |param| {
                 const param_type = param.type orelse @compileError("Grammar rule parameters must have types");
-                tmp[count] = valueTypeForPattern(param_type);
+                const param_value_type = valueTypeForPattern(param_type);
+                if (param_value_type == void) continue;
+                tmp[count] = param_value_type;
                 count += 1;
             }
 
@@ -212,7 +239,7 @@ pub inline fn Grammar(rules: type) type {
                 tuple_types[i] = tmp[i];
             }
 
-            return std.meta.Tuple(&tuple_types);
+            return std.meta.Tuple(tuple_types[0..count]);
         }
 
         pub fn RuleValueType(comptime rule: RuleEnum) type {
@@ -220,7 +247,18 @@ pub inline fn Grammar(rules: type) type {
         }
 
         pub fn NodeListType(comptime rule: RuleEnum) type {
-            return std.ArrayList(RuleValueType(rule));
+            const ValueType = RuleValueType(rule);
+            if (@sizeOf(ValueType) == 0) {
+                return struct {
+                    items: []ValueType = &.{},
+                    pub const empty = @This(){};
+                    pub fn append(_: *@This(), _: std.mem.Allocator, _: ValueType) !void {
+                        return;
+                    }
+                    pub fn deinit(_: *@This(), _: std.mem.Allocator) void {}
+                };
+            }
+            return std.ArrayList(ValueType);
         }
 
         fn forestFieldsType() type {
@@ -268,6 +306,9 @@ pub inline fn Grammar(rules: type) type {
             comptime rule: RuleEnum,
             value: RuleValueType(rule),
         ) !NodeRefType(rule) {
+            if (comptime @sizeOf(RuleValueType(rule)) == 0) {
+                @compileError("Cannot append nodes for non-capturing rules");
+            }
             var list = &@field(forest.*, @tagName(rule));
             try list.append(allocator, value);
             return NodeRefType(rule){ .index = list.items.len - 1 };
@@ -413,17 +454,17 @@ pub inline fn Grammar(rules: type) type {
             state: *NodeState(NodeType),
         ) BuildError!valueTypeForPattern(PatternType) {
             const ValueType = valueTypeForPattern(PatternType);
-            if (ValueType == void) {
-                return {};
-            }
-
-            if (ValueType == u8) {
+            if (ValueType == void or ValueType == u8) {
                 if (state.pos >= state.end or state.pos >= ctx.text.len) {
                     return error.InvalidAst;
                 }
                 const ch = ctx.text[state.pos];
                 state.pos += 1;
-                return ch;
+                if (ValueType == u8) {
+                    return ch;
+                } else {
+                    return;
+                }
             }
 
             return error.UnsupportedPattern;
@@ -442,6 +483,21 @@ pub inline fn Grammar(rules: type) type {
 
             const ChildType = pointer_info.child;
             const InnerType = valueTypeForPattern(ChildType);
+
+            if (InnerType == void) {
+                if (@hasDecl(ChildType, "TargetName")) {
+                    const rule = comptime ruleFromName(ChildType.TargetName);
+                    _ = try gatherNodeSlice(NodeType, rule, ctx, state);
+                    return;
+                }
+                const start = state.pos;
+                const boundary = try stateNextBoundary(NodeType, ctx, state.*);
+                if (boundary < start or boundary > ctx.text.len) {
+                    return error.InvalidAst;
+                }
+                state.pos = boundary;
+                return;
+            }
 
             if (comptime isNodeRefType(InnerType)) {
                 return gatherNodeSlice(NodeType, InnerType.rule_tag, ctx, state);
@@ -494,11 +550,19 @@ pub inline fn Grammar(rules: type) type {
 
             var result: ValueType = undefined;
 
-            inline for (info.fields, 0..) |field, i| {
+            comptime var tuple_slot: usize = 0;
+            inline for (info.fields) |field| {
                 const FieldPatternType = @FieldType(PatternType, field.name);
+                const FieldValueType = valueTypeForPattern(FieldPatternType);
+                if (FieldValueType == void) {
+                    try evalPattern(NodeType, FieldPatternType, ctx, state);
+                    continue;
+                }
                 const field_value = try evalPattern(NodeType, FieldPatternType, ctx, state);
                 if (info.is_tuple) {
-                    result[i] = field_value;
+                    const name = std.fmt.comptimePrint("{d}", .{tuple_slot});
+                    tuple_slot += 1;
+                    @field(result, name) = field_value;
                 } else {
                     @field(result, field.name) = field_value;
                 }
@@ -519,6 +583,15 @@ pub inline fn Grammar(rules: type) type {
             inline for (info.fields) |field| {
                 var temp = state.copy();
                 const FieldPatternType = field.type;
+                const FieldValueType = valueTypeForPattern(FieldPatternType);
+                if (FieldValueType == void) {
+                    evalPattern(NodeType, FieldPatternType, ctx, &temp) catch |err| switch (err) {
+                        error.InvalidAst => continue,
+                        else => return err,
+                    };
+                    state.* = temp;
+                    return @unionInit(ValueType, field.name, {});
+                }
                 if (evalPattern(NodeType, FieldPatternType, ctx, &temp)) |field_value| {
                     state.* = temp;
                     return @unionInit(ValueType, field.name, field_value);
@@ -537,13 +610,17 @@ pub inline fn Grammar(rules: type) type {
             ctx: *const BuildContext(NodeType),
             state: *NodeState(NodeType),
         ) BuildError!valueTypeForPattern(PatternType) {
+            const ValueType = valueTypeForPattern(PatternType);
+
             switch (@typeInfo(PatternType)) {
                 .pointer => return evalSlice(NodeType, PatternType, ctx, state),
                 .optional => |opt| return evalOptional(NodeType, opt.child, ctx, state),
                 .@"struct" => {
                     if (@hasDecl(PatternType, "TargetName")) {
                         const rule = comptime ruleFromName(PatternType.TargetName);
-                        return expectCall(NodeType, rule, ctx, state);
+                        const ref = try expectCall(NodeType, rule, ctx, state);
+                        if (comptime ValueType == void) return;
+                        return ref;
                     }
 
                     if (@hasDecl(PatternType, "Value")) {
@@ -701,6 +778,8 @@ pub inline fn Grammar(rules: type) type {
             const ctx = BuildContext(NodeType){ .text = text, .nodes = nodes, .positions = positions };
 
             inline for (rule_tags, 0..) |rule_tag, ri| {
+                const ValueType = RuleValueType(rule_tag);
+                if (@sizeOf(ValueType) == 0) continue;
                 var list = &@field(forest, @tagName(rule_tag));
                 const slice = buckets[ri].items;
                 for (slice) |node_idx| {
@@ -954,7 +1033,7 @@ const Op = Rel;
 
 pub fn CharSet(s: []const u8) type {
     return struct {
-        pub const Value = u8;
+        pub const Value = void;
 
         pub fn compile(_: type) []const Op {
             var bs = std.bit_set.ArrayBitSet(usize, 256).initEmpty();
@@ -968,7 +1047,7 @@ pub fn CharSet(s: []const u8) type {
 
 pub fn CharRange(a: u8, b: u8) type {
     return struct {
-        pub const Value = u8;
+        pub const Value = void;
 
         pub fn compile(_: type) []const Op {
             var bs = std.bit_set.ArrayBitSet(usize, 256).initEmpty();
@@ -988,6 +1067,23 @@ pub fn Call(r: anytype) type {
             return &[_]Op{.{
                 .call = TargetName,
             }};
+        }
+    };
+}
+
+pub fn Hide(comptime pattern: type) type {
+    comptime {
+        if (!@hasDecl(pattern, "TargetName")) {
+            @compileError("Hide expects a callable pattern");
+        }
+    }
+
+    return struct {
+        pub const TargetName = pattern.TargetName;
+        pub const Value = void;
+
+        pub fn compile(_: type) []const Op {
+            return pattern.compile(pattern);
         }
     };
 }
@@ -1195,12 +1291,11 @@ test "Grammar AST inference" {
     const ArrayType = G.RuleValueType(.array);
     const array_info = @typeInfo(ArrayType).@"struct";
     try std.testing.expect(array_info.is_tuple);
-    try std.testing.expectEqual(@as(usize, 6), array_info.fields.len);
-    try std.testing.expect(array_info.fields[0].type == u8);
-    try std.testing.expect(array_info.fields[2].type == G.NodeSliceType(.value));
+    try std.testing.expectEqual(@as(usize, 1), array_info.fields.len);
+    try std.testing.expect(array_info.fields[0].type == G.NodeSliceType(.value));
 
     const SkipType = G.RuleValueType(.skip);
-    try std.testing.expect(SkipType == G.TextRange);
+    try std.testing.expect(SkipType == void);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
