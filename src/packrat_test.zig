@@ -10,28 +10,24 @@ test "memoization saves steps on backtracking" {
     const BacktrackGrammar = struct {
         const R = std.meta.DeclEnum(@This());
 
-        pub fn S(
-            _: union(enum) {
-                ax: struct {
-                    a: peg.Call(R.A),
-                    x: peg.CharSet("x"),
-                },
-                ay: struct {
-                    a: peg.Call(R.A),
-                    y: peg.CharSet("y"),
-                },
-            },
-        ) void {}
+        pub const S = peg.Match(union(enum) {
+            ax: peg.Match(struct {
+                a: peg.Call(R.A),
+                x: peg.CharSet("x", .one),
+            }),
+            ay: peg.Match(struct {
+                a: peg.Call(R.A),
+                y: peg.CharSet("y", .one),
+            }),
+        });
 
-        pub fn A(
-            _: union(enum) {
-                recursive: struct {
-                    a: peg.CharSet("a"),
-                    rest: peg.Call(R.A),
-                },
-                base: peg.CharSet("a"),
-            },
-        ) void {}
+        pub const A = peg.Match(union(enum) {
+            recursive: peg.Match(struct {
+                a: peg.CharSet("a", .one),
+                rest: peg.Call(R.A),
+            }),
+            base: peg.CharSet("a", .one),
+        });
     };
 
     const TestVM = vm.VM(BacktrackGrammar);
@@ -60,25 +56,23 @@ test "memoization caches both success and failure" {
     const CacheTestGrammar = struct {
         const R = std.meta.DeclEnum(@This());
 
-        pub fn start(
-            _: union(enum) {
-                first: struct {
-                    exp: peg.Call(R.expensive),
-                    x: peg.CharSet("x"),
-                },
-                second: struct {
-                    exp: peg.Call(R.expensive), 
-                    y: peg.CharSet("y"),
-                },
-            },
-        ) void {}
+        pub const start = peg.Match(union(enum) {
+            first: peg.Match(struct {
+                exp: peg.Call(R.expensive),
+                x: peg.CharSet("x", .one),
+            }),
+            second: peg.Match(struct {
+                exp: peg.Call(R.expensive),
+                y: peg.CharSet("y", .one),
+            }),
+        });
 
         // Make it expensive so the benefit is clear
-        pub fn expensive(
-            _: peg.CharSet("a"),
-            _: peg.CharSet("b"),
-            _: peg.CharSet("c"),
-        ) void {}
+        pub const expensive = peg.Match(struct {
+            a: peg.CharSet("a", .one),
+            b: peg.CharSet("b", .one),
+            c: peg.CharSet("c", .one),
+        });
     };
 
     const TestVM = vm.VM(CacheTestGrammar);
@@ -111,11 +105,11 @@ test "step count stability check" {
     // Update these values when making intentional changes
     
     const SimpleGrammar = struct {
-        pub fn start(
-            _: peg.CharSet("a"),
-            _: peg.CharSet("b"),
-            _: peg.CharSet("c"),
-        ) void {}
+        pub const start = peg.Match(struct {
+            a: peg.CharSet("a", .one),
+            b: peg.CharSet("b", .one),
+            c: peg.CharSet("c", .one),
+        });
     };
 
     const TestVM = vm.VM(SimpleGrammar);
@@ -130,32 +124,28 @@ test "memoization works with nested rules" {
         const R = std.meta.DeclEnum(@This());
 
         // start ::= (expr '+') | (expr '-')
-        pub fn start(
-            _: union(enum) {
-                plus: struct {
-                    e: peg.Call(R.expr),
-                    op: peg.CharSet("+"),
-                },
-                minus: struct {
-                    e: peg.Call(R.expr),
-                    op: peg.CharSet("-"),
-                },
-            },
-        ) void {}
+        pub const start = peg.Match(union(enum) {
+            plus: peg.Match(struct {
+                e: peg.Call(R.expr),
+                op: peg.CharSet("+", .one),
+            }),
+            minus: peg.Match(struct {
+                e: peg.Call(R.expr),
+                op: peg.CharSet("-", .one),
+            }),
+        });
 
         // expr ::= term term*
-        pub fn expr(
-            _: peg.Call(R.term),
-            _: []peg.Call(R.term),
-        ) void {}
+        pub const expr = peg.Match(struct {
+            first: peg.Call(R.term),
+            rest: peg.Kleene(R.term),
+        });
 
         // term ::= 'a' | 'b'
-        pub fn term(
-            _: union(enum) {
-                a: peg.CharSet("a"),
-                b: peg.CharSet("b"),
-            },
-        ) void {}
+        pub const term = peg.Match(union(enum) {
+            a: peg.CharSet("a", .one),
+            b: peg.CharSet("b", .one),
+        });
     };
 
     const TestVM = vm.VM(NestedGrammar);
@@ -181,16 +171,16 @@ test "memoization works with nested rules" {
 test "memoization disabled by default" {
     // Verify that memoization is opt-in, not automatic
     const SimpleGrammar = struct {
-        pub fn start(_: peg.CharSet("a")) void {}
+        pub const start = peg.CharSet("a", .one);
     };
 
     const TestVM = vm.VM(SimpleGrammar);
 
     // parse() should not use memoization
     try TestVM.parse("a", std.testing.allocator);
-    
+
     // parseWithMemo() should use memoization
     try TestVM.parseWithMemo("a", std.testing.allocator);
-    
+
     // Both should succeed, memoization is just an optimization
 }

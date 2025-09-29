@@ -384,17 +384,17 @@ pub fn VM(comptime GrammarType: type) type {
 }
 
 pub const SimpleGrammar = struct {
-    pub const main = struct {
+    pub const main = peg.Match(struct {
         a: peg.CharSet("a", .one),
         b: peg.CharSet("b", .one),
-    };
+    });
 };
 
 const ChoiceGrammar = struct {
-    pub const main = union(enum) {
-        ab: struct { a: peg.CharSet("a", .one), b: peg.CharSet("b", .one) },
-        ac: struct { a: peg.CharSet("a", .one), c: peg.CharSet("c", .one) },
-    };
+    pub const main = peg.Match(union(enum) {
+        ab: peg.Match(struct { a: peg.CharSet("a", .one), b: peg.CharSet("b", .one) }),
+        ac: peg.Match(struct { a: peg.CharSet("a", .one), c: peg.CharSet("c", .one) }),
+    });
 };
 
 pub const RecursiveGrammar = struct {
@@ -402,35 +402,35 @@ pub const RecursiveGrammar = struct {
 
     pub const main = peg.Call(.expr);
 
-    pub const expr = union(enum) {
+    pub const expr = peg.Match(union(enum) {
         number: peg.Call(.number),
-        parens: struct {
+        parens: peg.Match(struct {
             open: peg.CharSet("(", .one),
             expr: peg.Call(.expr),
             close: peg.CharSet(")", .one),
-        },
-    };
+        }),
+    });
 
-    pub const number = struct {
+    pub const number = peg.Match(struct {
         first: peg.CharRange('0', '9', .one),
         rest: peg.CharRange('0', '9', .kleene),
-    };
+    });
 };
 
 const KleeneGrammar = struct {
     const R = std.meta.DeclEnum(@This());
 
-    pub const main = struct {
+    pub const main = peg.Match(struct {
         a_list: peg.CharSet("a", .kleene),
         b: peg.CharSet("b", .one),
-    };
+    });
 };
 
 const OptionalGrammar = struct {
-    pub const main = struct {
-        a_opt: ?peg.CharSet("a", .one),
+    pub const main = peg.Match(struct {
+        a_opt: peg.Maybe(peg.CharSet("a", .one)),
         b: peg.CharSet("b", .one),
-    };
+    });
 };
 
 fn step(vm: anytype, ip: *u32) !bool {
