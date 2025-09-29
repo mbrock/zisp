@@ -409,13 +409,13 @@ pub inline fn Grammar(rules: type) type {
                         return PatternType{};
                     }
 
-                    // Check if it's Kleene (has offset and len fields)
-                    if (@hasDecl(PatternType, "offset") and @hasDecl(PatternType, "len") and @hasDecl(PatternType, "compile")) {
+                    // Check if it's Kleene (has RuleTag field)
+                    if (@hasDecl(PatternType, "RuleTag")) {
                         // For now, return error - we'll implement Kleene building later
                         return error.UnsupportedPattern;
                     }
 
-                    // Check if it's CharSet or CharRange (has offset field)
+                    // Check if it's CharSet or CharRange (has offset field and compile)
                     if (@hasDecl(PatternType, "offset") and @hasDecl(PatternType, "compile")) {
                         // For now, return error - we'll implement these later
                         return error.UnsupportedPattern;
@@ -935,6 +935,7 @@ pub fn Assembler(comptime max_ops: usize, comptime labels: type) type {
 
 pub fn Kleene(comptime rule_ref: anytype) type {
     return struct {
+        pub const RuleTag = rule_ref;  // Compile-time: which rule this repeats
         offset: u32,  // Runtime field: starting index in the rule's forest array
         len: u32,     // Runtime field: number of elements
 

@@ -361,9 +361,9 @@ fn dumpForestValue(
         return;
     }
 
-    // Check if it's a Kleene type (has offset, len, and compile)
+    // Check if it's a Kleene type (has RuleTag, offset, len)
     const is_kleene_type = comptime switch (@typeInfo(T)) {
-        .@"struct" => @hasDecl(T, "offset") and @hasDecl(T, "len") and @hasDecl(T, "compile"),
+        .@"struct" => @hasDecl(T, "RuleTag") and @hasDecl(T, "offset") and @hasDecl(T, "len"),
         else => false,
     };
 
@@ -373,9 +373,10 @@ fn dumpForestValue(
         while (i < value.len) : (i += 1) {
             try writeIndent(writer, depth + 1);
             try writer.print("[{d}]\n", .{i});
-            // For Kleene, we need to figure out which rule it's repeating
-            // This info isn't available at runtime, so we'll skip detailed dumping for now
-            // TODO: Add rule tag to Kleene type
+            // Dump each element in the Kleene repetition
+            const rule_tag = T.RuleTag;
+            const element_index = value.offset + i;
+            try dumpForestNode(VMType, forest, printer, text, depth + 2, rule_tag, element_index);
         }
         return;
     }
