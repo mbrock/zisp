@@ -501,7 +501,7 @@ fn dumpForestNode(
         return;
     }
 
-    const value_ptr = Grammar.getNode(forest, rule, index);
+    const value_ptr = forest.get(rule, index);
     const value = value_ptr.*;
     try dumpForestValue(VMType, forest, printer, text, depth, value);
 }
@@ -514,10 +514,9 @@ pub fn dumpForest(
     comptime root_rule: @TypeOf(machine.*).RuleEnum,
 ) !void {
     const VMType = @TypeOf(machine.*);
-    const Grammar = VMType.Grammar;
 
     var built = try machine.buildForest(allocator, root_rule);
-    defer Grammar.deinitForest(&built.forest, allocator);
+    defer built.forest.deinit(allocator);
 
     try writer.writeAll("\nTyped Forest:\n");
     var printer = TracePrinter.init(writer, tty, default_trace_theme);

@@ -70,15 +70,25 @@ pub fn VM(comptime GrammarType: type) type {
         }
 
         fn appendNode(self: *Self, frame: CallFrame, end_sp: u32) !u32 {
-            const idx = self.nodes.items.len;
+            const idx: u32 = @intCast(self.nodes.items.len);
+
             try self.nodes.appendBounded(.{
                 .rule_index = @intFromEnum(frame.rule),
                 .start = frame.start_sp,
                 .end = end_sp,
                 .first_child = frame.first_child,
                 .next_sibling = null,
+                .parent = null, // Will be set by parent when this becomes a child
             });
-            return std.math.cast(u32, idx) orelse return error.ParseFailed;
+
+            // Set parent field for all children
+            var child_opt = frame.first_child;
+            while (child_opt) |child_idx| {
+                self.nodes.items[child_idx].parent = idx;
+                child_opt = self.nodes.items[child_idx].next_sibling;
+            }
+
+            return idx;
         }
 
         fn attachChild(self: *Self, node_index: u32) void {
@@ -103,6 +113,9 @@ pub fn VM(comptime GrammarType: type) type {
                 }
                 if (node.next_sibling) |sib| {
                     if (sib >= new_len) node.next_sibling = null;
+                }
+                if (node.parent) |parent| {
+                    if (parent >= new_len) node.parent = null;
                 }
             }
             self.nodes.items.len = new_len;
@@ -327,7 +340,7 @@ pub fn VM(comptime GrammarType: type) type {
             self: *const Self,
             allocator: std.mem.Allocator,
             comptime root_rule: RuleEnum,
-        ) (Grammar.BuildError || error{NoAst})!Grammar.BuildResult(root_rule) {
+        ) (peg.BuildError || error{NoAst})!Grammar.BuildResult(root_rule) {
             const root_index = self.root_node orelse return error.NoAst;
             const text_slice = self.text[0..self.text.len];
             return Grammar.buildForestForRoot(

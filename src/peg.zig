@@ -41,6 +41,68 @@ const NodeState = struct {
             .next_child = if (node.first_child) |fc| @intCast(fc) else null,
         };
     }
+
+    fn expectCall(
+        self: *@This(),
+        ctx: *const BuildContext,
+        rule_index: u32,
+    ) BuildError!u32 {
+        const child_idx = self.next_child orelse return error.InvalidAst;
+        const child = ctx.nodes[child_idx];
+        if (child.rule_index != rule_index) {
+            return error.InvalidAst;
+        }
+
+        const start_pos: usize = @intCast(child.start);
+        const end_pos: usize = @intCast(child.end);
+
+        if (self.pos != start_pos) {
+            return error.InvalidAst;
+        }
+
+        self.pos = end_pos;
+        self.next_child = childToIndex(child.next_sibling);
+
+        const index = ctx.positions[child_idx];
+        return @intCast(index);
+    }
+
+    fn gatherNodeSlice(
+        self: *@This(),
+        ctx: *const BuildContext,
+        rule_index: u32,
+    ) BuildError!NodeSlice {
+        var count: usize = 0;
+        var first_index: usize = 0;
+        var first = true;
+
+        while (self.next_child) |child_idx| {
+            const child = ctx.nodes[child_idx];
+            if (child.rule_index != rule_index) {
+                break;
+            }
+
+            const start_pos: usize = @intCast(child.start);
+            const end_pos: usize = @intCast(child.end);
+            if (self.pos != start_pos) {
+                return error.InvalidAst;
+            }
+
+            const index = ctx.positions[child_idx];
+            if (first) {
+                first_index = index;
+                first = false;
+            } else if (index != first_index + count) {
+                return error.InvalidAst;
+            }
+
+            count += 1;
+            self.pos = end_pos;
+            self.next_child = childToIndex(child.next_sibling);
+        }
+
+        return .{ .offset = @intCast(first_index), .len = @intCast(count) };
+    }
 };
 
 pub const NodeType = struct {
@@ -49,6 +111,7 @@ pub const NodeType = struct {
     end: u32,
     first_child: ?u32,
     next_sibling: ?u32,
+    parent: ?u32,
 };
 
 const BuildContext = struct {
@@ -57,10 +120,171 @@ const BuildContext = struct {
     positions: []const usize,
 };
 
+pub const BuildError = error{ InvalidAst, UnsupportedPattern, OutOfMemory };
+
+pub const NodeSlice = struct { offset: u32, len: u32 };
+
+fn childToIndex(child: ?u32) ?usize {
+    return if (child) |c| @intCast(c) else null;
+}
+
+fn stateNextBoundary(
+    ctx: *const BuildContext,
+    state: NodeState,
+) BuildError!usize {
+    if (state.next_child) |child_idx| {
+        const start: usize = @intCast(ctx.nodes[child_idx].start);
+        if (start > ctx.text.len) {
+            return error.InvalidAst;
+        }
+        return start;
+    }
+    if (state.end > ctx.text.len) {
+        return error.InvalidAst;
+    }
+    return state.end;
+}
+
+// Sort node indices for a rule so siblings (same parent) stay together.
+fn sortRuleGroup(
+    nodes: []const NodeType,
+    items: []usize,
+) void {
+    if (items.len <= 1) return;
+    const Context = struct {
+        nodes: []const NodeType,
+
+        fn lessThan(self: @This(), lhs: usize, rhs: usize) bool {
+            const na = self.nodes[lhs];
+            const nb = self.nodes[rhs];
+
+            const pa = na.parent;
+            const pb = nb.parent;
+
+            if (pa) |a| {
+                if (pb) |b| {
+                    if (a == b) {
+                        // Same parent: sort by position
+                        if (na.start == nb.start) return lhs < rhs;
+                        return na.start < nb.start;
+                    }
+                    return a < b;
+                }
+                return false;
+            }
+            if (pb != null) return true;
+
+            // No parents: sort by position
+            if (na.start == nb.start) return lhs < rhs;
+            return na.start < nb.start;
+        }
+    };
+
+    std.sort.block(usize, items, Context{ .nodes = nodes }, Context.lessThan);
+}
+
+pub fn Forest(comptime rules: type) type {
+    const RuleEnum = std.meta.DeclEnum(rules);
+
+    const Helpers = struct {
+        fn RuleValueType(comptime rule: RuleEnum) type {
+            const pattern = @field(rules, @tagName(rule));
+            return pattern;
+        }
+
+        fn NodeListType(comptime rule: RuleEnum) type {
+            const ValueType = RuleValueType(rule);
+            if (@sizeOf(ValueType) == 0) {
+                return struct {
+                    items: []ValueType = &.{},
+                    pub const empty = @This(){};
+                    pub fn append(_: *@This(), _: std.mem.Allocator, _: ValueType) !void {
+                        return;
+                    }
+                    pub fn deinit(_: *@This(), _: std.mem.Allocator) void {}
+                };
+            }
+            return std.ArrayList(ValueType);
+        }
+    };
+
+    const ListsStruct = blk: {
+        const tags = comptime std.meta.tags(RuleEnum);
+        var fields: [tags.len]std.builtin.Type.StructField = undefined;
+        inline for (tags, 0..) |rule_tag, i| {
+            const ListType = Helpers.NodeListType(rule_tag);
+            fields[i] = .{
+                .name = @tagName(rule_tag),
+                .type = ListType,
+                .default_value_ptr = null,
+                .is_comptime = false,
+                .alignment = @alignOf(ListType),
+            };
+        }
+        break :blk @Type(.{ .@"struct" = .{
+            .layout = .auto,
+            .backing_integer = null,
+            .fields = &fields,
+            .decls = &.{},
+            .is_tuple = false,
+        } });
+    };
+
+    return struct {
+        const Self = @This();
+
+        lists: ListsStruct,
+
+        pub fn init() Self {
+            var lists: ListsStruct = undefined;
+            inline for (comptime std.meta.tags(RuleEnum)) |rule_tag| {
+                @field(lists, @tagName(rule_tag)) = Helpers.NodeListType(rule_tag).empty;
+            }
+            return .{ .lists = lists };
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            inline for (comptime std.meta.tags(RuleEnum)) |rule_tag| {
+                @field(self.lists, @tagName(rule_tag)).deinit(allocator);
+            }
+        }
+
+        pub fn append(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            comptime rule: RuleEnum,
+            value: Helpers.RuleValueType(rule),
+        ) !u32 {
+            if (comptime @sizeOf(Helpers.RuleValueType(rule)) == 0) {
+                @compileError("Cannot append nodes for non-capturing rules");
+            }
+            var list = &@field(self.lists, @tagName(rule));
+            try list.append(allocator, value);
+            return @intCast(list.items.len - 1);
+        }
+
+        pub fn get(
+            self: *const Self,
+            comptime rule: RuleEnum,
+            index: u32,
+        ) *const Helpers.RuleValueType(rule) {
+            return &@field(self.lists, @tagName(rule)).items[index];
+        }
+
+        pub fn RuleValueType(comptime rule: RuleEnum) type {
+            return Helpers.RuleValueType(rule);
+        }
+    };
+}
+
 pub inline fn Grammar(rules: type) type {
+    const ForestType = Forest(rules);
+
     return struct {
         pub const RuleEnum = std.meta.DeclEnum(rules);
         const RuleOffsetMap = std.enums.EnumMap(RuleEnum, comptime_int);
+
+        pub const Forest = ForestType;
 
         pub const TextRange = struct {
             start: usize,
@@ -75,114 +299,15 @@ pub inline fn Grammar(rules: type) type {
         }
 
         pub fn RuleValueType(comptime rule: RuleEnum) type {
-            const pattern = @field(rules, @tagName(rule));
-            return pattern;
+            return ForestType.RuleValueType(rule);
         }
 
-        pub fn NodeListType(comptime rule: RuleEnum) type {
-            const ValueType = RuleValueType(rule);
-            if (@sizeOf(ValueType) == 0) {
-                return struct {
-                    items: []ValueType = &.{},
-                    pub const empty = @This(){};
-                    pub fn append(_: *@This(), _: std.mem.Allocator, _: ValueType) !void {
-                        return;
-                    }
-                    pub fn deinit(_: *@This(), _: std.mem.Allocator) void {}
-                };
-            }
-            return std.ArrayList(ValueType);
-        }
-
-        fn forestFieldsType() type {
-            const tags = comptime std.meta.tags(RuleEnum);
-            comptime var fields: [tags.len]std.builtin.Type.StructField = undefined;
-            inline for (tags, 0..) |rule_tag, i| {
-                const ListType = NodeListType(rule_tag);
-                fields[i] = .{
-                    .name = @tagName(rule_tag),
-                    .type = ListType,
-                    .default_value_ptr = null,
-                    .is_comptime = false,
-                    .alignment = @alignOf(ListType),
-                };
-            }
-
-            return @Type(.{ .@"struct" = .{
-                .layout = .auto,
-                .backing_integer = null,
-                .fields = &fields,
-                .decls = &.{},
-                .is_tuple = false,
-            } });
-        }
-
-        pub const Forest = forestFieldsType();
-
-        pub fn initForest() Forest {
-            var forest: Forest = undefined;
-            inline for (comptime std.meta.tags(RuleEnum)) |rule_tag| {
-                @field(forest, @tagName(rule_tag)) = NodeListType(rule_tag).empty;
-            }
-            return forest;
-        }
-
-        pub fn deinitForest(forest: *Forest, allocator: std.mem.Allocator) void {
-            inline for (comptime std.meta.tags(RuleEnum)) |rule_tag| {
-                @field(forest.*, @tagName(rule_tag)).deinit(allocator);
-            }
-        }
-
-        pub fn appendNode(
-            forest: *Forest,
-            allocator: std.mem.Allocator,
-            comptime rule: RuleEnum,
-            value: RuleValueType(rule),
-        ) !u32 {
-            if (comptime @sizeOf(RuleValueType(rule)) == 0) {
-                @compileError("Cannot append nodes for non-capturing rules");
-            }
-            var list = &@field(forest.*, @tagName(rule));
-            try list.append(allocator, value);
-            return @intCast(list.items.len - 1);
-        }
-
-        pub fn getNode(
-            forest: *const Forest,
-            comptime rule: RuleEnum,
-            index: u32,
-        ) *const RuleValueType(rule) {
-            return &@field(forest.*, @tagName(rule)).items[index];
-        }
-
-        pub const BuildError = error{ InvalidAst, UnsupportedPattern, OutOfMemory };
 
         pub fn BuildResult(comptime _: RuleEnum) type {
             return struct {
-                forest: Forest,
+                forest: ForestType,
                 root_index: u32,
             };
-        }
-
-        fn childToIndex(child: ?u32) ?usize {
-            return if (child) |c| @intCast(c) else null;
-        }
-
-        fn stateNextBoundary(
-            ctx: *const BuildContext,
-            state: NodeState,
-        ) BuildError!usize {
-            if (state.next_child) |child_idx| {
-                const start: usize = @intCast(ctx.nodes[child_idx].start);
-                if (start > ctx.text.len) {
-                    return error.InvalidAst;
-                }
-                return start;
-            }
-            if (state.end > ctx.text.len) {
-                return error.InvalidAst;
-            }
-            return state.end;
         }
 
         fn expectCall(
@@ -190,65 +315,15 @@ pub inline fn Grammar(rules: type) type {
             ctx: *const BuildContext,
             state: *NodeState,
         ) BuildError!u32 {
-            const child_idx = state.next_child orelse return error.InvalidAst;
-            const child = ctx.nodes[child_idx];
-            if (child.rule_index != @intFromEnum(rule)) {
-                return error.InvalidAst;
-            }
-
-            const start_pos: usize = @intCast(child.start);
-            const end_pos: usize = @intCast(child.end);
-
-            if (state.pos != start_pos) {
-                return error.InvalidAst;
-            }
-
-            state.pos = end_pos;
-            state.next_child = childToIndex(child.next_sibling);
-
-            const index = ctx.positions[child_idx];
-            return @intCast(index);
+            return state.expectCall(ctx, @intFromEnum(rule));
         }
 
         fn gatherNodeSlice(
             comptime rule: RuleEnum,
             ctx: *const BuildContext,
             state: *NodeState,
-        ) BuildError!struct { offset: u32, len: u32 } {
-            var count: usize = 0;
-            var first_index: usize = 0;
-            var first = true;
-
-            while (state.next_child) |child_idx| {
-                const child = ctx.nodes[child_idx];
-                if (child.rule_index != @intFromEnum(rule)) {
-                    break;
-                }
-
-                const start_pos: usize = @intCast(child.start);
-                const end_pos: usize = @intCast(child.end);
-                if (state.pos != start_pos) {
-                    return error.InvalidAst;
-                }
-
-                const index = ctx.positions[child_idx];
-                if (first) {
-                    first_index = index;
-                    first = false;
-                } else if (index != first_index + count) {
-                    return error.InvalidAst;
-                }
-
-                count += 1;
-                state.pos = end_pos;
-                state.next_child = childToIndex(child.next_sibling);
-            }
-
-            return .{ .offset = @intCast(first_index), .len = @intCast(count) };
-        }
-
-        fn PatternValueType(comptime T: type) type {
-            return T.Value;
+        ) BuildError!NodeSlice {
+            return state.gatherNodeSlice(ctx, @intFromEnum(rule));
         }
 
         fn buildNodeValue(
@@ -268,41 +343,77 @@ pub inline fn Grammar(rules: type) type {
             return value;
         }
 
-        // Sort node indices for a rule so siblings (same parent) stay together.
-        fn sortRuleGroup(
+        // Step 1: Group nodes by rule and sort within each group
+        const NodeBuckets = blk: {
+            const rule_count = std.meta.tags(RuleEnum).len;
+            break :blk [rule_count]std.ArrayListUnmanaged(usize);
+        };
+
+        fn groupAndSortNodesByRule(
+            allocator: std.mem.Allocator,
             nodes: []const NodeType,
-            parents: []const ?usize,
-            items: []usize,
-        ) void {
-            if (items.len <= 1) return;
-            const Context = struct {
-                parents: []const ?usize,
-                nodes: []const NodeType,
+        ) !NodeBuckets {
+            const rule_tags = comptime std.meta.tags(RuleEnum);
+            const rule_count = rule_tags.len;
 
-                fn lessThan(self: @This(), lhs: usize, rhs: usize) bool {
-                    const pa = self.parents[lhs];
-                    const pb = self.parents[rhs];
-                    if (pa) |a| {
-                        if (pb) |b| {
-                            if (a == b) {
-                                const na = self.nodes[lhs];
-                                const nb = self.nodes[rhs];
-                                if (na.start == nb.start) return lhs < rhs;
-                                return na.start < nb.start;
-                            }
-                            return a < b;
-                        }
-                        return false;
-                    }
-                    if (pb != null) return true;
-                    const na = self.nodes[lhs];
-                    const nb = self.nodes[rhs];
-                    if (na.start == nb.start) return lhs < rhs;
-                    return na.start < nb.start;
+            var buckets: NodeBuckets = undefined;
+            inline for (0..rule_count) |i| buckets[i] = .{};
+
+            for (nodes, 0..) |node, idx| {
+                const ri: usize = @intCast(node.rule_index);
+                try buckets[ri].append(allocator, idx);
+            }
+
+            inline for (rule_tags, 0..) |_, ri| {
+                sortRuleGroup(nodes, buckets[ri].items);
+            }
+
+            return buckets;
+        }
+
+        // Step 2: Assign position within each rule's array
+        fn assignNodePositions(
+            allocator: std.mem.Allocator,
+            node_count: usize,
+            buckets: *const NodeBuckets,
+        ) ![]usize {
+            const rule_tags = comptime std.meta.tags(RuleEnum);
+
+            var positions = try allocator.alloc(usize, node_count);
+
+            inline for (rule_tags, 0..) |_, ri| {
+                const slice = buckets[ri].items;
+                for (slice, 0..) |node_idx, pos| positions[node_idx] = pos;
+            }
+
+            return positions;
+        }
+
+        // Step 3: Build typed forest from nodes
+        fn populateForest(
+            allocator: std.mem.Allocator,
+            text: []const u8,
+            nodes: []const NodeType,
+            positions: []const usize,
+            buckets: *const NodeBuckets,
+        ) !ForestType {
+            const rule_tags = comptime std.meta.tags(RuleEnum);
+
+            var forest = ForestType.init();
+            const ctx = BuildContext{ .text = text, .nodes = nodes, .positions = positions };
+
+            inline for (rule_tags, 0..) |rule_tag, ri| {
+                const ValueType = RuleValueType(rule_tag);
+                if (@sizeOf(ValueType) == 0) continue;
+                var list = &@field(forest.lists, @tagName(rule_tag));
+                const slice = buckets[ri].items;
+                for (slice) |node_idx| {
+                    const value = try buildNodeValue(rule_tag, &ctx, node_idx);
+                    try list.append(allocator, value);
                 }
-            };
+            }
 
-            std.sort.block(usize, items, Context{ .parents = parents, .nodes = nodes }, Context.lessThan);
+            return forest;
         }
 
         pub fn buildForestForRoot(
@@ -317,59 +428,21 @@ pub inline fn Grammar(rules: type) type {
                 return error.InvalidAst;
             }
 
-            var parents = try allocator.alloc(?usize, node_count);
-            defer allocator.free(parents);
-            for (parents) |*p| p.* = null;
-
-            for (nodes, 0..) |node, idx| {
-                var child_opt = node.first_child;
-                while (child_opt) |child_u32| {
-                    const child_idx: usize = @intCast(child_u32);
-                    parents[child_idx] = idx;
-                    child_opt = nodes[child_idx].next_sibling;
-                }
-            }
-
-            const rule_tags = comptime std.meta.tags(RuleEnum);
-            const rule_count = rule_tags.len;
-
-            var buckets: [rule_count]std.ArrayListUnmanaged(usize) = undefined;
-            inline for (0..rule_count) |i| buckets[i] = .{};
+            // Group and sort nodes by rule
+            var buckets = try groupAndSortNodesByRule(allocator, nodes);
             defer {
+                const rule_count = std.meta.tags(RuleEnum).len;
                 inline for (0..rule_count) |i| buckets[i].deinit(allocator);
             }
 
-            for (nodes, 0..) |node, idx| {
-                const ri: usize = @intCast(node.rule_index);
-                try buckets[ri].append(allocator, idx);
-            }
-
-            inline for (rule_tags, 0..) |_, ri| {
-                sortRuleGroup(nodes, parents, buckets[ri].items);
-            }
-
-            var positions = try allocator.alloc(usize, node_count);
+            // Assign positions within each rule's array
+            const positions = try assignNodePositions(allocator, node_count, &buckets);
             defer allocator.free(positions);
 
-            inline for (rule_tags, 0..) |_, ri| {
-                const slice = buckets[ri].items;
-                for (slice, 0..) |node_idx, pos| positions[node_idx] = pos;
-            }
+            // Build the typed forest
+            const forest = try populateForest(allocator, text, nodes, positions, &buckets);
 
-            var forest = initForest();
-            const ctx = BuildContext{ .text = text, .nodes = nodes, .positions = positions };
-
-            inline for (rule_tags, 0..) |rule_tag, ri| {
-                const ValueType = RuleValueType(rule_tag);
-                if (@sizeOf(ValueType) == 0) continue;
-                var list = &@field(forest, @tagName(rule_tag));
-                const slice = buckets[ri].items;
-                for (slice) |node_idx| {
-                    const value = try buildNodeValue(rule_tag, &ctx, node_idx);
-                    try list.append(allocator, value);
-                }
-            }
-
+            // Validate root and return
             const ensured_root: usize = @intCast(root_index);
             if (ensured_root >= node_count) {
                 return error.InvalidAst;
@@ -636,9 +709,10 @@ pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
             comptime G: type,
             ctx: *const BuildContext,
             state: *NodeState,
-        ) G.BuildError!@This() {
+        ) BuildError!@This() {
+            _ = G;
             const start_pos = state.pos;
-            const boundary = try G.stateNextBoundary(ctx, state.*);
+            const boundary = try stateNextBoundary(ctx, state.*);
             if (boundary < start_pos or boundary > ctx.text.len) {
                 return error.InvalidAst;
             }
@@ -683,9 +757,10 @@ pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
             comptime G: type,
             ctx: *const BuildContext,
             state: *NodeState,
-        ) G.BuildError!@This() {
+        ) BuildError!@This() {
+            _ = G;
             const start_pos = state.pos;
-            const boundary = try G.stateNextBoundary(ctx, state.*);
+            const boundary = try stateNextBoundary(ctx, state.*);
             if (boundary < start_pos or boundary > ctx.text.len) {
                 return error.InvalidAst;
             }
@@ -718,7 +793,7 @@ pub fn Call(comptime r: anytype) type {
             comptime G: type,
             ctx: *const BuildContext,
             state: *NodeState,
-        ) G.BuildError!@This() {
+        ) BuildError!@This() {
             const rule = comptime G.ruleFromName(TargetName);
             const index = try G.expectCall(rule, ctx, state);
             return .{ .index = index };
@@ -736,7 +811,7 @@ pub fn Hide(comptime pattern: type) type {
             comptime G: type,
             ctx: *const BuildContext,
             state: *NodeState,
-        ) G.BuildError!@This() {
+        ) BuildError!@This() {
             _ = try pattern.eval(G, ctx, state);
             return .{};
         }
@@ -824,7 +899,7 @@ pub fn Kleene(comptime rule_ref: anytype) type {
             comptime G: type,
             ctx: *const BuildContext,
             state: *NodeState,
-        ) G.BuildError!@This() {
+        ) BuildError!@This() {
             const slice = try G.gatherNodeSlice(rule_ref, ctx, state);
             return .{ .offset = slice.offset, .len = slice.len };
         }
@@ -850,7 +925,7 @@ pub fn Maybe(comptime inner: type) type {
             comptime G: type,
             ctx: *const G.BuildContext,
             state: *G.NodeState,
-        ) G.BuildError!@This() {
+        ) BuildError!@This() {
             if (state.end - state.pos == 0)
                 return .{ .value = null }
             else
@@ -869,7 +944,7 @@ pub fn Noop() type {
             comptime G: type,
             ctx: *const G.BuildContext,
             state: *G.NodeState,
-        ) G.BuildError!@This() {
+        ) BuildError!@This() {
             _ = ctx;
             _ = state;
             return .{};
@@ -896,7 +971,7 @@ pub fn Struct(comptime parts: type) type {
             comptime G: type,
             ctx: *const BuildContext,
             state: *NodeState,
-        ) G.BuildError!@This() {
+        ) BuildError!@This() {
             const info = @typeInfo(parts).@"struct";
             if (info.fields.len == 0) {
                 return .{ .value = .{} };
@@ -978,7 +1053,7 @@ pub fn Union(comptime variants: type) type {
             comptime G: type,
             ctx: *const BuildContext,
             state: *NodeState,
-        ) G.BuildError!@This() {
+        ) BuildError!@This() {
             const info = @typeInfo(variants).@"union";
 
             // Get the child node to determine which branch matched
@@ -1019,7 +1094,7 @@ pub fn Peek(comptime inner: type) type {
             comptime G: type,
             ctx: *const G.BuildContext,
             state: *G.NodeState,
-        ) G.BuildError!@This() {
+        ) BuildError!@This() {
             _ = ctx;
             _ = state;
             return .{};
@@ -1046,7 +1121,7 @@ pub fn Shun(comptime inner: type) type {
             comptime G: type,
             ctx: *const G.BuildContext,
             state: *G.NodeState,
-        ) G.BuildError!@This() {
+        ) BuildError!@This() {
             _ = ctx;
             _ = state;
             return .{};
@@ -1078,10 +1153,10 @@ test "Grammar AST inference" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
-    var forest = G.initForest();
-    defer G.deinitForest(&forest, arena.allocator());
+    var forest = G.Forest.init();
+    defer forest.deinit(arena.allocator());
 
-    try std.testing.expect(forest.value.items.len == 0);
+    try std.testing.expect(forest.lists.value.items.len == 0);
     // Pattern types ARE value types now - the runtime fields get populated during forest construction
 }
 
