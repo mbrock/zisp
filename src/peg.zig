@@ -390,18 +390,20 @@ pub inline fn Grammar(rules: type) type {
             _ = ValueType; // may not be used in all branches
 
             switch (@typeInfo(PatternType)) {
-                .pointer => return evalSlice(NodeType, PatternType, ctx, state),
+                .pointer => {
+                    @compileError("Slice patterns ([]T) are not supported - use Kleene(R.rule) instead. Type: " ++ @typeName(PatternType));
+                },
                 .optional => |opt| return evalOptional(NodeType, opt.child, ctx, state),
                 .@"struct" => {
-                    // Check if it's a Call type (has TargetName and index field)
-                    if (@hasDecl(PatternType, "TargetName") and @hasDecl(PatternType, "index")) {
+                    // Check if it's a Call type (has TargetName decl and index field)
+                    if (@hasDecl(PatternType, "TargetName") and @hasField(PatternType, "index")) {
                         const rule = comptime ruleFromName(PatternType.TargetName);
                         const index = try expectCall(NodeType, rule, ctx, state);
                         // Return a Call instance with the index field set
                         return PatternType{ .index = index };
                     }
 
-                    // Check if it's Hide (has TargetName but no index - has Value = void instead)
+                    // Check if it's Hide (has TargetName and Value decls)
                     if (@hasDecl(PatternType, "TargetName") and @hasDecl(PatternType, "Value")) {
                         const rule = comptime ruleFromName(PatternType.TargetName);
                         _ = try expectCall(NodeType, rule, ctx, state);
@@ -409,23 +411,53 @@ pub inline fn Grammar(rules: type) type {
                         return PatternType{};
                     }
 
-                    // Check if it's Kleene (has RuleTag field)
-                    if (@hasDecl(PatternType, "RuleTag")) {
-                        // For now, return error - we'll implement Kleene building later
-                        return error.UnsupportedPattern;
+                    // Check if it's Kleene (has RuleTag decl and offset/len fields)
+                    if (@hasDecl(PatternType, "RuleTag") and @hasField(PatternType, "offset") and @hasField(PatternType, "len")) {
+                        const rule = PatternType.RuleTag;
+                        const slice = try gatherNodeSlice(NodeType, rule, ctx, state);
+                        return PatternType{ .offset = slice.offset, .len = slice.len };
                     }
 
-                    // Check if it's CharSet or CharRange (has offset field and compile)
-                    if (@hasDecl(PatternType, "offset") and @hasDecl(PatternType, "compile")) {
-                        // For now, return error - we'll implement these later
-                        return error.UnsupportedPattern;
+                    // Check if it's CharSet or CharRange (has offset field and compile decl)
+                    if (@hasField(PatternType, "offset") and @hasDecl(PatternType, "compile")) {
+                        // Track source text position where this pattern matched
+                        const start_pos = state.pos;
+                        const boundary = try stateNextBoundary(NodeType, ctx, state.*);
+                        if (boundary < start_pos or boundary > ctx.text.len) {
+                            return error.InvalidAst;
+                        }
+                        state.pos = boundary;
+
+                        const offset: u32 = @intCast(start_pos);
+                        // Check if this has a len field (kleene repeat)
+                        if (@hasField(PatternType, "len")) {
+                            const len_type = @FieldType(PatternType, "len");
+                            if (len_type == void) {
+                                // .one repeat - len field is void
+                                return PatternType{ .offset = offset, .len = {} };
+                            } else {
+                                // .kleene repeat - len is u32
+                                const len: u32 = @intCast(boundary - start_pos);
+                                return PatternType{ .offset = offset, .len = len };
+                            }
+                        } else {
+                            // No len field at all (shouldn't happen with current CharSet/CharRange)
+                            return PatternType{ .offset = offset };
+                        }
                     }
 
                     // Regular struct
                     return evalStruct(NodeType, PatternType, ctx, state);
                 },
                 .@"union" => return evalUnion(NodeType, PatternType, ctx, state),
-                else => {},
+                .void => return {},  // Void patterns match nothing and produce nothing
+                .int, .@"enum" => {
+                    // These are likely const fields in pattern types, not actual patterns
+                    @compileError("Primitive type used as pattern: " ++ @typeName(PatternType) ++ ". This usually means a field type is being evaluated instead of the pattern type itself.");
+                },
+                else => {
+                    @compileError("Unsupported pattern type: " ++ @typeName(PatternType) ++ " with type info: " ++ @tagName(@typeInfo(PatternType)));
+                },
             }
 
             return error.UnsupportedPattern;
