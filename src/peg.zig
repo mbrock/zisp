@@ -53,19 +53,9 @@ pub inline fn Grammar(rules: type) type {
             @compileError("Unknown grammar rule '" ++ name ++ "'");
         }
 
-        // Pattern types ARE value types - no transformation needed
-        fn valueTypeForPattern(comptime t: type) type {
-            return t;
-        }
-
-        fn ruleValueType(comptime rule: RuleEnum) type {
-            const rule_pattern = @field(rules, @tagName(rule));
-            // Pattern type IS the value type
-            return getRulePatternType(rule_pattern);
-        }
-
         pub fn RuleValueType(comptime rule: RuleEnum) type {
-            return ruleValueType(rule);
+            // Pattern types ARE value types - just return the rule's type
+            return @field(rules, @tagName(rule));
         }
 
         pub fn NodeListType(comptime rule: RuleEnum) type {
@@ -275,7 +265,7 @@ pub inline fn Grammar(rules: type) type {
             comptime PatternType: type,
             ctx: *const BuildContext(NodeType),
             state: *NodeState(NodeType),
-        ) BuildError!?valueTypeForPattern(PatternType) {
+        ) BuildError!?PatternType {
             var temp = state.copy();
             const value = evalPattern(NodeType, PatternType, ctx, &temp) catch |err| switch (err) {
                 error.InvalidAst => return null,
@@ -290,15 +280,14 @@ pub inline fn Grammar(rules: type) type {
             comptime PatternType: type,
             ctx: *const BuildContext(NodeType),
             state: *NodeState(NodeType),
-        ) BuildError!valueTypeForPattern(PatternType) {
+        ) BuildError!PatternType {
             const info = @typeInfo(PatternType).@"struct";
-            const ValueType = valueTypeForPattern(PatternType);
 
             if (info.fields.len == 0) {
-                return ValueType{};
+                return PatternType{};
             }
 
-            var result: ValueType = undefined;
+            var result: PatternType = undefined;
 
             inline for (info.fields, 0..) |field, i| {
                 const FieldPatternType = @FieldType(PatternType, field.name);
@@ -319,25 +308,23 @@ pub inline fn Grammar(rules: type) type {
             comptime PatternType: type,
             ctx: *const BuildContext(NodeType),
             state: *NodeState(NodeType),
-        ) BuildError!valueTypeForPattern(PatternType) {
+        ) BuildError!PatternType {
             const info = @typeInfo(PatternType).@"union";
-            const ValueType = valueTypeForPattern(PatternType);
 
             inline for (info.fields) |field| {
                 var temp = state.copy();
                 const FieldPatternType = field.type;
-                const FieldValueType = valueTypeForPattern(FieldPatternType);
-                if (FieldValueType == void) {
+                if (FieldPatternType == void) {
                     evalPattern(NodeType, FieldPatternType, ctx, &temp) catch |err| switch (err) {
                         error.InvalidAst => continue,
                         else => return err,
                     };
                     state.* = temp;
-                    return @unionInit(ValueType, field.name, {});
+                    return @unionInit(PatternType, field.name, {});
                 }
                 if (evalPattern(NodeType, FieldPatternType, ctx, &temp)) |field_value| {
                     state.* = temp;
-                    return @unionInit(ValueType, field.name, field_value);
+                    return @unionInit(PatternType, field.name, field_value);
                 } else |err| switch (err) {
                     error.InvalidAst => {},
                     else => return err,
@@ -352,10 +339,7 @@ pub inline fn Grammar(rules: type) type {
             comptime PatternType: type,
             ctx: *const BuildContext(NodeType),
             state: *NodeState(NodeType),
-        ) BuildError!valueTypeForPattern(PatternType) {
-            const ValueType = valueTypeForPattern(PatternType);
-            _ = ValueType; // may not be used in all branches
-
+        ) BuildError!PatternType {
             switch (@typeInfo(PatternType)) {
                 .pointer => @compileError("Slice patterns ([]T) are not supported - use Kleene(R.rule) instead. Type: " ++ @typeName(PatternType)),
                 .optional => |opt| return evalOptional(NodeType, opt.child, ctx, state),
@@ -437,8 +421,7 @@ pub inline fn Grammar(rules: type) type {
             const node = ctx.nodes[node_index];
             var state = NodeState(NodeType).init(node);
 
-            const rule_pattern = @field(rules, @tagName(rule));
-            const pattern_type = getRulePatternType(rule_pattern);
+            const pattern_type = @field(rules, @tagName(rule));
 
             const value = try evalPattern(NodeType, pattern_type, ctx, &state);
             if (state.next_child != null or state.pos != state.end) {
@@ -573,16 +556,9 @@ pub inline fn Grammar(rules: type) type {
             };
         }
 
-        // Helper: Get the pattern type for a rule
-        fn getRulePatternType(comptime rule: anytype) type {
-            // Rule is already a type, not a value
-            return rule;
-        }
-
         // Helper: Calculate total size needed for a rule's opcodes
         fn calculateRuleSize(comptime rule: anytype) comptime_int {
-            const pattern_type = getRulePatternType(rule);
-            const opcodes = compilePattern(pattern_type);
+            const opcodes = compilePattern(rule);
             return opcodes.len + 1; // +1 for return
         }
 
@@ -610,9 +586,7 @@ pub inline fn Grammar(rules: type) type {
             var i: usize = 0;
 
             inline for (comptime std.meta.declarations(rules)) |decl| {
-                const rule_pattern = @field(rules, decl.name);
-                // rule_pattern is already a type, not a value
-                const pattern_type = getRulePatternType(rule_pattern);
+                const pattern_type = @field(rules, decl.name);
                 const relative_ops = compilePattern(pattern_type);
                 for (relative_ops) |op| {
                     code[i] = if (rel) op else linkOpcode(op, offset_map, @intCast(i));
