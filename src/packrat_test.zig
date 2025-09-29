@@ -11,33 +11,41 @@ test "memoization saves steps on backtracking" {
         const R = std.meta.DeclEnum(@This());
 
         pub const S = peg.Match(union(enum) {
-            ax: peg.Match(struct {
-                a: peg.Call(R.A),
-                x: peg.CharSet("x", .one),
-            }),
-            ay: peg.Match(struct {
-                a: peg.Call(R.A),
-                y: peg.CharSet("y", .one),
-            }),
+            ax: peg.Call(.ax),
+            ay: peg.Call(.ay),
+        });
+
+        pub const ax = peg.Match(struct {
+            a: peg.Call(R.A),
+            x: peg.CharSet("x", .one),
+        });
+
+        pub const ay = peg.Match(struct {
+            a: peg.Call(R.A),
+            y: peg.CharSet("y", .one),
         });
 
         pub const A = peg.Match(union(enum) {
-            recursive: peg.Match(struct {
-                a: peg.CharSet("a", .one),
-                rest: peg.Call(R.A),
-            }),
-            base: peg.CharSet("a", .one),
+            recursive: peg.Call(.recursive),
+            base: peg.Call(.base),
         });
+
+        pub const recursive = peg.Match(struct {
+            a: peg.CharSet("a", .one),
+            rest: peg.Call(R.A),
+        });
+
+        pub const base = peg.CharSet("a", .one);
     };
 
     const TestVM = vm.VM(BacktrackGrammar);
 
     // Test shows linear growth in savings as input grows
     const test_cases = [_]struct { input: [:0]const u8, no_memo: u32, with_memo: u32, saved: u32 }{
-        .{ .input = "ay", .no_memo = 22, .with_memo = 14, .saved = 8 },
-        .{ .input = "aay", .no_memo = 32, .with_memo = 19, .saved = 13 },
-        .{ .input = "aaay", .no_memo = 42, .with_memo = 24, .saved = 18 },
-        .{ .input = "aaaay", .no_memo = 52, .with_memo = 29, .saved = 23 },
+        .{ .input = "ay", .no_memo = 35, .with_memo = 22, .saved = 13 },
+        .{ .input = "aay", .no_memo = 49, .with_memo = 29, .saved = 20 },
+        .{ .input = "aaay", .no_memo = 63, .with_memo = 36, .saved = 27 },
+        .{ .input = "aaaay", .no_memo = 77, .with_memo = 43, .saved = 34 },
     };
 
     for (test_cases) |tc| {
@@ -57,14 +65,18 @@ test "memoization caches both success and failure" {
         const R = std.meta.DeclEnum(@This());
 
         pub const start = peg.Match(union(enum) {
-            first: peg.Match(struct {
-                exp: peg.Call(R.expensive),
-                x: peg.CharSet("x", .one),
-            }),
-            second: peg.Match(struct {
-                exp: peg.Call(R.expensive),
-                y: peg.CharSet("y", .one),
-            }),
+            first: peg.Call(.first),
+            second: peg.Call(.second),
+        });
+
+        pub const first = peg.Match(struct {
+            exp: peg.Call(R.expensive),
+            x: peg.CharSet("x", .one),
+        });
+
+        pub const second = peg.Match(struct {
+            exp: peg.Call(R.expensive),
+            y: peg.CharSet("y", .one),
         });
 
         // Make it expensive so the benefit is clear
@@ -82,9 +94,9 @@ test "memoization caches both success and failure" {
         const input = "abcx";
         const steps = try TestVM.countSteps(input, std.testing.allocator);
         const stats = try TestVM.countStepsWithMemo(input, std.testing.allocator);
-        
-        try std.testing.expectEqual(@as(u32, 9), steps);
-        try std.testing.expectEqual(@as(u32, 9), stats.steps);
+
+        try std.testing.expectEqual(@as(u32, 11), steps);
+        try std.testing.expectEqual(@as(u32, 11), stats.steps);
         try std.testing.expectEqual(@as(u32, 0), stats.hits); // No backtracking, no cache hit
     }
 
@@ -93,9 +105,9 @@ test "memoization caches both success and failure" {
         const input = "abcy";
         const steps = try TestVM.countSteps(input, std.testing.allocator);
         const stats = try TestVM.countStepsWithMemo(input, std.testing.allocator);
-        
-        try std.testing.expectEqual(@as(u32, 14), steps);
-        try std.testing.expectEqual(@as(u32, 10), stats.steps); // Saved 4 steps
+
+        try std.testing.expectEqual(@as(u32, 17), steps);
+        try std.testing.expectEqual(@as(u32, 13), stats.steps); // Saved 4 steps
         try std.testing.expectEqual(@as(u32, 1), stats.hits); // One cache hit
     }
 }
@@ -125,14 +137,18 @@ test "memoization works with nested rules" {
 
         // start ::= (expr '+') | (expr '-')
         pub const start = peg.Match(union(enum) {
-            plus: peg.Match(struct {
-                e: peg.Call(R.expr),
-                op: peg.CharSet("+", .one),
-            }),
-            minus: peg.Match(struct {
-                e: peg.Call(R.expr),
-                op: peg.CharSet("-", .one),
-            }),
+            plus: peg.Call(.plus),
+            minus: peg.Call(.minus),
+        });
+
+        pub const plus = peg.Match(struct {
+            e: peg.Call(R.expr),
+            op: peg.CharSet("+", .one),
+        });
+
+        pub const minus = peg.Match(struct {
+            e: peg.Call(R.expr),
+            op: peg.CharSet("-", .one),
         });
 
         // expr ::= term term*
@@ -143,9 +159,12 @@ test "memoization works with nested rules" {
 
         // term ::= 'a' | 'b'
         pub const term = peg.Match(union(enum) {
-            a: peg.CharSet("a", .one),
-            b: peg.CharSet("b", .one),
+            a: peg.Call(.term_a),
+            b: peg.Call(.term_b),
         });
+
+        pub const term_a = peg.CharSet("a", .one);
+        pub const term_b = peg.CharSet("b", .one);
     };
 
     const TestVM = vm.VM(NestedGrammar);

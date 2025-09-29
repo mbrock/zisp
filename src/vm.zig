@@ -383,10 +383,15 @@ pub const SimpleGrammar = struct {
 };
 
 const ChoiceGrammar = struct {
+    const R = std.meta.DeclEnum(@This());
+
     pub const main = peg.Match(union(enum) {
-        ab: peg.Match(struct { a: peg.CharSet("a", .one), b: peg.CharSet("b", .one) }),
-        ac: peg.Match(struct { a: peg.CharSet("a", .one), c: peg.CharSet("c", .one) }),
+        ab: peg.Call(.ab),
+        ac: peg.Call(.ac),
     });
+
+    pub const ab = peg.Match(struct { a: peg.CharSet("a", .one), b: peg.CharSet("b", .one) });
+    pub const ac = peg.Match(struct { a: peg.CharSet("a", .one), c: peg.CharSet("c", .one) });
 };
 
 pub const RecursiveGrammar = struct {
@@ -396,11 +401,13 @@ pub const RecursiveGrammar = struct {
 
     pub const expr = peg.Match(union(enum) {
         number: peg.Call(.number),
-        parens: peg.Match(struct {
-            open: peg.CharSet("(", .one),
-            expr: peg.Call(.expr),
-            close: peg.CharSet(")", .one),
-        }),
+        parens: peg.Call(.parens),
+    });
+
+    pub const parens = peg.Match(struct {
+        open: peg.CharSet("(", .one),
+        expr: peg.Call(.expr),
+        close: peg.CharSet(")", .one),
     });
 
     pub const number = peg.Match(struct {

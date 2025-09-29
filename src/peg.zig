@@ -920,6 +920,13 @@ pub fn Union(comptime variants: type) type {
         pub fn compile(g: type) []const Op {
             const info = @typeInfo(variants).@"union";
 
+            // Enforce that all variants must be Call patterns
+            inline for (info.fields) |field| {
+                if (!@hasDecl(field.type, "TargetName")) {
+                    @compileError("Union variant '" ++ field.name ++ "' must be a Call pattern");
+                }
+            }
+
             // Compile all variant opcodes
             comptime var variant_ops: [info.fields.len][]const Op = undefined;
             comptime var total_size = 0;
@@ -973,13 +980,21 @@ pub fn Union(comptime variants: type) type {
             state: *NodeState,
         ) G.BuildError!@This() {
             const info = @typeInfo(variants).@"union";
-            _ = ctx;
-            _ = state;
+
+            // Get the child node to determine which branch matched
+            const child_idx = state.next_child orelse return error.InvalidAst;
+            const child = ctx.nodes[child_idx];
+            const child_rule: G.RuleEnum = @enumFromInt(child.rule_index);
+
+            // Match child rule to union field
             inline for (info.fields) |field| {
-                _ = field;
-                // wait i don't actually know how to do this.
-                // do we actually even know which branch was chosen?
+                const field_call_rule = comptime G.ruleFromName(field.type.TargetName);
+                if (child_rule == field_call_rule) {
+                    const index = try G.expectCall(field_call_rule, ctx, state);
+                    return .{ .value = @unionInit(variants, field.name, .{ .index = index }) };
+                }
             }
+
             return error.InvalidAst;
         }
     };
@@ -1047,9 +1062,10 @@ const stdout = &stdout_writer.interface;
 test "Grammar AST inference" {
     const G = Grammar(demoGrammar);
 
-    // value is a union with integer and array variants
+    // value is a union with integer and array variants (wrapped in a struct)
     const ValueType = G.RuleValueType(.value);
-    try std.testing.expect(@typeInfo(ValueType) == .@"union");
+    try std.testing.expect(@typeInfo(ValueType) == .@"struct");
+    try std.testing.expect(@typeInfo(@FieldType(ValueType, "value")) == .@"union");
 
     // integer type should be a struct (the pattern type with _ fields removed)
     const IntegerType = G.RuleValueType(.integer);
