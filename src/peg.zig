@@ -1,42 +1,34 @@
 const std = @import("std");
 
 pub const demoGrammar = struct {
-    // Rules define their grammatical structure entirely via parameter types.
-    // The grammar compiler compiles the parameter types to opcode sequences.
+    // Rules define their grammatical structure as struct fields.
+    // The grammar compiler compiles the field types to opcode sequences.
     //
-    // At runtime, the rule functions are actually called with arguments
-    // being values of the input text that matched the parameter types.
-    //
-    // The return type of a rule function is the type of value that the rule
-    // produces when it successfully matches input text.
+    // Fields prefixed with _ are hidden from the AST (like Hide()).
 
     const R = std.meta.DeclEnum(@This());
 
-    pub fn value(
-        _: union(enum) {
-            integer: Call(R.integer),
-            array: Call(R.array),
-        },
-    ) void {}
+    pub const value = union(enum) {
+        integer: Call(R.integer),
+        array: Call(R.array),
+    };
 
-    pub fn integer(
-        _: struct {
-            d: CharRange('1', '9'),
-            ds: []CharRange('0', '9'),
-        },
-        _: Hide(Call(R.skip)),
-    ) void {}
+    pub const integer = struct {
+        d: CharRange('1', '9'),
+        ds: []CharRange('0', '9'),
+        _skip: Hide(Call(R.skip)),
+    };
 
-    pub fn array(_: Seq(.{
+    pub const array = Seq(.{
         CharSet("["),
         Hide(Call(R.skip)),
         []Call(R.value),
         Hide(Call(R.skip)),
         CharSet("]"),
         Hide(Call(R.skip)),
-    })) void {}
+    });
 
-    pub fn skip(_: []CharSet(" \t\n\r")) void {}
+    pub const skip = []CharSet(" \t\n\r");
 };
 
 pub inline fn compile(comptime rules: type) []const Abs {
@@ -213,33 +205,9 @@ pub inline fn Grammar(rules: type) type {
         }
 
         fn ruleValueType(comptime rule: RuleEnum) type {
-            const fn_info = getRuleFunctionInfo(@field(rules, @tagName(rule)));
-
-            comptime var tmp: [fn_info.params.len]type = undefined;
-            comptime var count: usize = 0;
-
-            inline for (fn_info.params) |param| {
-                const param_type = param.type orelse @compileError("Grammar rule parameters must have types");
-                const param_value_type = valueTypeForPattern(param_type);
-                if (param_value_type == void) continue;
-                tmp[count] = param_value_type;
-                count += 1;
-            }
-
-            if (count == 0) {
-                return void;
-            }
-
-            if (count == 1) {
-                return tmp[0];
-            }
-
-            comptime var tuple_types: [count]type = undefined;
-            inline for (0..count) |i| {
-                tuple_types[i] = tmp[i];
-            }
-
-            return std.meta.Tuple(tuple_types[0..count]);
+            const rule_pattern = @field(rules, @tagName(rule));
+            const pattern_type = getRulePatternType(rule_pattern);
+            return valueTypeForPattern(pattern_type);
         }
 
         pub fn RuleValueType(comptime rule: RuleEnum) type {
@@ -645,43 +613,14 @@ pub inline fn Grammar(rules: type) type {
             const node = ctx.nodes[node_index];
             var state = NodeState(NodeType).init(node);
 
-            const fn_info = getRuleFunctionInfo(@field(rules, @tagName(rule)));
+            const rule_pattern = @field(rules, @tagName(rule));
+            const pattern_type = getRulePatternType(rule_pattern);
 
-            if (fn_info.params.len == 0) {
-                if (state.next_child != null) {
-                    return error.InvalidAst;
-                }
-                if (state.pos != state.end) {
-                    return error.InvalidAst;
-                }
-                if (comptime RuleValueType(rule) == void) {
-                    return;
-                }
-                return RuleValueType(rule){};
-            }
-
-            if (fn_info.params.len == 1) {
-                const param = fn_info.params[0];
-                const pattern_type = param.type orelse return error.UnsupportedPattern;
-                const value = try evalPattern(NodeType, pattern_type, ctx, &state);
-                if (state.next_child != null or state.pos != state.end) {
-                    return error.InvalidAst;
-                }
-                return value;
-            }
-
-            var result: RuleValueType(rule) = undefined;
-            inline for (fn_info.params, 0..) |param, i| {
-                const pattern_type = param.type orelse return error.UnsupportedPattern;
-                const value = try evalPattern(NodeType, pattern_type, ctx, &state);
-                result[i] = value;
-            }
-
+            const value = try evalPattern(NodeType, pattern_type, ctx, &state);
             if (state.next_child != null or state.pos != state.end) {
                 return error.InvalidAst;
             }
-
-            return result;
+            return value;
         }
 
         // Sort node indices for a rule so siblings (same parent) stay together.
@@ -802,37 +741,25 @@ pub inline fn Grammar(rules: type) type {
             return BuildResult(root_rule){ .forest = forest, .root = root_ref };
         }
 
-        // Helper: Check if a declaration is a valid rule function
-        fn isRuleFunction(comptime decl_type: type) bool {
+        // Helper: Check if a declaration is a valid rule pattern (any type that can be normalized)
+        fn isRulePattern(comptime decl_type: type) bool {
             return switch (@typeInfo(decl_type)) {
-                .@"fn" => true,
-                else => false,
+                .@"struct", .@"union", .pointer, .optional => true,
+                else => @hasDecl(decl_type, "compile"),
             };
         }
 
-        // Helper: Get the function info for a rule, with validation
-        fn getRuleFunctionInfo(comptime rule: anytype) std.builtin.Type.Fn {
-            const T = @TypeOf(rule);
-            switch (@typeInfo(T)) {
-                .@"fn" => |f| return f,
-                else => @compileError("Grammar rules must be functions"),
-            }
+        // Helper: Get the pattern type for a rule
+        fn getRulePatternType(comptime rule: anytype) type {
+            // Rule is already a type, not a value
+            return rule;
         }
 
         // Helper: Calculate total size needed for a rule's opcodes
         fn calculateRuleSize(comptime rule: anytype) comptime_int {
-            const fn_info = getRuleFunctionInfo(rule);
-            var size: comptime_int = 1; // +1 for return
-
-            inline for (fn_info.params) |param| {
-                if (param.type) |param_type| {
-                    size += compilePattern(param_type).len;
-                } else {
-                    @compileError("Grammar rule parameters must have types");
-                }
-            }
-
-            return size;
+            const pattern_type = getRulePatternType(rule);
+            const opcodes = compilePattern(pattern_type);
+            return opcodes.len + 1; // +1 for return
         }
 
         // Pass 1: Calculate offsets for each rule (symbol table construction)
@@ -859,20 +786,13 @@ pub inline fn Grammar(rules: type) type {
             var i: usize = 0;
 
             inline for (comptime std.meta.declarations(rules)) |decl| {
-                const rule_fn = @field(rules, decl.name);
-                if (!isRuleFunction(@TypeOf(rule_fn))) {
-                    @compileError("Grammar member '" ++ decl.name ++ "' must be a function");
-                }
-
-                const fn_info = getRuleFunctionInfo(rule_fn);
-                inline for (fn_info.params) |param| {
-                    if (param.type) |param_type| {
-                        const relative_ops = compilePattern(param_type);
-                        for (relative_ops) |op| {
-                            code[i] = if (rel) op else linkOpcode(op, offset_map, @intCast(i));
-                            i += 1;
-                        }
-                    }
+                const rule_pattern = @field(rules, decl.name);
+                // rule_pattern is already a type, not a value
+                const pattern_type = getRulePatternType(rule_pattern);
+                const relative_ops = compilePattern(pattern_type);
+                for (relative_ops) |op| {
+                    code[i] = if (rel) op else linkOpcode(op, offset_map, @intCast(i));
+                    i += 1;
                 }
                 code[i] = .{ .done = {} };
                 i += 1;

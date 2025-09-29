@@ -384,50 +384,49 @@ pub fn VM(comptime GrammarType: type) type {
 }
 
 pub const SimpleGrammar = struct {
-    pub fn main(_: peg.CharSet("a"), _: peg.CharSet("b")) void {}
+    pub const main = struct {
+        a: peg.CharSet("a"),
+        b: peg.CharSet("b"),
+    };
 };
 
 const ChoiceGrammar = struct {
-    pub fn main(
-        _: union(enum) {
-            ab: struct { a: peg.CharSet("a"), b: peg.CharSet("b") },
-            ac: struct { a: peg.CharSet("a"), c: peg.CharSet("c") },
-        },
-    ) void {}
+    pub const main = union(enum) {
+        ab: struct { a: peg.CharSet("a"), b: peg.CharSet("b") },
+        ac: struct { a: peg.CharSet("a"), c: peg.CharSet("c") },
+    };
 };
 
 pub const RecursiveGrammar = struct {
-    pub fn main(_: peg.Call(.expr)) void {}
+    pub const main = peg.Call(.expr);
 
-    pub fn expr(
-        _: union(enum) {
-            number: peg.Call(.number),
-            parens: struct {
-                open: peg.CharSet("("),
-                expr: peg.Call(.expr),
-                close: peg.CharSet(")"),
-            },
+    pub const expr = union(enum) {
+        number: peg.Call(.number),
+        parens: struct {
+            open: peg.CharSet("("),
+            expr: peg.Call(.expr),
+            close: peg.CharSet(")"),
         },
-    ) void {}
+    };
 
-    pub fn number(
-        _: peg.CharRange('0', '9'),
-        _: []peg.CharRange('0', '9'),
-    ) void {}
+    pub const number = struct {
+        first: peg.CharRange('0', '9'),
+        rest: []peg.CharRange('0', '9'),
+    };
 };
 
 const KleeneGrammar = struct {
-    pub fn main(
-        _: []peg.CharSet("a"), // Zero or more 'a's
-        _: peg.CharSet("b"),
-    ) void {}
+    pub const main = struct {
+        a_list: []peg.CharSet("a"), // Zero or more 'a's
+        b: peg.CharSet("b"),
+    };
 };
 
 const OptionalGrammar = struct {
-    pub fn main(
-        _: ?peg.CharSet("a"),
-        _: peg.CharSet("b"),
-    ) void {}
+    pub const main = struct {
+        a_opt: ?peg.CharSet("a"),
+        b: peg.CharSet("b"),
+    };
 };
 
 fn step(vm: anytype, ip: *u32) !bool {
