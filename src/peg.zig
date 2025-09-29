@@ -1,9 +1,6 @@
 const std = @import("std");
 
 pub const demoGrammar = struct {
-    // Rules define their grammatical structure as struct fields.
-    // The grammar compiler compiles the field types to opcode sequences.
-
     const R = std.meta.DeclEnum(@This());
 
     pub const value = Match(union(enum) {
@@ -18,12 +15,11 @@ pub const demoGrammar = struct {
     });
 
     pub const array = Match(struct {
-        open: CharSet("[", .one),
-        _skip1: Hide(Call(R.skip)),
+        open: Hide(CharSet("[", .one)),
+        skip1: Hide(Call(R.skip)),
         values: Kleene(R.value),
-        _skip2: Hide(Call(R.skip)),
-        close: CharSet("]", .one),
-        _skip3: Hide(Call(R.skip)),
+        close: Hide(CharSet("]", .one)),
+        skip2: Hide(Call(R.skip)),
     });
 
     pub const skip = CharSet(" \t\n\r", .kleene);
@@ -793,14 +789,7 @@ pub fn Call(comptime r: anytype) type {
 }
 
 pub fn Hide(comptime pattern: type) type {
-    comptime {
-        if (!@hasDecl(pattern, "TargetName")) {
-            @compileError("Hide expects a callable pattern");
-        }
-    }
-
     return struct {
-        pub const TargetName = pattern.TargetName;
         pub const Value = void;
 
         pub fn compile(_: type) []const Op {
