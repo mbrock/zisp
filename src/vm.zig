@@ -6,20 +6,14 @@ pub const Mode = enum {
     Loop,
 };
 
+const Node = peg.NodeType;
+
 pub fn VM(comptime GrammarType: type) type {
     return struct {
         const Self = @This();
         pub const Grammar = peg.Grammar(GrammarType);
         pub const RuleEnum = Grammar.RuleEnum;
         pub const Ops = Grammar.compile(false);
-
-        pub const Node = struct {
-            rule_index: u32,
-            start: u32,
-            end: u32,
-            first_child: ?u32,
-            next_sibling: ?u32,
-        };
 
         sp: u32 = 0,
         text: [:0]const u8,
@@ -337,7 +331,6 @@ pub fn VM(comptime GrammarType: type) type {
             const root_index = self.root_node orelse return error.NoAst;
             const text_slice = self.text[0..self.text.len];
             return Grammar.buildForestForRoot(
-                Node,
                 allocator,
                 text_slice,
                 self.nodes.items,
@@ -379,7 +372,6 @@ pub fn VM(comptime GrammarType: type) type {
 
             return .{ .steps = count, .hits = hits, .misses = misses };
         }
-
     };
 }
 

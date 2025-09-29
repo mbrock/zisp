@@ -29,6 +29,34 @@ pub inline fn compile(comptime rules: type) []const Abs {
     return Grammar(rules).compile(false);
 }
 
+const NodeState = struct {
+    pos: usize,
+    end: usize,
+    next_child: ?usize,
+
+    fn init(node: NodeType) @This() {
+        return .{
+            .pos = @intCast(node.start),
+            .end = @intCast(node.end),
+            .next_child = if (node.first_child) |fc| @intCast(fc) else null,
+        };
+    }
+};
+
+pub const NodeType = struct {
+    rule_index: u32,
+    start: u32,
+    end: u32,
+    first_child: ?u32,
+    next_sibling: ?u32,
+};
+
+const BuildContext = struct {
+    text: []const u8,
+    nodes: []const NodeType,
+    positions: []const usize,
+};
+
 pub inline fn Grammar(rules: type) type {
     return struct {
         pub const RuleEnum = std.meta.DeclEnum(rules);
@@ -48,7 +76,7 @@ pub inline fn Grammar(rules: type) type {
 
         pub fn RuleValueType(comptime rule: RuleEnum) type {
             const pattern = @field(rules, @tagName(rule));
-            return pattern.Value;
+            return pattern;
         }
 
         pub fn NodeListType(comptime rule: RuleEnum) type {
@@ -136,42 +164,13 @@ pub inline fn Grammar(rules: type) type {
             };
         }
 
-        fn NodeState(comptime NodeType: type) type {
-            return struct {
-                pos: usize,
-                end: usize,
-                next_child: ?usize,
-
-                fn init(node: NodeType) @This() {
-                    return .{
-                        .pos = @intCast(node.start),
-                        .end = @intCast(node.end),
-                        .next_child = if (node.first_child) |fc| @intCast(fc) else null,
-                    };
-                }
-
-                fn copy(self: @This()) @This() {
-                    return self;
-                }
-            };
-        }
-
-        fn BuildContext(comptime NodeType: type) type {
-            return struct {
-                text: []const u8,
-                nodes: []const NodeType,
-                positions: []const usize,
-            };
-        }
-
         fn childToIndex(child: ?u32) ?usize {
             return if (child) |c| @intCast(c) else null;
         }
 
         fn stateNextBoundary(
-            comptime NodeType: type,
-            ctx: *const BuildContext(NodeType),
-            state: NodeState(NodeType),
+            ctx: *const BuildContext,
+            state: NodeState,
         ) BuildError!usize {
             if (state.next_child) |child_idx| {
                 const start: usize = @intCast(ctx.nodes[child_idx].start);
@@ -187,10 +186,9 @@ pub inline fn Grammar(rules: type) type {
         }
 
         fn expectCall(
-            comptime NodeType: type,
             comptime rule: RuleEnum,
-            ctx: *const BuildContext(NodeType),
-            state: *NodeState(NodeType),
+            ctx: *const BuildContext,
+            state: *NodeState,
         ) BuildError!u32 {
             const child_idx = state.next_child orelse return error.InvalidAst;
             const child = ctx.nodes[child_idx];
@@ -213,17 +211,15 @@ pub inline fn Grammar(rules: type) type {
         }
 
         fn gatherNodeSlice(
-            comptime NodeType: type,
             comptime rule: RuleEnum,
-            ctx: *const BuildContext(NodeType),
-            state: *NodeState(NodeType),
+            ctx: *const BuildContext,
+            state: *NodeState,
         ) BuildError!struct { offset: u32, len: u32 } {
-            var temp = state.copy();
             var count: usize = 0;
             var first_index: usize = 0;
             var first = true;
 
-            while (temp.next_child) |child_idx| {
+            while (state.next_child) |child_idx| {
                 const child = ctx.nodes[child_idx];
                 if (child.rule_index != @intFromEnum(rule)) {
                     break;
@@ -231,7 +227,7 @@ pub inline fn Grammar(rules: type) type {
 
                 const start_pos: usize = @intCast(child.start);
                 const end_pos: usize = @intCast(child.end);
-                if (temp.pos != start_pos) {
+                if (state.pos != start_pos) {
                     return error.InvalidAst;
                 }
 
@@ -244,54 +240,28 @@ pub inline fn Grammar(rules: type) type {
                 }
 
                 count += 1;
-                temp.pos = end_pos;
-                temp.next_child = childToIndex(child.next_sibling);
+                state.pos = end_pos;
+                state.next_child = childToIndex(child.next_sibling);
             }
 
-            state.* = temp;
             return .{ .offset = @intCast(first_index), .len = @intCast(count) };
         }
 
         fn PatternValueType(comptime T: type) type {
-            if (@hasDecl(T, "Value")) {
-                return T.Value;
-            }
-            // For types without .Value, recursively transform them
-            return extractValueType(T);
-        }
-
-        fn evalPattern(
-            comptime NodeType: type,
-            comptime PatternType: type,
-            ctx: *const BuildContext(NodeType),
-            state: *NodeState(NodeType),
-        ) BuildError!PatternValueType(PatternType) {
-            // All pattern types must have eval() method
-            if (@hasDecl(PatternType, "eval")) {
-                const G = @This();
-                return PatternType.eval(NodeType, G, ctx, state);
-            }
-
-            // Special case for void
-            if (PatternType == void) {
-                return {};
-            }
-
-            @compileError("Pattern type must have .eval() method. Type: " ++ @typeName(PatternType) ++ "\nDid you forget to use Match(...) or normalize the pattern?");
+            return T.Value;
         }
 
         fn buildNodeValue(
-            comptime NodeType: type,
             comptime rule: RuleEnum,
-            ctx: *const BuildContext(NodeType),
+            ctx: *const BuildContext,
             node_index: usize,
         ) BuildError!RuleValueType(rule) {
             const node = ctx.nodes[node_index];
-            var state = NodeState(NodeType).init(node);
+            var state = NodeState.init(node);
 
             const rule_pattern = @field(rules, @tagName(rule));
 
-            const value = try evalPattern(NodeType, rule_pattern, ctx, &state);
+            const value = try rule_pattern.eval(@This(), ctx, &state);
             if (state.next_child != null or state.pos != state.end) {
                 return error.InvalidAst;
             }
@@ -300,7 +270,6 @@ pub inline fn Grammar(rules: type) type {
 
         // Sort node indices for a rule so siblings (same parent) stay together.
         fn sortRuleGroup(
-            comptime NodeType: type,
             nodes: []const NodeType,
             parents: []const ?usize,
             items: []usize,
@@ -337,7 +306,6 @@ pub inline fn Grammar(rules: type) type {
         }
 
         pub fn buildForestForRoot(
-            comptime NodeType: type,
             allocator: std.mem.Allocator,
             text: []const u8,
             nodes: []const NodeType,
@@ -377,7 +345,7 @@ pub inline fn Grammar(rules: type) type {
             }
 
             inline for (rule_tags, 0..) |_, ri| {
-                sortRuleGroup(NodeType, nodes, parents, buckets[ri].items);
+                sortRuleGroup(nodes, parents, buckets[ri].items);
             }
 
             var positions = try allocator.alloc(usize, node_count);
@@ -389,7 +357,7 @@ pub inline fn Grammar(rules: type) type {
             }
 
             var forest = initForest();
-            const ctx = BuildContext(NodeType){ .text = text, .nodes = nodes, .positions = positions };
+            const ctx = BuildContext{ .text = text, .nodes = nodes, .positions = positions };
 
             inline for (rule_tags, 0..) |rule_tag, ri| {
                 const ValueType = RuleValueType(rule_tag);
@@ -397,7 +365,7 @@ pub inline fn Grammar(rules: type) type {
                 var list = &@field(forest, @tagName(rule_tag));
                 const slice = buckets[ri].items;
                 for (slice) |node_idx| {
-                    const value = try buildNodeValue(NodeType, rule_tag, &ctx, node_idx);
+                    const value = try buildNodeValue(rule_tag, &ctx, node_idx);
                     try list.append(allocator, value);
                 }
             }
@@ -575,101 +543,75 @@ const Op = Rel;
 pub const Repeat = enum { one, kleene };
 
 pub fn Match(comptime T: type) type {
-    return struct {
-        pub const Pattern = T;
-        pub const Value = extractValueType(T);
-
-        pub fn compile(g: type) []const Op {
-            switch (@typeInfo(T)) {
-                .@"struct" => return Struct(T).compile(g),
-                .@"union" => |u| {
-                    if (u.tag_type == null) {
-                        @compileError("Match expects tagged unions (with enum tag)");
-                    }
-                    return Union(T).compile(g);
-                },
-                else => @compileError("Match expects a struct or union type. Got: " ++ @typeName(T)),
-            }
-        }
-
-        pub fn eval(
-            comptime NodeType: type,
-            comptime G: type,
-            ctx: *const G.BuildContext(NodeType),
-            state: *G.NodeState(NodeType),
-        ) G.BuildError!Value {
-            switch (@typeInfo(T)) {
-                .@"struct" => return Struct(T).eval(NodeType, G, ctx, state),
-                .@"union" => return Union(T).eval(NodeType, G, ctx, state),
-                else => @compileError("Match expects a struct or union type"),
-            }
-        }
+    return switch (@typeInfo(T)) {
+        .@"struct" => Struct(T),
+        .@"union" => Union(T),
+        else => @compileError("expected struct or union"),
     };
 }
 
 fn extractValueType(comptime T: type) type {
-    switch (@typeInfo(T)) {
-        .@"struct" => |s| {
-            // Check if this is a pattern type with a Value decl
-            if (@hasDecl(T, "Value")) {
-                return T.Value;
-            }
+    return T.Value;
+    // switch (@typeInfo(T)) {
+    //     .@"struct" => |s| {
+    //         // Check if this is a pattern type with a Value decl
+    //         if (@hasDecl(T, "Value")) {
+    //             return T.Value;
+    //         }
 
-            // Regular struct - transform fields
-            var fields: [s.fields.len]std.builtin.Type.StructField = undefined;
-            inline for (s.fields, 0..) |field, i| {
-                const field_value_type = extractValueType(field.type);
-                fields[i] = .{
-                    .name = field.name,
-                    .type = field_value_type,
-                    .default_value_ptr = null,
-                    .is_comptime = false,
-                    .alignment = @alignOf(field_value_type),
-                };
-            }
-            return @Type(.{ .@"struct" = .{
-                .layout = s.layout,
-                .backing_integer = s.backing_integer,
-                .fields = &fields,
-                .decls = &.{},
-                .is_tuple = s.is_tuple,
-            } });
-        },
-        .@"union" => |u| {
-            // Transform union fields
-            var fields: [u.fields.len]std.builtin.Type.UnionField = undefined;
-            inline for (u.fields, 0..) |field, i| {
-                const field_value_type = extractValueType(field.type);
-                fields[i] = .{
-                    .name = field.name,
-                    .type = field_value_type,
-                    .alignment = @alignOf(field_value_type),
-                };
-            }
-            return @Type(.{ .@"union" = .{
-                .layout = u.layout,
-                .tag_type = u.tag_type,
-                .fields = &fields,
-                .decls = &.{},
-            } });
-        },
-        .optional => |opt| {
-            return ?extractValueType(opt.child);
-        },
-        .void => return void,
-        else => {
-            // For other types (primitives, etc.), return as-is
-            return T;
-        },
-    }
+    //         // Regular struct - transform fields
+    //         var fields: [s.fields.len]std.builtin.Type.StructField = undefined;
+    //         inline for (s.fields, 0..) |field, i| {
+    //             const field_value_type = extractValueType(field.type);
+    //             fields[i] = .{
+    //                 .name = field.name,
+    //                 .type = field_value_type,
+    //                 .default_value_ptr = null,
+    //                 .is_comptime = false,
+    //                 .alignment = @alignOf(field_value_type),
+    //             };
+    //         }
+    //         return @Type(.{ .@"struct" = .{
+    //             .layout = s.layout,
+    //             .backing_integer = s.backing_integer,
+    //             .fields = &fields,
+    //             .decls = &.{},
+    //             .is_tuple = s.is_tuple,
+    //         } });
+    //     },
+    //     .@"union" => |u| {
+    //         // Transform union fields
+    //         var fields: [u.fields.len]std.builtin.Type.UnionField = undefined;
+    //         inline for (u.fields, 0..) |field, i| {
+    //             const field_value_type = extractValueType(field.type);
+    //             fields[i] = .{
+    //                 .name = field.name,
+    //                 .type = field_value_type,
+    //                 .alignment = @alignOf(field_value_type),
+    //             };
+    //         }
+    //         return @Type(.{ .@"union" = .{
+    //             .layout = u.layout,
+    //             .tag_type = u.tag_type,
+    //             .fields = &fields,
+    //             .decls = &.{},
+    //         } });
+    //     },
+    //     .optional => |opt| {
+    //         return ?extractValueType(opt.child);
+    //     },
+    //     .void => return void,
+    //     else => {
+    //         // For other types (primitives, etc.), return as-is
+    //         return T;
+    //     },
+    // }
 }
 
 pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
     return struct {
-        pub const Value = struct {
-            offset: u32,
-            len: if (repeat == .kleene) u32 else void,
-        };
+        offset: u32,
+        len: if (repeat == .kleene) u32 else void,
 
         pub fn compile(_: type) []const Op {
             var bs = std.bit_set.ArrayBitSet(usize, 256).initEmpty();
@@ -691,13 +633,12 @@ pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
         }
 
         pub fn eval(
-            comptime NodeType: type,
             comptime G: type,
-            ctx: *const G.BuildContext(NodeType),
-            state: *G.NodeState(NodeType),
-        ) G.BuildError!Value {
+            ctx: *const BuildContext,
+            state: *NodeState,
+        ) G.BuildError!@This() {
             const start_pos = state.pos;
-            const boundary = try G.stateNextBoundary(NodeType, ctx, state.*);
+            const boundary = try G.stateNextBoundary(ctx, state.*);
             if (boundary < start_pos or boundary > ctx.text.len) {
                 return error.InvalidAst;
             }
@@ -706,9 +647,9 @@ pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
             const offset: u32 = @intCast(start_pos);
             if (repeat == .kleene) {
                 const len: u32 = @intCast(boundary - start_pos);
-                return Value{ .offset = offset, .len = len };
+                return .{ .offset = offset, .len = len };
             } else {
-                return Value{ .offset = offset, .len = {} };
+                return .{ .offset = offset, .len = {} };
             }
         }
     };
@@ -716,10 +657,8 @@ pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
 
 pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
     return struct {
-        pub const Value = struct {
-            offset: u32,
-            len: if (repeat == .kleene) u32 else void,
-        };
+        offset: u32,
+        len: if (repeat == .kleene) u32 else void,
 
         pub fn compile(_: type) []const Op {
             var bs = std.bit_set.ArrayBitSet(usize, 256).initEmpty();
@@ -741,13 +680,12 @@ pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
         }
 
         pub fn eval(
-            comptime NodeType: type,
             comptime G: type,
-            ctx: *const G.BuildContext(NodeType),
-            state: *G.NodeState(NodeType),
-        ) G.BuildError!Value {
+            ctx: *const BuildContext,
+            state: *NodeState,
+        ) G.BuildError!@This() {
             const start_pos = state.pos;
-            const boundary = try G.stateNextBoundary(NodeType, ctx, state.*);
+            const boundary = try G.stateNextBoundary(ctx, state.*);
             if (boundary < start_pos or boundary > ctx.text.len) {
                 return error.InvalidAst;
             }
@@ -756,9 +694,9 @@ pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
             const offset: u32 = @intCast(start_pos);
             if (repeat == .kleene) {
                 const len: u32 = @intCast(boundary - start_pos);
-                return Value{ .offset = offset, .len = len };
+                return .{ .offset = offset, .len = len };
             } else {
-                return Value{ .offset = offset, .len = {} };
+                return .{ .offset = offset, .len = {} };
             }
         }
     };
@@ -766,8 +704,9 @@ pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
 
 pub fn Call(comptime r: anytype) type {
     return struct {
+        index: u32,
+
         pub const TargetName = if (@TypeOf(r) == []const u8) r else @tagName(r);
-        pub const Value = struct { index: u32 };
 
         pub fn compile(_: type) []const Op {
             return &[_]Op{.{
@@ -776,34 +715,30 @@ pub fn Call(comptime r: anytype) type {
         }
 
         pub fn eval(
-            comptime NodeType: type,
             comptime G: type,
-            ctx: *const G.BuildContext(NodeType),
-            state: *G.NodeState(NodeType),
-        ) G.BuildError!Value {
+            ctx: *const BuildContext,
+            state: *NodeState,
+        ) G.BuildError!@This() {
             const rule = comptime G.ruleFromName(TargetName);
-            const index = try G.expectCall(NodeType, rule, ctx, state);
-            return Value{ .index = index };
+            const index = try G.expectCall(rule, ctx, state);
+            return .{ .index = index };
         }
     };
 }
 
 pub fn Hide(comptime pattern: type) type {
     return struct {
-        pub const Value = void;
-
         pub fn compile(_: type) []const Op {
             return pattern.compile(pattern);
         }
 
         pub fn eval(
-            comptime NodeType: type,
             comptime G: type,
-            ctx: *const G.BuildContext(NodeType),
-            state: *G.NodeState(NodeType),
-        ) G.BuildError!Value {
-            _ = try pattern.eval(NodeType, G, ctx, state);
-            return {};
+            ctx: *const BuildContext,
+            state: *NodeState,
+        ) G.BuildError!@This() {
+            _ = try pattern.eval(G, ctx, state);
+            return .{};
         }
     };
 }
@@ -868,10 +803,9 @@ pub fn Assembler(comptime max_ops: usize, comptime labels: type) type {
 pub fn Kleene(comptime rule_ref: anytype) type {
     return struct {
         pub const RuleTag = rule_ref; // Compile-time: which rule this repeats
-        pub const Value = struct {
-            offset: u32, // Starting index in the rule's forest array
-            len: u32, // Number of elements
-        };
+
+        offset: u32, // Starting index in the rule's forest array
+        len: u32, // Number of elements
 
         pub fn compile(_: type) []const Op {
             // Compile as repeated call to the target rule
@@ -887,20 +821,19 @@ pub fn Kleene(comptime rule_ref: anytype) type {
         }
 
         pub fn eval(
-            comptime NodeType: type,
             comptime G: type,
-            ctx: *const G.BuildContext(NodeType),
-            state: *G.NodeState(NodeType),
-        ) G.BuildError!Value {
-            const slice = try G.gatherNodeSlice(NodeType, rule_ref, ctx, state);
-            return Value{ .offset = slice.offset, .len = slice.len };
+            ctx: *const BuildContext,
+            state: *NodeState,
+        ) G.BuildError!@This() {
+            const slice = try G.gatherNodeSlice(rule_ref, ctx, state);
+            return .{ .offset = slice.offset, .len = slice.len };
         }
     };
 }
 
 pub fn Maybe(comptime inner: type) type {
     return struct {
-        pub const Value = ?if (@hasDecl(inner, "Value")) inner.Value else inner;
+        value: ?inner,
 
         pub fn compile(g: type) []const Op {
             const part = inner.compile(g);
@@ -914,46 +847,39 @@ pub fn Maybe(comptime inner: type) type {
         }
 
         pub fn eval(
-            comptime NodeType: type,
             comptime G: type,
-            ctx: *const G.BuildContext(NodeType),
-            state: *G.NodeState(NodeType),
-        ) G.BuildError!Value {
-            var temp = state.copy();
-            const value = G.evalPattern(NodeType, inner, ctx, &temp) catch |err| switch (err) {
-                error.InvalidAst => return null,
-                else => return err,
-            };
-            state.* = temp;
-            return value;
+            ctx: *const G.BuildContext,
+            state: *G.NodeState,
+        ) G.BuildError!@This() {
+            if (state.end - state.pos == 0)
+                return .{ .value = null }
+            else
+                return .{ .value = inner.eval(G, ctx, &state) };
         }
     };
 }
 
 pub fn Noop() type {
     return struct {
-        pub const Value = void;
-
         pub fn compile(_: type) []const Op {
             return &[_]Op{};
         }
 
         pub fn eval(
-            comptime NodeType: type,
             comptime G: type,
-            ctx: *const G.BuildContext(NodeType),
-            state: *G.NodeState(NodeType),
-        ) G.BuildError!Value {
+            ctx: *const G.BuildContext,
+            state: *G.NodeState,
+        ) G.BuildError!@This() {
             _ = ctx;
             _ = state;
-            return {};
+            return .{};
         }
     };
 }
 
 pub fn Struct(comptime parts: type) type {
     return struct {
-        pub const Value = extractValueType(parts);
+        value: parts,
 
         pub fn compile(g: type) []const Op {
             comptime var ops: []const Op = &[_]Op{};
@@ -967,35 +893,29 @@ pub fn Struct(comptime parts: type) type {
         }
 
         pub fn eval(
-            comptime NodeType: type,
             comptime G: type,
-            ctx: *const G.BuildContext(NodeType),
-            state: *G.NodeState(NodeType),
-        ) G.BuildError!Value {
+            ctx: *const BuildContext,
+            state: *NodeState,
+        ) G.BuildError!@This() {
             const info = @typeInfo(parts).@"struct";
             if (info.fields.len == 0) {
-                return Value{};
+                return .{ .value = .{} };
             }
 
-            var result: Value = undefined;
-            inline for (info.fields, 0..) |field, i| {
+            var result: parts = undefined;
+            inline for (info.fields) |field| {
                 const FieldPatternType = @FieldType(parts, field.name);
-                const field_value = try G.evalPattern(NodeType, FieldPatternType, ctx, state);
-                if (info.is_tuple) {
-                    const name = std.fmt.comptimePrint("{d}", .{i});
-                    @field(result, name) = field_value;
-                } else {
-                    @field(result, field.name) = field_value;
-                }
+                const field_value = try FieldPatternType.eval(G, ctx, state);
+                @field(result, field.name) = field_value;
             }
-            return result;
+            return .{ .value = result };
         }
     };
 }
 
 pub fn Union(comptime variants: type) type {
     return struct {
-        pub const Value = extractValueType(variants);
+        value: variants,
 
         pub fn compile(g: type) []const Op {
             const info = @typeInfo(variants).@"union";
@@ -1048,30 +968,17 @@ pub fn Union(comptime variants: type) type {
         }
 
         pub fn eval(
-            comptime NodeType: type,
             comptime G: type,
-            ctx: *const G.BuildContext(NodeType),
-            state: *G.NodeState(NodeType),
-        ) G.BuildError!Value {
+            ctx: *const BuildContext,
+            state: *NodeState,
+        ) G.BuildError!@This() {
             const info = @typeInfo(variants).@"union";
+            _ = ctx;
+            _ = state;
             inline for (info.fields) |field| {
-                var temp = state.copy();
-                const FieldPatternType = field.type;
-                if (FieldPatternType == void) {
-                    G.evalPattern(NodeType, FieldPatternType, ctx, &temp) catch |err| switch (err) {
-                        error.InvalidAst => continue,
-                        else => return err,
-                    };
-                    state.* = temp;
-                    return @unionInit(Value, field.name, {});
-                }
-                if (G.evalPattern(NodeType, FieldPatternType, ctx, &temp)) |field_value| {
-                    state.* = temp;
-                    return @unionInit(Value, field.name, field_value);
-                } else |err| switch (err) {
-                    error.InvalidAst => {},
-                    else => return err,
-                }
+                _ = field;
+                // wait i don't actually know how to do this.
+                // do we actually even know which branch was chosen?
             }
             return error.InvalidAst;
         }
@@ -1080,8 +987,6 @@ pub fn Union(comptime variants: type) type {
 
 pub fn Peek(comptime inner: type) type {
     return struct {
-        pub const Value = void;
-
         pub fn compile(g: type) []const Op {
             const part = inner.compile(g);
             var a = Assembler(part.len + 3, enum { fail, success }){};
@@ -1096,23 +1001,19 @@ pub fn Peek(comptime inner: type) type {
         }
 
         pub fn eval(
-            comptime NodeType: type,
             comptime G: type,
-            ctx: *const G.BuildContext(NodeType),
-            state: *G.NodeState(NodeType),
-        ) G.BuildError!Value {
-            var temp = state.copy();
-            _ = try G.evalPattern(NodeType, inner, ctx, &temp);
-            // Don't advance state - peek doesn't consume
-            return {};
+            ctx: *const G.BuildContext,
+            state: *G.NodeState,
+        ) G.BuildError!@This() {
+            _ = ctx;
+            _ = state;
+            return .{};
         }
     };
 }
 
 pub fn Shun(comptime inner: type) type {
     return struct {
-        pub const Value = void;
-
         pub fn compile(g: type) []const Op {
             const part = inner.compile(g);
             var a = Assembler(part.len + 3, enum { fail, success }){};
@@ -1127,18 +1028,13 @@ pub fn Shun(comptime inner: type) type {
         }
 
         pub fn eval(
-            comptime NodeType: type,
             comptime G: type,
-            ctx: *const G.BuildContext(NodeType),
-            state: *G.NodeState(NodeType),
-        ) G.BuildError!Value {
-            var temp = state.copy();
-            if (G.evalPattern(NodeType, inner, ctx, &temp)) |_| {
-                return error.InvalidAst; // Negative lookahead failed - pattern matched
-            } else |err| switch (err) {
-                error.InvalidAst => return {}, // Pattern didn't match - success!
-                else => return err,
-            }
+            ctx: *const G.BuildContext,
+            state: *G.NodeState,
+        ) G.BuildError!@This() {
+            _ = ctx;
+            _ = state;
+            return .{};
         }
     };
 }
