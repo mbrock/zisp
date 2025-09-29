@@ -269,39 +269,6 @@ pub inline fn Grammar(rules: type) type {
             return .{ .offset = @intCast(first_index), .len = @intCast(count) };
         }
 
-        fn evalPrimitive(
-            comptime NodeType: type,
-            comptime PatternType: type,
-            ctx: *const BuildContext(NodeType),
-            state: *NodeState(NodeType),
-        ) BuildError!valueTypeForPattern(PatternType) {
-            const ValueType = valueTypeForPattern(PatternType);
-            if (ValueType == void or ValueType == u8) {
-                if (state.pos >= state.end or state.pos >= ctx.text.len) {
-                    return error.InvalidAst;
-                }
-                const ch = ctx.text[state.pos];
-                state.pos += 1;
-                if (ValueType == u8) {
-                    return ch;
-                } else {
-                    return;
-                }
-            }
-
-            return error.UnsupportedPattern;
-        }
-
-        fn evalSlice(
-            comptime _: type,  // NodeType
-            comptime PatternType: type,
-            _: anytype,  // ctx
-            _: anytype,  // state
-        ) BuildError!valueTypeForPattern(PatternType) {
-            // Slice patterns are no longer used in the new model
-            // (we use Kleene explicitly instead of []Pattern)
-            return error.UnsupportedPattern;
-        }
 
         fn evalOptional(
             comptime NodeType: type,
@@ -390,9 +357,7 @@ pub inline fn Grammar(rules: type) type {
             _ = ValueType; // may not be used in all branches
 
             switch (@typeInfo(PatternType)) {
-                .pointer => {
-                    @compileError("Slice patterns ([]T) are not supported - use Kleene(R.rule) instead. Type: " ++ @typeName(PatternType));
-                },
+                .pointer => @compileError("Slice patterns ([]T) are not supported - use Kleene(R.rule) instead. Type: " ++ @typeName(PatternType)),
                 .optional => |opt| return evalOptional(NodeType, opt.child, ctx, state),
                 .@"struct" => {
                     // Check if it's a Call type (has TargetName decl and index field)
@@ -892,20 +857,6 @@ pub fn Hide(comptime pattern: type) type {
             return pattern.compile(pattern);
         }
     };
-}
-
-fn tupleTypes(T: anytype) [T.len]type {
-    var types: [T.len]type = undefined;
-    comptime var i = 0;
-    inline for (T) |t| {
-        types[i] = t;
-        i += 1;
-    }
-    return types;
-}
-
-pub fn Seq(parts: anytype) type {
-    return std.meta.Tuple(&tupleTypes(parts));
 }
 
 pub fn Assembler(comptime max_ops: usize, comptime labels: type) type {
