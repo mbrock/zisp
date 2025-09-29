@@ -19,14 +19,14 @@ pub const demoGrammar = struct {
         _skip: Hide(Call(R.skip)),
     };
 
-    pub const array = Seq(.{
-        CharSet("[", .one),
-        Hide(Call(R.skip)),
-        Kleene(R.value),
-        Hide(Call(R.skip)),
-        CharSet("]", .one),
-        Hide(Call(R.skip)),
-    });
+    pub const array = struct {
+        open: CharSet("[", .one),
+        _skip1: Hide(Call(R.skip)),
+        values: Kleene(R.value),
+        _skip2: Hide(Call(R.skip)),
+        close: CharSet("]", .one),
+        _skip3: Hide(Call(R.skip)),
+    };
 
     pub const skip = CharSet(" \t\n\r", .kleene);
 };
