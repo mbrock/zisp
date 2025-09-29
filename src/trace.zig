@@ -339,25 +339,43 @@ fn dumpForestValue(
         return;
     }
 
-    const has_node_ref_kind = comptime switch (@typeInfo(T)) {
-        .@"struct" => @hasDecl(T, "node_ref_kind"),
+    // Check if it's a Call type (has TargetName and index field)
+    const is_call_type = comptime switch (@typeInfo(T)) {
+        .@"struct" => @hasDecl(T, "TargetName") and @hasDecl(T, "index"),
         else => false,
     };
 
-    if (has_node_ref_kind) {
-        if (T.node_ref_kind == .single) {
-            try writer.writeAll(" ->\n");
-            try dumpForestNode(VMType, forest, printer, text, depth + 1, T.rule_tag, value);
-            return;
-        }
+    if (is_call_type) {
+        try writer.writeAll(" ->\n");
+        // Get the rule tag from the TargetName
+        const rule_tag = comptime blk: {
+            const name = T.TargetName;
+            for (std.meta.tags(Grammar.RuleEnum)) |tag| {
+                if (std.mem.eql(u8, @tagName(tag), name)) {
+                    break :blk tag;
+                }
+            }
+            @compileError("Unknown rule: " ++ T.TargetName);
+        };
+        try dumpForestNode(VMType, forest, printer, text, depth + 1, rule_tag, value.index);
+        return;
+    }
 
+    // Check if it's a Kleene type (has offset, len, and compile)
+    const is_kleene_type = comptime switch (@typeInfo(T)) {
+        .@"struct" => @hasDecl(T, "offset") and @hasDecl(T, "len") and @hasDecl(T, "compile"),
+        else => false,
+    };
+
+    if (is_kleene_type) {
         try writer.print(" (len {d})\n", .{value.len});
         var i: usize = 0;
         while (i < value.len) : (i += 1) {
             try writeIndent(writer, depth + 1);
             try writer.print("[{d}]\n", .{i});
-            const child_ref = Grammar.NodeRefType(T.rule_tag){ .index = value.start + i };
-            try dumpForestNode(VMType, forest, printer, text, depth + 2, T.rule_tag, child_ref);
+            // For Kleene, we need to figure out which rule it's repeating
+            // This info isn't available at runtime, so we'll skip detailed dumping for now
+            // TODO: Add rule tag to Kleene type
         }
         return;
     }
@@ -469,7 +487,7 @@ fn dumpForestNode(
     text: []const u8,
     depth: usize,
     comptime rule: VMType.RuleEnum,
-    ref: VMType.Grammar.NodeRefType(rule),
+    index: u32,
 ) anyerror!void {
     const Grammar = VMType.Grammar;
     const writer = printer.writer;
@@ -482,7 +500,7 @@ fn dumpForestNode(
         return;
     }
 
-    const value_ptr = Grammar.getNode(forest, rule, ref);
+    const value_ptr = Grammar.getNode(forest, rule, index);
     const value = value_ptr.*;
     try dumpForestValue(VMType, forest, printer, text, depth, value);
 }
@@ -503,6 +521,6 @@ pub fn dumpForest(
     try writer.writeAll("\nTyped Forest:\n");
     var printer = TracePrinter.init(writer, tty, default_trace_theme);
     const text = machine.text[0..machine.text.len];
-    try dumpForestNode(VMType, &built.forest, &printer, text, 0, root_rule, built.root);
+    try dumpForestNode(VMType, &built.forest, &printer, text, 0, root_rule, built.root_index);
     try writer.writeAll("\n");
 }
