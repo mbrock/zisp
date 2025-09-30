@@ -391,6 +391,12 @@ pub fn OpG(comptime rel: bool) type {
             fx: FrameEffect,
             ip: if (rel) i32 else u32 = undefined,
         },
+        /// Begin a structural element (struct field, array element, etc)
+        open: void,
+        /// Mark boundary between struct fields
+        next: void,
+        /// End a structural element
+        shut: void,
         /// Fail and backtrack
         fail: void,
         /// Return from rule invocation
@@ -431,7 +437,16 @@ pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
             for (s) |c| {
                 bs.set(c);
             }
-            return &[_]Op{.{ .read = .{ .set = bs, .repeat = repeat } }};
+            if (repeat == .kleene) {
+                // For Kleene, wrap in open/shut to track the repetition
+                return &[_]Op{
+                    .{ .open = {} },
+                    .{ .read = .{ .set = bs, .repeat = repeat } },
+                    .{ .shut = {} },
+                };
+            } else {
+                return &[_]Op{.{ .read = .{ .set = bs, .repeat = repeat } }};
+            }
         }
 
         pub fn eval(
@@ -490,7 +505,16 @@ pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
             for (a..b + 1) |c| {
                 bs.set(c);
             }
-            return &[_]Op{.{ .read = .{ .set = bs, .repeat = repeat } }};
+            if (repeat == .kleene) {
+                // For Kleene, wrap in open/shut to track the repetition
+                return &[_]Op{
+                    .{ .open = {} },
+                    .{ .read = .{ .set = bs, .repeat = repeat } },
+                    .{ .shut = {} },
+                };
+            } else {
+                return &[_]Op{.{ .read = .{ .set = bs, .repeat = repeat } }};
+            }
         }
 
         pub fn eval(
@@ -601,9 +625,15 @@ pub fn Assembler(comptime max_ops: usize, comptime labels: type) type {
             return self;
         }
 
+        pub fn op(self: *Self, opcode: Op) *Self {
+            self.ops[self.n] = opcode;
+            self.n += 1;
+            return self;
+        }
+
         pub fn emit(self: *Self, new_ops: []const Op) *Self {
-            for (new_ops) |op| {
-                self.ops[self.n] = op;
+            for (new_ops) |new_op| {
+                self.ops[self.n] = new_op;
                 self.n += 1;
             }
             return self;
@@ -642,13 +672,15 @@ pub fn Kleene(comptime rule_ref: anytype) type {
         pub fn compile(_: type) []const Op {
             // Compile as repeated call to the target rule
             const target_name = @tagName(rule_ref);
-            var a = Assembler(4, enum { loop, done }){};
+            var a = Assembler(6, enum { loop, done }){};
             return a
+                .op(.{ .open = {} })
                 .mark(.loop)
                 .ctrl(.push, .done)
                 .emit(&[_]Op{.{ .call = target_name }})
                 .ctrl(.move, .loop)
                 .mark(.done)
+                .op(.{ .shut = {} })
                 .build();
         }
 
@@ -669,12 +701,14 @@ pub fn Maybe(comptime inner: type) type {
 
         pub fn compile(g: type) []const Op {
             const part = inner.compile(g);
-            var a = Assembler(part.len + 2, enum { done }){};
+            var a = Assembler(part.len + 4, enum { done }){};
             return a
+                .op(.open)
                 .ctrl(.push, .done)
                 .emit(part)
                 .ctrl(.drop, .done)
                 .mark(.done)
+                .op(.shut)
                 .build();
         }
 
@@ -724,13 +758,21 @@ pub fn Struct(comptime parts: type) type {
         value: parts,
 
         pub fn compile(g: type) []const Op {
-            comptime var ops: []const Op = &[_]Op{};
+            comptime var ops: []const Op = &[_]Op{.{.open = {}}};
 
-            inline for (comptime std.meta.fields(parts)) |decl| {
+            const fields = comptime std.meta.fields(parts);
+            inline for (fields, 0..) |decl, i| {
                 const part_type = @FieldType(parts, decl.name);
                 const part_ops = part_type.compile(g);
                 ops = ops ++ part_ops;
+
+                // Add 'next' between fields (but not after the last one)
+                if (i < fields.len - 1) {
+                    ops = ops ++ &[_]Op{.{.next = {}}};
+                }
             }
+
+            ops = ops ++ &[_]Op{.{.shut = {}}};
             return ops;
         }
 

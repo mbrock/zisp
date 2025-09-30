@@ -281,6 +281,25 @@ pub fn VM(comptime GrammarType: type) type {
                         },
 
                         .over => return (if (mode == .Loop) {} else null),
+
+                        .open => {
+                            // Mark the beginning of a structural element
+                            // For now, just continue - AST building will use this
+                            if (loop) continue :vm IP1 else return IP1;
+                        },
+
+                        .next => {
+                            // Mark boundary between struct fields
+                            // For now, just continue - AST building will use this
+                            if (loop) continue :vm IP1 else return IP1;
+                        },
+
+                        .shut => {
+                            // Mark the end of a structural element
+                            // For now, just continue - AST building will use this
+                            if (loop) continue :vm IP1 else return IP1;
+                        },
+
                         .fail => {},
                     }
 
