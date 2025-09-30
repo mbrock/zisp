@@ -19,26 +19,26 @@ const ast = @import("ast.zig");
 pub const demoGrammar = struct {
     const R = std.meta.DeclEnum(@This());
 
-    pub const value = Match(union(enum) {
-        integer: Call(R.integer),
-        array: Call(R.array),
+    pub const Value = Match(union(enum) {
+        integer: Call(R.Integer),
+        array: Call(R.Array),
     });
 
-    pub const integer = Match(struct {
+    pub const Integer = Match(struct {
         d: CharRange('1', '9', .one),
         ds: CharRange('0', '9', .kleene),
-        _skip: Hide(Call(R.skip)),
+        _skip: Hide(Call(R.Skip)),
     });
 
-    pub const array = Match(struct {
+    pub const Array = Match(struct {
         open: Hide(CharSet("[", .one)),
-        skip1: Hide(Call(R.skip)),
-        values: Kleene(R.value),
+        skip1: Hide(Call(R.Skip)),
+        values: Kleene(R.Value),
         close: Hide(CharSet("]", .one)),
-        skip2: Hide(Call(R.skip)),
+        skip2: Hide(Call(R.Skip)),
     });
 
-    pub const skip = CharSet(" \t\n\r", .kleene);
+    pub const Skip = CharSet(" \t\n\r", .kleene);
 };
 
 // ============================================================================
@@ -422,6 +422,7 @@ pub fn Match(comptime T: type) type {
 
 pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
     return struct {
+        pub const Kind = if (repeat == .kleene) .char_slice else .char;
         offset: u32,
         len: if (repeat == .kleene) u32 else void,
 
@@ -440,15 +441,36 @@ pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
         ) BuildError!@This() {
             _ = G;
             const start_pos = state.pos;
-            const boundary = try ast.stateNextBoundary(ctx, state.*);
-            if (boundary < start_pos or boundary > ctx.text.len) {
+
+            // Scan the text to find how many characters match this set
+            var end_pos = start_pos;
+            while (end_pos < state.end and end_pos < ctx.text.len) {
+                const ch = ctx.text[end_pos];
+                var matches = false;
+                inline for (s) |c| {
+                    if (ch == c) {
+                        matches = true;
+                        break;
+                    }
+                }
+                if (matches) {
+                    end_pos += 1;
+                    if (repeat == .one) break; // Stop after one character for .one
+                } else {
+                    break; // Stop when we hit a non-matching character
+                }
+            }
+
+            // For .one, we must have matched at least one character
+            if (repeat == .one and end_pos == start_pos) {
                 return error.InvalidAst;
             }
-            state.pos = boundary;
+
+            state.pos = end_pos;
 
             const offset: u32 = @intCast(start_pos);
             if (repeat == .kleene) {
-                const len: u32 = @intCast(boundary - start_pos);
+                const len: u32 = @intCast(end_pos - start_pos);
                 return .{ .offset = offset, .len = len };
             } else {
                 return .{ .offset = offset, .len = {} };
@@ -459,6 +481,7 @@ pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
 
 pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
     return struct {
+        pub const Kind = if (repeat == .kleene) .char_slice else .char;
         offset: u32,
         len: if (repeat == .kleene) u32 else void,
 
@@ -477,15 +500,29 @@ pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
         ) BuildError!@This() {
             _ = G;
             const start_pos = state.pos;
-            const boundary = try ast.stateNextBoundary(ctx, state.*);
-            if (boundary < start_pos or boundary > ctx.text.len) {
+
+            // Scan the text to find how many characters match this range
+            var end_pos = start_pos;
+            while (end_pos < state.end and end_pos < ctx.text.len) {
+                const ch = ctx.text[end_pos];
+                if (ch >= a and ch <= b) {
+                    end_pos += 1;
+                    if (repeat == .one) break; // Stop after one character for .one
+                } else {
+                    break; // Stop when we hit a non-matching character
+                }
+            }
+
+            // For .one, we must have matched at least one character
+            if (repeat == .one and end_pos == start_pos) {
                 return error.InvalidAst;
             }
-            state.pos = boundary;
+
+            state.pos = end_pos;
 
             const offset: u32 = @intCast(start_pos);
             if (repeat == .kleene) {
-                const len: u32 = @intCast(boundary - start_pos);
+                const len: u32 = @intCast(end_pos - start_pos);
                 return .{ .offset = offset, .len = len };
             } else {
                 return .{ .offset = offset, .len = {} };
@@ -496,6 +533,7 @@ pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
 
 pub fn Call(comptime r: anytype) type {
     return struct {
+        pub const Kind = .call;
         index: u32,
 
         pub const TargetName = if (@TypeOf(r) == []const u8) r else @tagName(r);
@@ -520,6 +558,7 @@ pub fn Call(comptime r: anytype) type {
 
 pub fn Hide(comptime pattern: type) type {
     return struct {
+        pub const Kind = .hidden;
         pub fn compile(_: type) []const Op {
             return pattern.compile(pattern);
         }
@@ -594,6 +633,7 @@ pub fn Assembler(comptime max_ops: usize, comptime labels: type) type {
 
 pub fn Kleene(comptime rule_ref: anytype) type {
     return struct {
+        pub const Kind = .kleene;
         pub const RuleTag = rule_ref; // Compile-time: which rule this repeats
 
         offset: u32, // Starting index in the rule's forest array
@@ -640,13 +680,22 @@ pub fn Maybe(comptime inner: type) type {
 
         pub fn eval(
             comptime G: type,
-            ctx: *const G.BuildContext,
-            state: *G.NodeState,
+            ctx: *const BuildContext,
+            state: *NodeState,
         ) BuildError!@This() {
-            if (state.end - state.pos == 0)
-                return .{ .value = null }
-            else
-                return .{ .value = inner.eval(G, ctx, &state) };
+            // Save the current position in case we need to backtrack
+            const saved_pos = state.pos;
+            const saved_child = state.next_child;
+
+            // Try to evaluate the inner pattern
+            if (inner.eval(G, ctx, state)) |value| {
+                return .{ .value = value };
+            } else |_| {
+                // Pattern didn't match, restore state and return null
+                state.pos = saved_pos;
+                state.next_child = saved_child;
+                return .{ .value = null };
+            }
         }
     };
 }
@@ -671,6 +720,7 @@ pub fn Noop() type {
 
 pub fn Struct(comptime parts: type) type {
     return struct {
+        pub const Kind = .@"struct";
         value: parts,
 
         pub fn compile(g: type) []const Op {
@@ -707,6 +757,7 @@ pub fn Struct(comptime parts: type) type {
 
 pub fn Union(comptime variants: type) type {
     return struct {
+        pub const Kind = .@"union";
         value: variants,
 
         pub fn compile(g: type) []const Op {
@@ -809,11 +860,20 @@ pub fn Peek(comptime inner: type) type {
 
         pub fn eval(
             comptime G: type,
-            ctx: *const G.BuildContext,
-            state: *G.NodeState,
+            ctx: *const BuildContext,
+            state: *NodeState,
         ) BuildError!@This() {
-            _ = ctx;
-            _ = state;
+            // Save the current state
+            const saved_pos = state.pos;
+            const saved_child = state.next_child;
+
+            // Try to evaluate the inner pattern
+            _ = try inner.eval(G, ctx, state);
+
+            // Restore state (peek doesn't consume)
+            state.pos = saved_pos;
+            state.next_child = saved_child;
+
             return .{};
         }
     };
@@ -836,12 +896,24 @@ pub fn Shun(comptime inner: type) type {
 
         pub fn eval(
             comptime G: type,
-            ctx: *const G.BuildContext,
-            state: *G.NodeState,
+            ctx: *const BuildContext,
+            state: *NodeState,
         ) BuildError!@This() {
-            _ = ctx;
-            _ = state;
-            return .{};
+            // Save the current state
+            const saved_pos = state.pos;
+            const saved_child = state.next_child;
+
+            // Try to evaluate the inner pattern
+            if (inner.eval(G, ctx, state)) |_| {
+                // Pattern matched - that's bad for negative lookahead
+                return error.InvalidAst;
+            } else |_| {
+                // Pattern didn't match - that's what we want
+                // Restore state (negative lookahead doesn't consume)
+                state.pos = saved_pos;
+                state.next_child = saved_child;
+                return .{};
+            }
         }
     };
 }
@@ -900,11 +972,11 @@ pub fn main() !void {
     try trace.trace(&vm, stdout, tty);
 
     // Parse again to build the AST and print it
-    var ast_vm = try TestVM.initAlloc("[[1] [2]]", allocator, 32, 32, 256);
+    var ast_vm = try TestVM.initAlloc("[[1] [2] [4096]]", allocator, 32, 32, 256);
     defer ast_vm.deinit(allocator);
     try ast_vm.run();
     try trace.dumpAst(&ast_vm, stdout, tty, allocator);
-    try trace.dumpForest(&ast_vm, stdout, tty, allocator, .array);
+    try trace.dumpForest(&ast_vm, stdout, tty, allocator, .Array);
 
     try stdout.flush();
 }
