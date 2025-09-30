@@ -15,13 +15,20 @@ pub fn VM(comptime GrammarType: type) type {
         pub const RuleEnum = Grammar.RuleEnum;
         pub const Ops = Grammar.compile(false);
 
+        // === Core Parsing State ===
         sp: u32 = 0,
         text: [:0]const u8,
+
+        // === Backtracking Stacks ===
         saves: std.ArrayList(SaveFrame),
         calls: std.ArrayList(CallFrame),
+
+        // === AST Construction ===
         nodes: std.ArrayList(Node),
-        memo: ?*MemoTable = null,
         root_node: ?u32 = null,
+
+        // === Memoization (optional) ===
+        memo: ?*MemoTable = null,
 
         pub const SaveFrame = struct {
             ip: u32,
@@ -69,6 +76,9 @@ pub fn VM(comptime GrammarType: type) type {
             };
         }
 
+        // === AST Construction Helpers ===
+
+        /// Create a new node from a completed call frame
         fn appendNode(self: *Self, frame: CallFrame, end_sp: u32) !u32 {
             const idx: u32 = @intCast(self.nodes.items.len);
 
@@ -78,61 +88,77 @@ pub fn VM(comptime GrammarType: type) type {
                 .end = end_sp,
                 .first_child = frame.first_child,
                 .next_sibling = null,
-                .parent = null, // Will be set by parent when this becomes a child
+                .parent = null,
             });
 
-            // Set parent field for all children
-            var child_opt = frame.first_child;
-            while (child_opt) |child_idx| {
-                self.nodes.items[child_idx].parent = idx;
-                child_opt = self.nodes.items[child_idx].next_sibling;
-            }
+            // Link children back to parent
+            self.linkChildrenToParent(frame.first_child, idx);
 
             return idx;
         }
 
+        /// Set parent field for all children in a sibling chain
+        fn linkChildrenToParent(self: *Self, first_child: ?u32, parent_idx: u32) void {
+            var child_opt = first_child;
+            while (child_opt) |child_idx| {
+                self.nodes.items[child_idx].parent = parent_idx;
+                child_opt = self.nodes.items[child_idx].next_sibling;
+            }
+        }
+
+        /// Attach a newly created node as a child of the current call frame
         fn attachChild(self: *Self, node_index: u32) void {
             if (self.calls.items.len == 0) return;
-            var parent = &self.calls.items[self.calls.items.len - 1];
-            if (parent.first_child) |first| {
-                const last = parent.last_child.?;
+            var frame = &self.calls.items[self.calls.items.len - 1];
+
+            if (frame.first_child) |_| {
+                // Add to end of sibling chain
+                const last = frame.last_child.?;
                 self.nodes.items[last].next_sibling = node_index;
-                parent.last_child = node_index;
-                _ = first;
+                frame.last_child = node_index;
             } else {
-                parent.first_child = node_index;
-                parent.last_child = node_index;
+                // First child
+                frame.first_child = node_index;
+                frame.last_child = node_index;
             }
         }
 
+        /// Null out a node index if it's >= threshold
+        inline fn nullIfOutOfRange(ref: *?u32, threshold: usize) void {
+            if (ref.*) |idx| {
+                if (idx >= threshold) ref.* = null;
+            }
+        }
+
+        /// Rollback node tree to a previous state (for backtracking)
         fn truncateNodes(self: *Self, new_len: usize) void {
             if (new_len >= self.nodes.items.len) return;
+
+            // Clean up dangling references in remaining nodes
             for (self.nodes.items[0..new_len]) |*node| {
-                if (node.first_child) |child| {
-                    if (child >= new_len) node.first_child = null;
-                }
-                if (node.next_sibling) |sib| {
-                    if (sib >= new_len) node.next_sibling = null;
-                }
-                if (node.parent) |parent| {
-                    if (parent >= new_len) node.parent = null;
-                }
+                nullIfOutOfRange(&node.first_child, new_len);
+                nullIfOutOfRange(&node.next_sibling, new_len);
+                nullIfOutOfRange(&node.parent, new_len);
             }
+
             self.nodes.items.len = new_len;
-            if (self.root_node) |root| {
-                if (root >= new_len) self.root_node = null;
-            }
+
+            // Clean up root reference
+            nullIfOutOfRange(&self.root_node, new_len);
+
+            // Clean up call frame references
             for (self.calls.items) |*frame| {
-                if (frame.first_child) |child| {
-                    if (child >= new_len) frame.first_child = null;
+                nullIfOutOfRange(&frame.first_child, new_len);
+                nullIfOutOfRange(&frame.last_child, new_len);
+                if (frame.node_len_on_entry > new_len) {
+                    frame.node_len_on_entry = new_len;
                 }
-                if (frame.last_child) |child| {
-                    if (child >= new_len) frame.last_child = null;
-                }
-                if (frame.node_len_on_entry > new_len) frame.node_len_on_entry = new_len;
             }
         }
 
+        // === VM Execution ===
+
+        /// Execute one or more VM instructions
         pub fn next(
             self: *Self,
             ip: u32,
@@ -273,9 +299,12 @@ pub fn VM(comptime GrammarType: type) type {
             }
         }
 
+        /// Run VM until completion
         pub fn run(self: *Self) !void {
             try self.next(0, .Loop);
         }
+
+        // === Lifecycle & Utilities ===
 
         pub fn initAlloc(
             text: [:0]const u8,
@@ -336,6 +365,9 @@ pub fn VM(comptime GrammarType: type) type {
             _ = try vm.run();
         }
 
+        // === AST Forest Construction ===
+
+        /// Build typed forest from parse tree
         pub fn buildForest(
             self: *const Self,
             allocator: std.mem.Allocator,
@@ -351,6 +383,8 @@ pub fn VM(comptime GrammarType: type) type {
                 root_rule,
             );
         }
+
+        // === Memoization Utilities ===
 
         pub fn countStepsWithMemo(text: [:0]const u8, gpa: std.mem.Allocator) !struct { steps: u32, hits: u32, misses: u32 } {
             var self = try Self.initAlloc(text, gpa, 32, 32, 256);
