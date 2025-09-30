@@ -379,8 +379,11 @@ pub const FrameEffect = enum(u8) {
 
 pub fn OpG(comptime rel: bool) type {
     return union(enum) {
-        /// Consume any byte that matches the bitset
-        read: std.StaticBitSet(256),
+        /// Consume any byte that matches the bitset (with optional repetition)
+        read: struct {
+            set: std.StaticBitSet(256),
+            repeat: Repeat,
+        },
         /// Call a rule (by tag or absolute address)
         call: if (rel) []const u8 else u32,
         /// Frame-manipulating instruction
@@ -417,64 +420,6 @@ pub fn Match(comptime T: type) type {
     };
 }
 
-fn extractValueType(comptime T: type) type {
-    return T.Value;
-    // switch (@typeInfo(T)) {
-    //     .@"struct" => |s| {
-    //         // Check if this is a pattern type with a Value decl
-    //         if (@hasDecl(T, "Value")) {
-    //             return T.Value;
-    //         }
-
-    //         // Regular struct - transform fields
-    //         var fields: [s.fields.len]std.builtin.Type.StructField = undefined;
-    //         inline for (s.fields, 0..) |field, i| {
-    //             const field_value_type = extractValueType(field.type);
-    //             fields[i] = .{
-    //                 .name = field.name,
-    //                 .type = field_value_type,
-    //                 .default_value_ptr = null,
-    //                 .is_comptime = false,
-    //                 .alignment = @alignOf(field_value_type),
-    //             };
-    //         }
-    //         return @Type(.{ .@"struct" = .{
-    //             .layout = s.layout,
-    //             .backing_integer = s.backing_integer,
-    //             .fields = &fields,
-    //             .decls = &.{},
-    //             .is_tuple = s.is_tuple,
-    //         } });
-    //     },
-    //     .@"union" => |u| {
-    //         // Transform union fields
-    //         var fields: [u.fields.len]std.builtin.Type.UnionField = undefined;
-    //         inline for (u.fields, 0..) |field, i| {
-    //             const field_value_type = extractValueType(field.type);
-    //             fields[i] = .{
-    //                 .name = field.name,
-    //                 .type = field_value_type,
-    //                 .alignment = @alignOf(field_value_type),
-    //             };
-    //         }
-    //         return @Type(.{ .@"union" = .{
-    //             .layout = u.layout,
-    //             .tag_type = u.tag_type,
-    //             .fields = &fields,
-    //             .decls = &.{},
-    //         } });
-    //     },
-    //     .optional => |opt| {
-    //         return ?extractValueType(opt.child);
-    //     },
-    //     .void => return void,
-    //     else => {
-    //         // For other types (primitives, etc.), return as-is
-    //         return T;
-    //     },
-    // }
-}
-
 pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
     return struct {
         offset: u32,
@@ -485,18 +430,7 @@ pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
             for (s) |c| {
                 bs.set(c);
             }
-            if (repeat == .one) {
-                return &[_]Op{.{ .read = bs }};
-            } else {
-                var a = Assembler(3, enum { loop, done }){};
-                return a
-                    .mark(.loop)
-                    .ctrl(.push, .done)
-                    .emit(&[_]Op{.{ .read = bs }})
-                    .ctrl(.move, .loop)
-                    .mark(.done)
-                    .build();
-            }
+            return &[_]Op{.{ .read = .{ .set = bs, .repeat = repeat } }};
         }
 
         pub fn eval(
@@ -533,18 +467,7 @@ pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
             for (a..b + 1) |c| {
                 bs.set(c);
             }
-            if (repeat == .one) {
-                return &[_]Op{.{ .read = bs }};
-            } else {
-                var a_asm = Assembler(3, enum { loop, done }){};
-                return a_asm
-                    .mark(.loop)
-                    .ctrl(.push, .done)
-                    .emit(&[_]Op{.{ .read = bs }})
-                    .ctrl(.move, .loop)
-                    .mark(.done)
-                    .build();
-            }
+            return &[_]Op{.{ .read = .{ .set = bs, .repeat = repeat } }};
         }
 
         pub fn eval(

@@ -176,10 +176,19 @@ pub fn VM(comptime GrammarType: type) type {
                     const ch = self.text[self.sp];
 
                     switch (OP) {
-                        .read => |set| {
-                            if (set.isSet(ch)) {
-                                self.sp += 1;
+                        .read => |read_op| {
+                            if (read_op.repeat == .kleene) {
+                                // Consume as many matching characters as possible
+                                while (self.sp < self.text.len and read_op.set.isSet(self.text[self.sp])) {
+                                    self.sp += 1;
+                                }
                                 if (loop) continue :vm IP1 else return IP1;
+                            } else {
+                                // Single character match (repeat == .one)
+                                if (read_op.set.isSet(ch)) {
+                                    self.sp += 1;
+                                    if (loop) continue :vm IP1 else return IP1;
+                                }
                             }
                         },
 

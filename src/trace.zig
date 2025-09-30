@@ -30,6 +30,7 @@ pub const TraceStyle = enum {
     cache_hit,
     success,
     failure,
+    quantifier,
 };
 
 const TracePrinter = ColorPrinter(TraceStyle);
@@ -48,6 +49,7 @@ const default_trace_theme = TracePrinter.Theme.init(.{
     .end_marker = SGR.fg(.green).bright(),
     .stack_depth = SGR.attr(.dim),
     .opcode_ip = SGR.fg(.cyan),
+    .quantifier = SGR.fg(.magenta).bright(),
     .cache_hit = SGR.fg(.green),
     .success = SGR.fg(.green).bright(),
     .failure = SGR.fg(.red),
@@ -96,13 +98,13 @@ pub fn dumpOp(
                 try printer.print(.call_name, "&{s}", .{@tagName(target)});
             }
         },
-        .read => |cs| {
+        .read => |read_op| {
             var i: u32 = 0;
             while (i < 256) : (i += 1) {
-                if (cs.isSet(i)) {
+                if (read_op.set.isSet(i)) {
                     // Check for ranges - look ahead for consecutive characters
                     var range_end = i;
-                    while (range_end + 1 < 256 and cs.isSet(range_end + 1)) : (range_end += 1) {}
+                    while (range_end + 1 < 256 and read_op.set.isSet(range_end + 1)) : (range_end += 1) {}
 
                     if (range_end > i + 1) {
                         // We have a range of at least 3 characters
@@ -122,6 +124,10 @@ pub fn dumpOp(
                         try printChar(printer, @intCast(i));
                     }
                 }
+            }
+            // Add repetition indicator
+            if (read_op.repeat == .kleene) {
+                try printer.print(.quantifier, "*", .{});
             }
         },
 
