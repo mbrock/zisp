@@ -276,6 +276,7 @@ pub fn trace(
         } else false;
 
         try traceStep(machine, ip, &last_sp, &printer, is_cache_hit);
+        try writer.flush();
 
         // Execute step
         if (machine.next(ip, .Step)) |outcome| {

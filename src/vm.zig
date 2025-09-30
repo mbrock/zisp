@@ -100,29 +100,43 @@ pub fn VM(comptime GrammarType: type) type {
 
         // === AST Construction Helpers ===
 
+        /// Link children from the child_stack to a parent node, setting up sibling relationships.
+        /// Returns the first child index and truncates the child_stack back to `start`.
+        fn linkChildrenToParent(self: *Self, parent_idx: u32, start: usize) ?u32 {
+            // Extract the slice of child indices accumulated since `start`
+            const end = self.child_stack.items.len;
+            const slice = if (start < end) self.child_stack.items[start..end] else &[_]u32{};
+
+            var first_child: ?u32 = null;
+            var prev_child: ?u32 = null;
+
+            // Wire up the doubly-linked sibling chain
+            for (slice, 0..) |child_idx, i| {
+                if (i == 0) first_child = child_idx;
+
+                // Link backwards to previous sibling
+                self.nodes.items[child_idx].prev_sibling = prev_child;
+                // Link previous sibling forward to current
+                if (prev_child) |prev| {
+                    self.nodes.items[@intCast(prev)].next_sibling = child_idx;
+                }
+                // Last sibling has no next
+                self.nodes.items[child_idx].next_sibling = null;
+                // All children point up to the parent
+                self.nodes.items[child_idx].parent = parent_idx;
+                prev_child = child_idx;
+            }
+
+            // Pop accumulated children off the stack
+            self.child_stack.items.len = if (start <= end) start else end;
+            return first_child;
+        }
+
         /// Create a new node from a completed call frame
         /// (this is the only place `kind == .rule` nodes are born).
         fn appendNode(self: *Self, frame: CallFrame, end_sp: u32) !u32 {
             const idx: u32 = @intCast(self.nodes.items.len);
-
-            const children = self.child_stack.items[frame.child_start..self.child_stack.items.len];
-            var first_child: ?u32 = null;
-            var prev_child: ?u32 = null;
-
-            for (children, 0..) |child_idx, i| {
-                const child_u32: u32 = child_idx;
-                const child_usize: usize = @intCast(child_u32);
-                if (i == 0) first_child = child_u32;
-                self.nodes.items[child_usize].prev_sibling = prev_child;
-                if (prev_child) |prev| {
-                    self.nodes.items[@intCast(prev)].next_sibling = child_u32;
-                }
-                self.nodes.items[child_usize].next_sibling = null;
-                self.nodes.items[child_usize].parent = idx;
-                prev_child = child_u32;
-            }
-
-            self.child_stack.items.len = frame.child_start;
+            const first_child = self.linkChildrenToParent(idx, frame.child_start);
 
             try self.nodes.appendBounded(.{
                 .kind = .rule,
@@ -144,30 +158,17 @@ pub fn VM(comptime GrammarType: type) type {
 
         /// Attach a newly created node to whichever stack frame owns it.
         ///
-        /// Structural opcodes (`open/next/shut`) push frames that sit “above” the
+        /// Structural opcodes (`open/next/shut`) push frames that sit "above" the
         /// call stack, so children created while inside them should land on those
-        /// frames instead of on the rule call. Once the structural depth matches
-        /// the depth it had when the call began we fall back to the call frame.
-        fn attachChild(self: *Self, node_index: u32) !void {
-            const parent_call = if (self.calls.items.len > 0)
-                &self.calls.items[self.calls.items.len - 1]
-            else
-                null;
-
-            const call_struct_depth = if (parent_call) |frame|
-                frame.struct_depth_on_entry
-            else
-                0;
-            const current_struct_depth = self.struct_stack.items.len;
-
-            if (current_struct_depth > call_struct_depth) {
-                try self.pushChildIndex(node_index);
-                return;
-            }
-
-            // No structural frame owns it; fall back to the call frame's child list.
-            if (parent_call == null) return;
-            try self.pushChildIndex(node_index);
+        /// frames instead of on the rule call.
+        fn attachChild(self: *Self, child: u32) !void {
+            const struct_depth = self.struct_stack.items.len;
+            if (self.calls.getLastOrNull()) |call| {
+                if (struct_depth >= call.struct_depth_on_entry)
+                    //  We're in a call but more importantly we're in a structure.
+                    try self.pushChildIndex(child);
+            } else if (struct_depth > 0)
+                try self.pushChildIndex(child);
         }
 
         /// Close out the current field and append a wrapper node for it.
@@ -178,25 +179,8 @@ pub fn VM(comptime GrammarType: type) type {
         /// ends we turn that payload into a dedicated `.field` node and push that
         /// node onto the struct’s own child list.
         fn finalizeStructField(self: *Self, frame: *StructuralFrame, end_sp: u32) !void {
-            const slice = self.child_stack.items[frame.field_child_start..self.child_stack.items.len];
             const field_idx: u32 = @intCast(self.nodes.items.len);
-
-            var first_child: ?u32 = null;
-            var prev_child: ?u32 = null;
-            for (slice, 0..) |child_idx, i| {
-                const child_u32: u32 = child_idx;
-                const child_usize: usize = @intCast(child_u32);
-                if (i == 0) first_child = child_u32;
-                self.nodes.items[child_usize].prev_sibling = prev_child;
-                if (prev_child) |prev| {
-                    self.nodes.items[@intCast(prev)].next_sibling = child_u32;
-                }
-                self.nodes.items[child_usize].next_sibling = null;
-                self.nodes.items[child_usize].parent = field_idx;
-                prev_child = child_u32;
-            }
-
-            self.child_stack.items.len = frame.field_child_start;
+            const first_child = self.linkChildrenToParent(field_idx, frame.field_child_start);
 
             try self.nodes.appendBounded(.{
                 .kind = .field,
@@ -222,6 +206,32 @@ pub fn VM(comptime GrammarType: type) type {
             if (self.root_node) |root_idx| {
                 if (root_idx >= new_len) self.root_node = null;
             }
+        }
+
+        /// Restore the child stack to a previous logical length, filtering out any
+        /// indices that no longer point at live nodes (can happen after backtracking
+        /// truncates the node list).
+        fn restoreChildStack(self: *Self, target_len: usize) void {
+            if (target_len == 0) {
+                self.child_stack.items.len = 0;
+                return;
+            }
+
+            const current = self.child_stack.items.len;
+            const limit = if (target_len < current) target_len else current;
+            var write: usize = 0;
+            const live_nodes = self.nodes.items.len;
+
+            var i: usize = 0;
+            while (i < limit) : (i += 1) {
+                const idx = self.child_stack.items[i];
+                if (idx < live_nodes) {
+                    self.child_stack.items[write] = idx;
+                    write += 1;
+                }
+            }
+
+            self.child_stack.items.len = write;
         }
 
         // === VM Execution ===
@@ -260,6 +270,18 @@ pub fn VM(comptime GrammarType: type) type {
                             }
                         },
 
+                        .text => |lit| {
+                            const start: usize = @intCast(self.sp);
+                            const len: usize = lit.len;
+                            if (start + len <= self.text.len) {
+                                const slice = self.text[start .. start + len];
+                                if (std.mem.eql(u8, slice, lit)) {
+                                    self.sp = @intCast(start + len);
+                                    if (loop) continue :vm IP1 else return IP1;
+                                }
+                            }
+                        },
+
                         .call => |target| {
                             if (self.memo) |memo| {
                                 const key = MemoKey{ .ip = target, .sp = self.sp };
@@ -272,7 +294,7 @@ pub fn VM(comptime GrammarType: type) type {
                                             self.sp = save.sp;
                                             self.calls.items.len = save.call_depth;
                                             self.truncateNodes(save.node_len);
-                                            self.child_stack.items.len = save.child_len;
+                                            self.restoreChildStack(save.child_len);
                                             if (loop) continue :vm save.ip else return save.ip;
                                         }
                                         return error.ParseFailed;
@@ -325,7 +347,7 @@ pub fn VM(comptime GrammarType: type) type {
                                 self.sp = save.sp;
                                 self.struct_stack.items.len = save.struct_depth;
                                 self.truncateNodes(save.node_len);
-                                self.child_stack.items.len = save.child_len;
+                                self.restoreChildStack(save.child_len);
                                 if (loop) continue :vm ctrl.ip else return ctrl.ip;
                             },
                         },
@@ -400,27 +422,10 @@ pub fn VM(comptime GrammarType: type) type {
                                 self.struct_stack.items.len -= 1;
 
                                 const node_usize: usize = @intCast(frame_data.node_index);
-                                var node = &self.nodes.items[node_usize];
-                                node.end = self.sp;
+                                const first_child = self.linkChildrenToParent(frame_data.node_index, frame_data.node_child_start);
 
-                                const slice = self.child_stack.items[frame_data.node_child_start..self.child_stack.items.len];
-                                var first_child: ?u32 = null;
-                                var prev_child: ?u32 = null;
-                                for (slice, 0..) |child_idx, i| {
-                                    const child_u32: u32 = child_idx;
-                                    const child_usize: usize = @intCast(child_u32);
-                                    if (i == 0) first_child = child_u32;
-                                    self.nodes.items[child_usize].prev_sibling = prev_child;
-                                    if (prev_child) |prev| {
-                                        self.nodes.items[@intCast(prev)].next_sibling = child_u32;
-                                    }
-                                    self.nodes.items[child_usize].next_sibling = null;
-                                    self.nodes.items[child_usize].parent = frame_data.node_index;
-                                    prev_child = child_u32;
-                                }
-                                node.first_child = first_child;
-
-                                self.child_stack.items.len = frame_data.node_child_start;
+                                self.nodes.items[node_usize].end = self.sp;
+                                self.nodes.items[node_usize].first_child = first_child;
 
                                 try self.attachChild(frame_data.node_index);
                             }
@@ -445,7 +450,7 @@ pub fn VM(comptime GrammarType: type) type {
                         self.calls.items.len = save.call_depth;
                         self.struct_stack.items.len = save.struct_depth;
                         self.truncateNodes(save.node_len);
-                        self.child_stack.items.len = save.child_len;
+                        self.restoreChildStack(save.child_len);
 
                         if (loop) continue :vm save.ip else return save.ip;
                     }

@@ -393,6 +393,8 @@ pub fn OpG(comptime rel: bool) type {
             set: std.StaticBitSet(256),
             repeat: Repeat,
         },
+        /// Match a fixed literal string
+        text: []const u8,
         /// Call a rule (by tag or absolute address)
         call: if (rel) []const u8 else u32,
         /// Frame-manipulating instruction
@@ -551,6 +553,53 @@ pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
             state.pos = end_pos;
             const offset: u32 = @intCast(start_pos);
             return .{ .offset = offset, .len = {} };
+        }
+    };
+}
+
+pub fn Literal(comptime text: []const u8) type {
+    comptime {
+        if (text.len == 0) {
+            @compileError("Literal requires a non-empty string");
+        }
+    }
+
+    return struct {
+        pub const Kind = .char_slice;
+        offset: u32,
+        len: u32,
+
+        pub fn compile(_: type) []const Op {
+            return &[_]Op{.{ .text = text }};
+        }
+
+        pub fn eval(
+            comptime G: type,
+            ctx: *const BuildContext,
+            state: *NodeState,
+        ) BuildError!@This() {
+            _ = G;
+
+            const start_pos = state.pos;
+            const end_pos = state.end;
+            if (start_pos > end_pos or end_pos > ctx.text.len) {
+                return error.InvalidAst;
+            }
+
+            if (end_pos != start_pos + text.len) {
+                return error.InvalidAst;
+            }
+
+            const slice = ctx.text[start_pos..end_pos];
+            if (!std.mem.eql(u8, slice, text)) {
+                return error.InvalidAst;
+            }
+
+            state.pos = end_pos;
+            return .{
+                .offset = @intCast(start_pos),
+                .len = @intCast(text.len),
+            };
         }
     };
 }
@@ -1006,6 +1055,36 @@ test "Grammar AST inference" {
 
     try std.testing.expect(test_forest.lists.Value.items.len == 0);
     // Pattern types ARE value types now - the runtime fields get populated during forest construction
+}
+
+test "literal opcode matches keyword" {
+    const KeywordGrammar = struct {
+        pub const Root = Match(struct {
+            kw: Literal("let"),
+        });
+    };
+
+    const VMFactory = @import("vm.zig").VM;
+    const TestVM = VMFactory(KeywordGrammar);
+
+    var saves_buf: [8]TestVM.SaveFrame = undefined;
+    var calls_buf: [8]TestVM.CallFrame = undefined;
+    var nodes_buf: [32]NodeType = undefined;
+    var structs_buf: [8]TestVM.StructuralFrame = undefined;
+    var child_buf: [32]u32 = undefined;
+
+    var vm_ok = TestVM.init("let", saves_buf[0..], calls_buf[0..], nodes_buf[0..], structs_buf[0..], child_buf[0..]);
+    try vm_ok.run();
+    try std.testing.expectEqual(@as(u32, 3), vm_ok.sp);
+
+    var fail_saves: [8]TestVM.SaveFrame = undefined;
+    var fail_calls: [8]TestVM.CallFrame = undefined;
+    var fail_nodes: [32]NodeType = undefined;
+    var fail_structs: [8]TestVM.StructuralFrame = undefined;
+    var fail_children: [32]u32 = undefined;
+
+    var vm_fail = TestVM.init("lex", fail_saves[0..], fail_calls[0..], fail_nodes[0..], fail_structs[0..], fail_children[0..]);
+    try std.testing.expectError(error.ParseFailed, vm_fail.run());
 }
 
 pub fn main() !void {
