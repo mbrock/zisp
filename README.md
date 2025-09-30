@@ -113,6 +113,32 @@ zig build-exe vm_loop_demo.zig \
 
 The emitted `.ll` and `.s` highlight how the interpreter turns into a computed-goto state machine with literal bitsets for character classes.
 
+### How specialization actually looks
+
+Because the VM bytecode is baked during `comptime`, the “interpreter” that ships in the binary already knows the exact instruction stream. `VM(G).next` gets monomorphized for the grammar, the opcode array becomes a constant, and the main loop lowers to one giant `switch`/jump-table keyed on the instruction pointer. In other words we don’t even switch on an opcode enum at runtime; we switch on the literal IP and jump straight to the inlined code for that specific instruction. A toy sketch of the shape you get looks like this:
+
+```zig
+// Pseudocode, but this is the flavour LLVM ends up with.
+vm: switch (ip) {
+    0 => { // read '['
+        if (self.text[self.sp] != '[') return error.ParseFailed;
+        self.sp += 1;
+        continue :vm 1;
+    },
+    1 => { // call Skip rule
+        try self.calls.append(.{ .return_ip = 2, .target_ip = 31, ... });
+        continue :vm 31;
+    },
+    2 => { // next field, etc.
+        ...;
+        continue :vm 3;
+    },
+    else => return;
+}
+```
+
+Every case carries the rule metadata, call targets, character sets, and struct bookkeeping as compile-time constants. In release builds the control flow resembles an assembler hand-written threaded interpreter for a program that was known when you built the binary. The deep dive in `docs/vm-loop-llvm.md` shows the LLVM view, but even at the Zig level you can reason about the VM as a tightly unrolled state machine specialized to the grammar you compiled.
+
 ## Project status
 
 This is intentionally exploratory code. Expect breakage, rapid refactors, and plenty of TODOs around:
