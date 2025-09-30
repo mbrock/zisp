@@ -31,3 +31,4 @@ tmp/
 # Executables
 /parse
 /bug
+/vm_loop_demo
