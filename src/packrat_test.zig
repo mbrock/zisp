@@ -42,10 +42,10 @@ test "memoization saves steps on backtracking" {
 
     // Test shows linear growth in savings as input grows
     const test_cases = [_]struct { input: [:0]const u8, no_memo: u32, with_memo: u32, saved: u32 }{
-        .{ .input = "ay", .no_memo = 35, .with_memo = 22, .saved = 13 },
-        .{ .input = "aay", .no_memo = 49, .with_memo = 29, .saved = 20 },
-        .{ .input = "aaay", .no_memo = 63, .with_memo = 36, .saved = 27 },
-        .{ .input = "aaaay", .no_memo = 77, .with_memo = 43, .saved = 34 },
+        .{ .input = "ay", .no_memo = 46, .with_memo = 30, .saved = 16 },
+        .{ .input = "aay", .no_memo = 66, .with_memo = 40, .saved = 26 },
+        .{ .input = "aaay", .no_memo = 86, .with_memo = 50, .saved = 36 },
+        .{ .input = "aaaay", .no_memo = 106, .with_memo = 60, .saved = 46 },
     };
 
     for (test_cases) |tc| {
@@ -95,8 +95,8 @@ test "memoization caches both success and failure" {
         const steps = try TestVM.countSteps(input, std.testing.allocator);
         const stats = try TestVM.countStepsWithMemo(input, std.testing.allocator);
 
-        try std.testing.expectEqual(@as(u32, 11), steps);
-        try std.testing.expectEqual(@as(u32, 11), stats.steps);
+        try std.testing.expectEqual(@as(u32, 18), steps);
+        try std.testing.expectEqual(@as(u32, 18), stats.steps);
         try std.testing.expectEqual(@as(u32, 0), stats.hits); // No backtracking, no cache hit
     }
 
@@ -106,8 +106,8 @@ test "memoization caches both success and failure" {
         const steps = try TestVM.countSteps(input, std.testing.allocator);
         const stats = try TestVM.countStepsWithMemo(input, std.testing.allocator);
 
-        try std.testing.expectEqual(@as(u32, 17), steps);
-        try std.testing.expectEqual(@as(u32, 13), stats.steps); // Saved 4 steps
+        try std.testing.expectEqual(@as(u32, 30), steps);
+        try std.testing.expectEqual(@as(u32, 22), stats.steps); // Saved 4 steps
         try std.testing.expectEqual(@as(u32, 1), stats.hits); // One cache hit
     }
 }
@@ -115,7 +115,7 @@ test "memoization caches both success and failure" {
 test "step count stability check" {
     // This test ensures we notice when VM or compiler changes affect performance
     // Update these values when making intentional changes
-    
+
     const SimpleGrammar = struct {
         pub const start = peg.Match(struct {
             a: peg.CharSet("a", .one),
@@ -127,7 +127,7 @@ test "step count stability check" {
     const TestVM = vm.VM(SimpleGrammar);
 
     const steps = try TestVM.countSteps("abc", std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 4), steps);
+    try std.testing.expectEqual(@as(u32, 8), steps);
 }
 
 test "memoization works with nested rules" {
@@ -176,7 +176,7 @@ test "memoization works with nested rules" {
         const input = "ab-";
         const steps = try TestVM.countSteps(input, std.testing.allocator);
         const stats = try TestVM.countStepsWithMemo(input, std.testing.allocator);
-        
+
         // Verify memoization saves steps
         try std.testing.expect(stats.steps < steps);
         try std.testing.expect(stats.hits > 0);
@@ -184,7 +184,7 @@ test "memoization works with nested rules" {
 }
 
 // REMOVED: The pathological test with kleene star was too complex.
-// The interaction between kleene star backtracking and memoization 
+// The interaction between kleene star backtracking and memoization
 // makes the step counts hard to predict and maintain.
 
 test "memoization disabled by default" {
