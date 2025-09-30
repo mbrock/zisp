@@ -12,7 +12,17 @@ const std = @import("std");
 // PARSE TREE NODE TYPE
 // ============================================================================
 
+pub const NodeKind = enum(u8) {
+    rule,
+    @"struct",
+    field,
+    maybe,
+    kleene,
+    char_slice,
+};
+
 pub const NodeType = struct {
+    kind: NodeKind,
     rule_index: u32,
     start: u32,
     end: u32,
@@ -59,7 +69,7 @@ pub const NodeState = struct {
     ) BuildError!u32 {
         const child_idx = self.next_child orelse return error.InvalidAst;
         const child = ctx.nodes[child_idx];
-        if (child.rule_index != rule_index) {
+        if (child.kind != .rule or child.rule_index != rule_index) {
             return error.InvalidAst;
         }
 
@@ -88,7 +98,7 @@ pub const NodeState = struct {
 
         while (self.next_child) |child_idx| {
             const child = ctx.nodes[child_idx];
-            if (child.rule_index != rule_index) {
+            if (child.kind != .rule or child.rule_index != rule_index) {
                 break;
             }
 
@@ -112,6 +122,28 @@ pub const NodeState = struct {
         }
 
         return .{ .offset = @intCast(first_index), .len = @intCast(count) };
+    }
+
+    pub fn expectKind(
+        self: *@This(),
+        ctx: *const BuildContext,
+        kind: NodeKind,
+    ) BuildError!NodeState {
+        const child_idx = self.next_child orelse return error.InvalidAst;
+        const child = ctx.nodes[child_idx];
+        if (child.kind != kind) {
+            return error.InvalidAst;
+        }
+
+        const start_pos: usize = @intCast(child.start);
+        const end_pos: usize = @intCast(child.end);
+        if (self.pos != start_pos) {
+            return error.InvalidAst;
+        }
+
+        self.pos = end_pos;
+        self.next_child = childToIndex(child.next_sibling);
+        return NodeState.init(child);
     }
 };
 

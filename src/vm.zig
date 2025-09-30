@@ -7,6 +7,7 @@ pub const Mode = enum {
 };
 
 const Node = peg.NodeType;
+const NodeKind = peg.NodeKind;
 
 pub fn VM(comptime GrammarType: type) type {
     return struct {
@@ -14,6 +15,16 @@ pub fn VM(comptime GrammarType: type) type {
         pub const Grammar = peg.Grammar(GrammarType);
         pub const RuleEnum = Grammar.RuleEnum;
         pub const Ops = Grammar.compile(false);
+
+        pub const StructuralFrame = struct {
+            kind: NodeKind,
+            start_sp: u32,
+            first_child: ?u32,
+            last_child: ?u32,
+            field_start: u32,
+            field_first_child: ?u32,
+            field_last_child: ?u32,
+        };
 
         // === Core Parsing State ===
         sp: u32 = 0,
@@ -27,6 +38,9 @@ pub fn VM(comptime GrammarType: type) type {
         nodes: std.ArrayList(Node),
         root_node: ?u32 = null,
 
+        // === Structural tracking ===
+        struct_stack: std.ArrayList(StructuralFrame),
+
         // === Memoization (optional) ===
         memo: ?*MemoTable = null,
 
@@ -35,6 +49,7 @@ pub fn VM(comptime GrammarType: type) type {
             sp: u32,
             call_depth: u32,
             node_len: usize,
+            struct_depth: usize,
         };
 
         pub const CallFrame = struct {
@@ -45,6 +60,7 @@ pub fn VM(comptime GrammarType: type) type {
             first_child: ?u32,
             last_child: ?u32,
             node_len_on_entry: usize,
+            struct_depth_on_entry: usize,
         };
 
         pub const MemoKey = struct {
@@ -64,6 +80,7 @@ pub fn VM(comptime GrammarType: type) type {
             saves: []SaveFrame,
             calls: []CallFrame,
             nodes: []Node,
+            struct_frames: []StructuralFrame,
         ) Self {
             return Self{
                 .sp = 0,
@@ -71,6 +88,7 @@ pub fn VM(comptime GrammarType: type) type {
                 .saves = .initBuffer(saves),
                 .calls = .initBuffer(calls),
                 .nodes = .initBuffer(nodes),
+                .struct_stack = .initBuffer(struct_frames),
                 .memo = null,
                 .root_node = null,
             };
@@ -83,6 +101,7 @@ pub fn VM(comptime GrammarType: type) type {
             const idx: u32 = @intCast(self.nodes.items.len);
 
             try self.nodes.appendBounded(.{
+                .kind = .rule,
                 .rule_index = @intFromEnum(frame.rule),
                 .start = frame.start_sp,
                 .end = end_sp,
@@ -108,8 +127,46 @@ pub fn VM(comptime GrammarType: type) type {
 
         /// Attach a newly created node as a child of the current call frame
         fn attachChild(self: *Self, node_index: u32) void {
-            if (self.calls.items.len == 0) return;
-            var frame = &self.calls.items[self.calls.items.len - 1];
+            const parent_call = if (self.calls.items.len > 0)
+                &self.calls.items[self.calls.items.len - 1]
+            else
+                null;
+
+            const call_struct_depth = if (parent_call) |frame|
+                frame.struct_depth_on_entry
+            else
+                0;
+            const current_struct_depth = self.struct_stack.items.len;
+
+            if (current_struct_depth > call_struct_depth) {
+                const frame = &self.struct_stack.items[current_struct_depth - 1];
+                switch (frame.kind) {
+                    .@"struct" => {
+                        if (frame.field_first_child) |_| {
+                            const last = frame.field_last_child.?;
+                            self.nodes.items[last].next_sibling = node_index;
+                            frame.field_last_child = node_index;
+                        } else {
+                            frame.field_first_child = node_index;
+                            frame.field_last_child = node_index;
+                        }
+                    },
+                    else => {
+                        if (frame.first_child) |_| {
+                            const last = frame.last_child.?;
+                            self.nodes.items[last].next_sibling = node_index;
+                            frame.last_child = node_index;
+                        } else {
+                            frame.first_child = node_index;
+                            frame.last_child = node_index;
+                        }
+                    },
+                }
+                return;
+            }
+
+            if (parent_call == null) return;
+            const frame = parent_call.?;
 
             if (frame.first_child) |_| {
                 // Add to end of sibling chain
@@ -128,6 +185,35 @@ pub fn VM(comptime GrammarType: type) type {
             if (ref.*) |idx| {
                 if (idx >= threshold) ref.* = null;
             }
+        }
+
+        fn finalizeStructField(self: *Self, frame: *StructuralFrame, end_sp: u32) !void {
+            const field_start = frame.field_start;
+            const node_idx: u32 = @intCast(self.nodes.items.len);
+            const first_child = frame.field_first_child;
+
+            try self.nodes.appendBounded(.{
+                .kind = .field,
+                .rule_index = 0,
+                .start = field_start,
+                .end = end_sp,
+                .first_child = first_child,
+                .next_sibling = null,
+                .parent = null,
+            });
+
+            self.linkChildrenToParent(first_child, node_idx);
+
+            if (frame.first_child) |_| {
+                const last = frame.last_child.?;
+                self.nodes.items[last].next_sibling = node_idx;
+            } else {
+                frame.first_child = node_idx;
+            }
+            frame.last_child = node_idx;
+            frame.field_start = end_sp;
+            frame.field_first_child = null;
+            frame.field_last_child = null;
         }
 
         /// Rollback node tree to a previous state (for backtracking)
@@ -153,6 +239,13 @@ pub fn VM(comptime GrammarType: type) type {
                 if (frame.node_len_on_entry > new_len) {
                     frame.node_len_on_entry = new_len;
                 }
+            }
+
+            for (self.struct_stack.items) |*frame| {
+                nullIfOutOfRange(&frame.first_child, new_len);
+                nullIfOutOfRange(&frame.last_child, new_len);
+                nullIfOutOfRange(&frame.field_first_child, new_len);
+                nullIfOutOfRange(&frame.field_last_child, new_len);
             }
         }
 
@@ -221,6 +314,7 @@ pub fn VM(comptime GrammarType: type) type {
                                 .first_child = null,
                                 .last_child = null,
                                 .node_len_on_entry = self.nodes.items.len,
+                                .struct_depth_on_entry = self.struct_stack.items.len,
                             });
 
                             if (loop) continue :vm target else return target;
@@ -233,6 +327,7 @@ pub fn VM(comptime GrammarType: type) type {
                                     .sp = self.sp,
                                     .call_depth = @intCast(self.calls.items.len),
                                     .node_len = self.nodes.items.len,
+                                    .struct_depth = self.struct_stack.items.len,
                                 });
                                 if (loop) continue :vm IP1 else return IP1;
                             },
@@ -245,12 +340,14 @@ pub fn VM(comptime GrammarType: type) type {
                             .move => {
                                 self.saves.items[self.saves.items.len - 1].sp = self.sp;
                                 self.saves.items[self.saves.items.len - 1].node_len = self.nodes.items.len;
+                                self.saves.items[self.saves.items.len - 1].struct_depth = self.struct_stack.items.len;
                                 if (loop) continue :vm ctrl.ip else return ctrl.ip;
                             },
 
                             .wipe => {
                                 const save = self.saves.pop().?;
                                 self.sp = save.sp;
+                                self.struct_stack.items.len = save.struct_depth;
                                 self.truncateNodes(save.node_len);
                                 if (loop) continue :vm ctrl.ip else return ctrl.ip;
                             },
@@ -282,21 +379,53 @@ pub fn VM(comptime GrammarType: type) type {
 
                         .over => return (if (mode == .Loop) {} else null),
 
-                        .open => {
-                            // Mark the beginning of a structural element
-                            // For now, just continue - AST building will use this
+                        .open => |node_kind| {
+                            try self.struct_stack.appendBounded(.{
+                                .kind = node_kind,
+                                .start_sp = self.sp,
+                                .first_child = null,
+                                .last_child = null,
+                                .field_start = self.sp,
+                                .field_first_child = null,
+                                .field_last_child = null,
+                            });
                             if (loop) continue :vm IP1 else return IP1;
                         },
 
                         .next => {
-                            // Mark boundary between struct fields
-                            // For now, just continue - AST building will use this
+                            if (self.struct_stack.items.len > 0) {
+                                const frame = &self.struct_stack.items[self.struct_stack.items.len - 1];
+                                if (frame.kind == .@"struct") {
+                                    try self.finalizeStructField(frame, self.sp);
+                                }
+                            }
                             if (loop) continue :vm IP1 else return IP1;
                         },
 
                         .shut => {
-                            // Mark the end of a structural element
-                            // For now, just continue - AST building will use this
+                            if (self.struct_stack.items.len > 0) {
+                                const frame_ptr = &self.struct_stack.items[self.struct_stack.items.len - 1];
+                                if (frame_ptr.kind == .@"struct") {
+                                    try self.finalizeStructField(frame_ptr, self.sp);
+                                }
+
+                                const frame = frame_ptr.*;
+                                _ = self.struct_stack.pop();
+
+                                const node_idx: u32 = @intCast(self.nodes.items.len);
+                                try self.nodes.appendBounded(.{
+                                    .kind = frame.kind,
+                                    .rule_index = 0,
+                                    .start = frame.start_sp,
+                                    .end = self.sp,
+                                    .first_child = frame.first_child,
+                                    .next_sibling = null,
+                                    .parent = null,
+                                });
+
+                                self.linkChildrenToParent(frame.first_child, node_idx);
+                                self.attachChild(node_idx);
+                            }
                             if (loop) continue :vm IP1 else return IP1;
                         },
 
@@ -316,6 +445,7 @@ pub fn VM(comptime GrammarType: type) type {
 
                         self.sp = save.sp;
                         self.calls.items.len = save.call_depth;
+                        self.struct_stack.items.len = save.struct_depth;
                         self.truncateNodes(save.node_len);
 
                         if (loop) continue :vm save.ip else return save.ip;
@@ -346,6 +476,7 @@ pub fn VM(comptime GrammarType: type) type {
                 try gpa.alloc(SaveFrame, maxsaves),
                 try gpa.alloc(CallFrame, maxcalls),
                 try gpa.alloc(Node, maxnodes),
+                try gpa.alloc(StructuralFrame, maxsaves), // Use same capacity as saves
             );
         }
 
@@ -353,6 +484,7 @@ pub fn VM(comptime GrammarType: type) type {
             self.saves.deinit(gpa);
             self.calls.deinit(gpa);
             self.nodes.deinit(gpa);
+            self.struct_stack.deinit(gpa);
         }
 
         pub fn parse(
@@ -541,7 +673,7 @@ test "VM with backtracking" {
 
 test "VM event iteration" {
     try std.testing.expectEqual(
-        3,
+        6,
         try VM(SimpleGrammar).countSteps("ab", std.testing.allocator),
     );
 }

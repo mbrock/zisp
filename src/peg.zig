@@ -54,6 +54,7 @@ pub inline fn compile(comptime rules: type) []const Abs {
 // ============================================================================
 
 pub const NodeType = ast.NodeType;
+pub const NodeKind = ast.NodeKind;
 pub const NodeState = ast.NodeState;
 pub const BuildContext = ast.BuildContext;
 pub const BuildError = ast.BuildError;
@@ -146,7 +147,11 @@ pub inline fn Grammar(rules: type) type {
             inline for (0..rule_count) |i| buckets[i] = .{};
 
             for (nodes, 0..) |node, idx| {
+                if (node.kind != NodeKind.rule) continue;
                 const ri: usize = @intCast(node.rule_index);
+                if (ri >= rule_count) {
+                    return error.InvalidAst;
+                }
                 try buckets[ri].append(allocator, idx);
             }
 
@@ -166,6 +171,7 @@ pub inline fn Grammar(rules: type) type {
             const rule_tags = comptime std.meta.tags(RuleEnum);
 
             var positions = try allocator.alloc(usize, node_count);
+            @memset(positions, 0);
 
             inline for (rule_tags, 0..) |_, ri| {
                 const slice = buckets[ri].items;
@@ -234,6 +240,9 @@ pub inline fn Grammar(rules: type) type {
                 return error.InvalidAst;
             }
             const root_node = nodes[ensured_root];
+            if (root_node.kind != NodeKind.rule) {
+                return error.InvalidAst;
+            }
             const actual_rule: RuleEnum = @enumFromInt(root_node.rule_index);
             if (actual_rule != root_rule) {
                 return error.InvalidAst;
@@ -392,7 +401,7 @@ pub fn OpG(comptime rel: bool) type {
             ip: if (rel) i32 else u32 = undefined,
         },
         /// Begin a structural element (struct field, array element, etc)
-        open: void,
+        open: NodeKind,
         /// Mark boundary between struct fields
         next: void,
         /// End a structural element
@@ -440,7 +449,7 @@ pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
             if (repeat == .kleene) {
                 // For Kleene, wrap in open/shut to track the repetition
                 return &[_]Op{
-                    .{ .open = {} },
+                    .{ .open = NodeKind.char_slice },
                     .{ .read = .{ .set = bs, .repeat = repeat } },
                     .{ .shut = {} },
                 };
@@ -455,41 +464,33 @@ pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
             state: *NodeState,
         ) BuildError!@This() {
             _ = G;
-            const start_pos = state.pos;
+            const text_len = ctx.text.len;
 
-            // Scan the text to find how many characters match this set
-            var end_pos = start_pos;
-            while (end_pos < state.end and end_pos < ctx.text.len) {
-                const ch = ctx.text[end_pos];
-                var matches = false;
-                inline for (s) |c| {
-                    if (ch == c) {
-                        matches = true;
-                        break;
-                    }
+            if (repeat == .kleene) {
+                const slice_state = try state.expectKind(ctx, NodeKind.char_slice);
+                const start_pos = slice_state.pos;
+                const end_pos = slice_state.end;
+                if (end_pos < start_pos or end_pos > text_len) {
+                    return error.InvalidAst;
                 }
-                if (matches) {
-                    end_pos += 1;
-                    if (repeat == .one) break; // Stop after one character for .one
-                } else {
-                    break; // Stop when we hit a non-matching character
-                }
+                const offset: u32 = @intCast(start_pos);
+                const len: u32 = @intCast(end_pos - start_pos);
+                return .{ .offset = offset, .len = len };
             }
 
-            // For .one, we must have matched at least one character
-            if (repeat == .one and end_pos == start_pos) {
+            const start_pos = state.pos;
+            const end_pos = state.end;
+            if (start_pos >= end_pos or end_pos > text_len) {
+                return error.InvalidAst;
+            }
+
+            if (end_pos != start_pos + 1) {
                 return error.InvalidAst;
             }
 
             state.pos = end_pos;
-
             const offset: u32 = @intCast(start_pos);
-            if (repeat == .kleene) {
-                const len: u32 = @intCast(end_pos - start_pos);
-                return .{ .offset = offset, .len = len };
-            } else {
-                return .{ .offset = offset, .len = {} };
-            }
+            return .{ .offset = offset, .len = {} };
         }
     };
 }
@@ -508,7 +509,7 @@ pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
             if (repeat == .kleene) {
                 // For Kleene, wrap in open/shut to track the repetition
                 return &[_]Op{
-                    .{ .open = {} },
+                    .{ .open = NodeKind.char_slice },
                     .{ .read = .{ .set = bs, .repeat = repeat } },
                     .{ .shut = {} },
                 };
@@ -523,34 +524,33 @@ pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
             state: *NodeState,
         ) BuildError!@This() {
             _ = G;
-            const start_pos = state.pos;
+            const text_len = ctx.text.len;
 
-            // Scan the text to find how many characters match this range
-            var end_pos = start_pos;
-            while (end_pos < state.end and end_pos < ctx.text.len) {
-                const ch = ctx.text[end_pos];
-                if (ch >= a and ch <= b) {
-                    end_pos += 1;
-                    if (repeat == .one) break; // Stop after one character for .one
-                } else {
-                    break; // Stop when we hit a non-matching character
+            if (repeat == .kleene) {
+                const slice_state = try state.expectKind(ctx, NodeKind.char_slice);
+                const start_pos = slice_state.pos;
+                const end_pos = slice_state.end;
+                if (end_pos < start_pos or end_pos > text_len) {
+                    return error.InvalidAst;
                 }
+                const offset: u32 = @intCast(start_pos);
+                const len: u32 = @intCast(end_pos - start_pos);
+                return .{ .offset = offset, .len = len };
             }
 
-            // For .one, we must have matched at least one character
-            if (repeat == .one and end_pos == start_pos) {
+            const start_pos = state.pos;
+            const end_pos = state.end;
+            if (start_pos >= end_pos or end_pos > text_len) {
+                return error.InvalidAst;
+            }
+
+            if (end_pos != start_pos + 1) {
                 return error.InvalidAst;
             }
 
             state.pos = end_pos;
-
             const offset: u32 = @intCast(start_pos);
-            if (repeat == .kleene) {
-                const len: u32 = @intCast(end_pos - start_pos);
-                return .{ .offset = offset, .len = len };
-            } else {
-                return .{ .offset = offset, .len = {} };
-            }
+            return .{ .offset = offset, .len = {} };
         }
     };
 }
@@ -674,7 +674,7 @@ pub fn Kleene(comptime rule_ref: anytype) type {
             const target_name = @tagName(rule_ref);
             var a = Assembler(6, enum { loop, done }){};
             return a
-                .op(.{ .open = {} })
+                .op(.{ .open = NodeKind.kleene })
                 .mark(.loop)
                 .ctrl(.push, .done)
                 .emit(&[_]Op{.{ .call = target_name }})
@@ -689,7 +689,8 @@ pub fn Kleene(comptime rule_ref: anytype) type {
             ctx: *const BuildContext,
             state: *NodeState,
         ) BuildError!@This() {
-            const slice = try G.gatherNodeSlice(rule_ref, ctx, state);
+            var frame = try state.expectKind(ctx, NodeKind.kleene);
+            const slice = try G.gatherNodeSlice(rule_ref, ctx, &frame);
             return .{ .offset = slice.offset, .len = slice.len };
         }
     };
@@ -703,7 +704,7 @@ pub fn Maybe(comptime inner: type) type {
             const part = inner.compile(g);
             var a = Assembler(part.len + 4, enum { done }){};
             return a
-                .op(.open)
+                .op(.{ .open = NodeKind.maybe })
                 .ctrl(.push, .done)
                 .emit(part)
                 .ctrl(.drop, .done)
@@ -717,19 +718,18 @@ pub fn Maybe(comptime inner: type) type {
             ctx: *const BuildContext,
             state: *NodeState,
         ) BuildError!@This() {
-            // Save the current position in case we need to backtrack
-            const saved_pos = state.pos;
-            const saved_child = state.next_child;
+            var maybe_state = try state.expectKind(ctx, NodeKind.maybe);
 
-            // Try to evaluate the inner pattern
-            if (inner.eval(G, ctx, state)) |value| {
-                return .{ .value = value };
-            } else |_| {
-                // Pattern didn't match, restore state and return null
-                state.pos = saved_pos;
-                state.next_child = saved_child;
+            const matched = (maybe_state.next_child != null) or (maybe_state.pos != maybe_state.end);
+            if (!matched) {
                 return .{ .value = null };
             }
+
+            const payload = try inner.eval(G, ctx, &maybe_state);
+            if (maybe_state.next_child != null or maybe_state.pos != maybe_state.end) {
+                return error.InvalidAst;
+            }
+            return .{ .value = payload };
         }
     };
 }
@@ -758,9 +758,12 @@ pub fn Struct(comptime parts: type) type {
         value: parts,
 
         pub fn compile(g: type) []const Op {
-            comptime var ops: []const Op = &[_]Op{.{.open = {}}};
-
             const fields = comptime std.meta.fields(parts);
+            if (fields.len == 0) {
+                return &[_]Op{};
+            }
+
+            comptime var ops: []const Op = &[_]Op{.{ .open = NodeKind.@"struct" }};
             inline for (fields, 0..) |decl, i| {
                 const part_type = @FieldType(parts, decl.name);
                 const part_ops = part_type.compile(g);
@@ -768,11 +771,11 @@ pub fn Struct(comptime parts: type) type {
 
                 // Add 'next' between fields (but not after the last one)
                 if (i < fields.len - 1) {
-                    ops = ops ++ &[_]Op{.{.next = {}}};
+                    ops = ops ++ &[_]Op{.{ .next = {} }};
                 }
             }
 
-            ops = ops ++ &[_]Op{.{.shut = {}}};
+            ops = ops ++ &[_]Op{.{ .shut = {} }};
             return ops;
         }
 
@@ -786,12 +789,23 @@ pub fn Struct(comptime parts: type) type {
                 return .{ .value = .{} };
             }
 
+            var struct_state = try state.expectKind(ctx, NodeKind.@"struct");
             var result: parts = undefined;
+
             inline for (info.fields) |field| {
+                var field_state = try struct_state.expectKind(ctx, NodeKind.field);
                 const FieldPatternType = @FieldType(parts, field.name);
-                const field_value = try FieldPatternType.eval(G, ctx, state);
+                const field_value = try FieldPatternType.eval(G, ctx, &field_state);
+                if (field_state.next_child != null or field_state.pos != field_state.end) {
+                    return error.InvalidAst;
+                }
                 @field(result, field.name) = field_value;
             }
+
+            if (struct_state.next_child != null or struct_state.pos != struct_state.end) {
+                return error.InvalidAst;
+            }
+
             return .{ .value = result };
         }
     };
@@ -869,6 +883,9 @@ pub fn Union(comptime variants: type) type {
             // Get the child node to determine which branch matched
             const child_idx = state.next_child orelse return error.InvalidAst;
             const child = ctx.nodes[child_idx];
+            if (child.kind != NodeKind.rule) {
+                return error.InvalidAst;
+            }
             const child_rule: G.RuleEnum = @enumFromInt(child.rule_index);
 
             // Match child rule to union field
@@ -969,16 +986,16 @@ test "Grammar AST inference" {
     const G = Grammar(demoGrammar);
 
     // value is a union with integer and array variants (wrapped in a struct)
-    const ValueType = G.RuleValueType(.value);
+    const ValueType = G.RuleValueType(.Value);
     try std.testing.expect(@typeInfo(ValueType) == .@"struct");
     try std.testing.expect(@typeInfo(@FieldType(ValueType, "value")) == .@"union");
 
     // integer type should be a struct (the pattern type with _ fields removed)
-    const IntegerType = G.RuleValueType(.integer);
+    const IntegerType = G.RuleValueType(.Integer);
     try std.testing.expect(@typeInfo(IntegerType) == .@"struct");
 
     // skip type should be a struct (CharSet with kleene repeat)
-    const SkipType = G.RuleValueType(.skip);
+    const SkipType = G.RuleValueType(.Skip);
     try std.testing.expect(@typeInfo(SkipType) == .@"struct");
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -987,7 +1004,7 @@ test "Grammar AST inference" {
     var test_forest = G.Forest.init();
     defer test_forest.deinit(arena.allocator());
 
-    try std.testing.expect(test_forest.lists.value.items.len == 0);
+    try std.testing.expect(test_forest.lists.Value.items.len == 0);
     // Pattern types ARE value types now - the runtime fields get populated during forest construction
 }
 

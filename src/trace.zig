@@ -326,9 +326,23 @@ fn printAstNode(
 
     try tree.printPrefix(is_last);
 
-    const rule: VMType.RuleEnum = @enumFromInt(node.rule_index);
+    var label_style: TraceStyle = .variant_name;
+    var label_text: []const u8 = undefined;
+
+    switch (node.kind) {
+        .rule => {
+            const rule: VMType.RuleEnum = @enumFromInt(node.rule_index);
+            label_style = .rule_name;
+            label_text = @tagName(rule);
+        },
+        else => {
+            label_style = .variant_name;
+            label_text = @tagName(node.kind);
+        },
+    }
+
     const span = machine.text[node.start..node.end];
-    try printer.print(.rule_name, "{s}", .{@tagName(rule)});
+    try printer.print(label_style, "{s}", .{label_text});
     try writer.writeAll(" [");
     try printer.print(.absolute_ip, "{d}", .{node.start});
     try printer.print(.range_ellipsis, "…", .{});
