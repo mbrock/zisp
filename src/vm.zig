@@ -16,13 +16,14 @@ pub fn VM(comptime GrammarType: type) type {
         pub const RuleEnum = Grammar.RuleEnum;
         pub const Ops = Grammar.compile(false);
 
+        /// Bookkeeping for a structural opcode block (anything pushed by `open`).
         pub const StructuralFrame = struct {
-            kind: NodeKind,
-            start_sp: u32,
-            first_child: ?u32,
+            kind: NodeKind, // which helper node we will emit when the frame shuts
+            start_sp: u32, // text position at the moment the frame opened
+            first_child: ?u32, // head/tail of the helper node's eventual child list
             last_child: ?u32,
-            field_start: u32,
-            field_first_child: ?u32,
+            field_start: u32, // for structs: byte offset where the current field begins
+            field_first_child: ?u32, // in-flight field payload (reset after each `next`)
             field_last_child: ?u32,
         };
 
@@ -44,6 +45,8 @@ pub fn VM(comptime GrammarType: type) type {
         // === Memoization (optional) ===
         memo: ?*MemoTable = null,
 
+        /// Snapshot for the backtracking stack. Captures both the VM position and
+        /// the lengths of the node/struct stacks so we can rewind them precisely.
         pub const SaveFrame = struct {
             ip: u32,
             sp: u32,
@@ -52,6 +55,7 @@ pub fn VM(comptime GrammarType: type) type {
             struct_depth: usize,
         };
 
+        /// Call-stack frame representing an in-flight rule invocation.
         pub const CallFrame = struct {
             return_ip: u32,
             target_ip: u32,
@@ -97,6 +101,7 @@ pub fn VM(comptime GrammarType: type) type {
         // === AST Construction Helpers ===
 
         /// Create a new node from a completed call frame
+        /// (this is the only place `kind == .rule` nodes are born).
         fn appendNode(self: *Self, frame: CallFrame, end_sp: u32) !u32 {
             const idx: u32 = @intCast(self.nodes.items.len);
 
@@ -107,6 +112,7 @@ pub fn VM(comptime GrammarType: type) type {
                 .end = end_sp,
                 .first_child = frame.first_child,
                 .next_sibling = null,
+                .prev_sibling = null,
                 .parent = null,
             });
 
@@ -125,7 +131,38 @@ pub fn VM(comptime GrammarType: type) type {
             }
         }
 
-        /// Attach a newly created node as a child of the current call frame
+        /// Append `node_index` to the end of the sibling chain tracked by `first`/`last`.
+        ///
+        /// By funnelling every "add child" operation through this helper we make
+        /// sure the forward/back links stay symmetric, which in turn makes the
+        /// truncate logic a straightforward splice operation.
+        fn appendToChain(
+            self: *Self,
+            first: *?u32,
+            last: *?u32,
+            node_index: u32,
+        ) void {
+            const node_usize: usize = @intCast(node_index);
+
+            if (last.*) |tail| {
+                const tail_usize: usize = @intCast(tail);
+                self.nodes.items[tail_usize].next_sibling = node_index;
+                self.nodes.items[node_usize].prev_sibling = tail;
+            } else {
+                first.* = node_index;
+                self.nodes.items[node_usize].prev_sibling = null;
+            }
+
+            self.nodes.items[node_usize].next_sibling = null;
+            last.* = node_index;
+        }
+
+        /// Attach a newly created node to whichever stack frame owns it.
+        ///
+        /// Structural opcodes (`open/next/shut`) push frames that sit “above” the
+        /// call stack, so children created while inside them should land on those
+        /// frames instead of on the rule call. Once the structural depth matches
+        /// the depth it had when the call began we fall back to the call frame.
         fn attachChild(self: *Self, node_index: u32) void {
             const parent_call = if (self.calls.items.len > 0)
                 &self.calls.items[self.calls.items.len - 1]
@@ -139,54 +176,82 @@ pub fn VM(comptime GrammarType: type) type {
             const current_struct_depth = self.struct_stack.items.len;
 
             if (current_struct_depth > call_struct_depth) {
+                // Inside at least one structural frame (struct/kleene/maybe/etc.).
                 const frame = &self.struct_stack.items[current_struct_depth - 1];
                 switch (frame.kind) {
                     .@"struct" => {
-                        if (frame.field_first_child) |_| {
-                            const last = frame.field_last_child.?;
-                            self.nodes.items[last].next_sibling = node_index;
-                            frame.field_last_child = node_index;
-                        } else {
-                            frame.field_first_child = node_index;
-                            frame.field_last_child = node_index;
-                        }
+                        self.appendToChain(
+                            &frame.field_first_child,
+                            &frame.field_last_child,
+                            node_index,
+                        );
                     },
                     else => {
-                        if (frame.first_child) |_| {
-                            const last = frame.last_child.?;
-                            self.nodes.items[last].next_sibling = node_index;
-                            frame.last_child = node_index;
-                        } else {
-                            frame.first_child = node_index;
-                            frame.last_child = node_index;
-                        }
+                        self.appendToChain(
+                            &frame.first_child,
+                            &frame.last_child,
+                            node_index,
+                        );
                     },
                 }
                 return;
             }
 
+            // No structural frame owns it; fall back to the call frame's child list.
             if (parent_call == null) return;
             const frame = parent_call.?;
 
-            if (frame.first_child) |_| {
-                // Add to end of sibling chain
-                const last = frame.last_child.?;
-                self.nodes.items[last].next_sibling = node_index;
-                frame.last_child = node_index;
-            } else {
-                // First child
-                frame.first_child = node_index;
-                frame.last_child = node_index;
-            }
+            self.appendToChain(&frame.first_child, &frame.last_child, node_index);
         }
 
-        /// Null out a node index if it's >= threshold
-        inline fn nullIfOutOfRange(ref: *?u32, threshold: usize) void {
-            if (ref.*) |idx| {
-                if (idx >= threshold) ref.* = null;
+        /// Walk forward until we find a node that survives the truncate window.
+        /// Returned indices are always < `new_len`; anything ≥ `old_len` is already
+        /// known to be garbage so we cut the search off there too.
+        fn nextSurvivor(self: *Self, index_opt: ?u32, new_len: usize, old_len: usize) ?u32 {
+            var current = index_opt;
+            while (current) |idx| {
+                if (idx < new_len) return current;
+                if (idx >= old_len) return null;
+                const usize_idx: usize = @intCast(idx);
+                current = self.nodes.items[usize_idx].next_sibling;
             }
+            return null;
         }
 
+        /// Walk backward until we find a node that survives the truncate window.
+        fn prevSurvivor(self: *Self, index_opt: ?u32, new_len: usize, old_len: usize) ?u32 {
+            var current = index_opt;
+            while (current) |idx| {
+                if (idx < new_len) return current;
+                if (idx >= old_len) return null;
+                const usize_idx: usize = @intCast(idx);
+                current = self.nodes.items[usize_idx].prev_sibling;
+            }
+            return null;
+        }
+
+        /// Recompute the last sibling in a chain, skipping nodes that were trimmed.
+        /// This is basically `find tail` but resilient to gaps in the list produced
+        /// by recently trimmed nodes.
+        fn computeTailFrom(self: *Self, start: ?u32, new_len: usize, old_len: usize) ?u32 {
+            var current = self.nextSurvivor(start, new_len, old_len);
+            var last: ?u32 = null;
+            while (current) |idx| {
+                last = current;
+                const usize_idx: usize = @intCast(idx);
+                const next_link = self.nodes.items[usize_idx].next_sibling;
+                current = self.nextSurvivor(next_link, new_len, old_len);
+            }
+            return last;
+        }
+
+        /// Close out the current field and append a wrapper node for it.
+        ///
+        /// Struct compilation emits `open` / (field payload) / `next` / … / `shut`.
+        /// Until we see either `next` or `shut` we accumulate the payload into
+        /// `field_first_child`. When the field ends we turn that payload into a
+        /// dedicated `.field` node and splice it into the owning struct’s child
+        /// chain.
         fn finalizeStructField(self: *Self, frame: *StructuralFrame, end_sp: u32) !void {
             const field_start = frame.field_start;
             const node_idx: u32 = @intCast(self.nodes.items.len);
@@ -199,54 +264,91 @@ pub fn VM(comptime GrammarType: type) type {
                 .end = end_sp,
                 .first_child = first_child,
                 .next_sibling = null,
+                .prev_sibling = null,
                 .parent = null,
             });
 
             self.linkChildrenToParent(first_child, node_idx);
 
-            if (frame.first_child) |_| {
-                const last = frame.last_child.?;
-                self.nodes.items[last].next_sibling = node_idx;
-            } else {
-                frame.first_child = node_idx;
-            }
-            frame.last_child = node_idx;
+            self.appendToChain(&frame.first_child, &frame.last_child, node_idx);
             frame.field_start = end_sp;
             frame.field_first_child = null;
             frame.field_last_child = null;
         }
 
         /// Rollback node tree to a previous state (for backtracking)
+        /// Trim nodes appended after `new_len`, fixing up parents/siblings in the process.
+        ///
+        /// The old implementation swept every surviving node to null dangling
+        /// pointers. Thanks to the bidirectional sibling links we can instead
+        /// walk only the doomed suffix, splicing each trimmed node out of whatever
+        /// chains reference it. That keeps the work proportional to the amount of
+        /// speculative structure we just backtracked over.
         fn truncateNodes(self: *Self, new_len: usize) void {
-            if (new_len >= self.nodes.items.len) return;
+            const old_len = self.nodes.items.len;
+            if (new_len >= old_len) return;
 
-            // Clean up dangling references in remaining nodes
-            for (self.nodes.items[0..new_len]) |*node| {
-                nullIfOutOfRange(&node.first_child, new_len);
-                nullIfOutOfRange(&node.next_sibling, new_len);
-                nullIfOutOfRange(&node.parent, new_len);
-            }
+            var idx = old_len;
+            while (idx > new_len) {
+                idx -= 1;
+                const node_idx: u32 = @intCast(idx);
+                const node = self.nodes.items[idx];
+                // Each trimmed node detaches itself from surviving parents/siblings.
+                const next_survivor = self.nextSurvivor(node.next_sibling, new_len, old_len);
+                const prev_survivor = self.prevSurvivor(node.prev_sibling, new_len, old_len);
 
-            self.nodes.items.len = new_len;
+                if (node.parent) |parent_idx| {
+                    if (parent_idx < new_len) {
+                        const parent_usize: usize = @intCast(parent_idx);
+                        if (self.nodes.items[parent_usize].first_child == node_idx) {
+                            self.nodes.items[parent_usize].first_child = next_survivor;
+                        }
+                    }
+                }
 
-            // Clean up root reference
-            nullIfOutOfRange(&self.root_node, new_len);
+                if (node.prev_sibling) |prev_idx| {
+                    if (prev_idx < new_len) {
+                        const prev_usize: usize = @intCast(prev_idx);
+                        self.nodes.items[prev_usize].next_sibling = next_survivor;
+                    }
+                }
 
-            // Clean up call frame references
-            for (self.calls.items) |*frame| {
-                nullIfOutOfRange(&frame.first_child, new_len);
-                nullIfOutOfRange(&frame.last_child, new_len);
-                if (frame.node_len_on_entry > new_len) {
-                    frame.node_len_on_entry = new_len;
+                if (node.next_sibling) |next_idx| {
+                    if (next_idx < new_len) {
+                        const next_usize: usize = @intCast(next_idx);
+                        self.nodes.items[next_usize].prev_sibling = prev_survivor;
+                    }
                 }
             }
 
-            for (self.struct_stack.items) |*frame| {
-                nullIfOutOfRange(&frame.first_child, new_len);
-                nullIfOutOfRange(&frame.last_child, new_len);
-                nullIfOutOfRange(&frame.field_first_child, new_len);
-                nullIfOutOfRange(&frame.field_last_child, new_len);
+            if (self.root_node) |root_idx| {
+                if (root_idx >= new_len) {
+                    // Entire parse tree was speculative; clear the root marker.
+                    self.root_node = null;
+                }
             }
+
+            for (self.calls.items) |*frame| {
+                // Repair the child list that belongs to this call frame.
+                frame.first_child = self.nextSurvivor(frame.first_child, new_len, old_len);
+                frame.last_child = self.computeTailFrom(frame.first_child, new_len, old_len);
+                frame.node_len_on_entry = @min(frame.node_len_on_entry, new_len);
+            }
+
+            for (self.struct_stack.items) |*frame| {
+                // Same treatment for live structural frames (e.g. partially built structs).
+                frame.first_child = self.nextSurvivor(frame.first_child, new_len, old_len);
+                frame.last_child = self.computeTailFrom(frame.first_child, new_len, old_len);
+                frame.field_first_child = self.nextSurvivor(frame.field_first_child, new_len, old_len);
+                frame.field_last_child = self.computeTailFrom(frame.field_first_child, new_len, old_len);
+                if (frame.field_start > self.sp) {
+                    // If we rewound past the start of a struct field, peg future
+                    // field wrappers to the restored cursor.
+                    frame.field_start = self.sp;
+                }
+            }
+
+            self.nodes.items.len = new_len;
         }
 
         // === VM Execution ===
@@ -420,6 +522,7 @@ pub fn VM(comptime GrammarType: type) type {
                                     .end = self.sp,
                                     .first_child = frame.first_child,
                                     .next_sibling = null,
+                                    .prev_sibling = null,
                                     .parent = null,
                                 });
 

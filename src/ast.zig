@@ -12,15 +12,23 @@ const std = @import("std");
 // PARSE TREE NODE TYPE
 // ============================================================================
 
+// NodeKind is recorded on every VM node so later stages can tell “real” rule calls
+// from the helper nodes created by structural opcodes.
 pub const NodeKind = enum(u8) {
-    rule,
-    @"struct",
-    field,
-    maybe,
-    kleene,
-    char_slice,
+    rule, // a grammar rule body produced by a call/done pair
+    @"struct", // wrapper emitted by Struct.compile to group named fields
+    field, // individual field wrapper inside the struct helper node
+    maybe, // wrapper produced by Maybe.compile (optional payload)
+    kleene, // wrapper produced by Kleene.compile (iterable payload)
+    char_slice, // helper around a slice produced by kleene character ranges/sets
 };
 
+/// Parse-tree node produced by the VM.
+///
+/// Besides the explicit sibling pointers we capture the byte span and (when
+/// `kind == .rule`) which grammar rule produced the node. The `prev_sibling`
+/// field mirrors `next_sibling`, letting the VM unlink freshly-created nodes in
+/// O(1) when a backtrack rolls them back out of existence.
 pub const NodeType = struct {
     kind: NodeKind,
     rule_index: u32,
@@ -28,6 +36,7 @@ pub const NodeType = struct {
     end: u32,
     first_child: ?u32,
     next_sibling: ?u32,
+    prev_sibling: ?u32,
     parent: ?u32,
 };
 
