@@ -131,3 +131,43 @@ pub fn ColorPrinter(comptime StyleEnum: type) type {
         }
     };
 }
+
+pub const TreePrinter = struct {
+    prefix: std.BitStack,
+    writer: *std.Io.Writer,
+
+    pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) !TreePrinter {
+        return .{
+            .prefix = std.BitStack.init(allocator),
+            .writer = writer,
+        };
+    }
+
+    pub fn deinit(self: *TreePrinter) void {
+        self.prefix.deinit();
+    }
+
+    pub fn printPrefix(self: *TreePrinter, is_last: bool) !void {
+        const depth = self.prefix.bit_len;
+        const writer = self.writer;
+
+        var level: usize = 0;
+        while (level < depth) : (level += 1) {
+            const byte_index = level >> 3;
+            const bit_index: u3 = @intCast(level & 7);
+            const has_more = ((self.prefix.bytes.items[byte_index] >> bit_index) & 1) == 1;
+            try writer.writeAll(if (has_more) "│ " else "  ");
+        }
+        if (depth > 0) {
+            try writer.writeAll(if (is_last) "└─" else "├─");
+        }
+    }
+
+    pub fn push(self: *TreePrinter, has_more: bool) !void {
+        try self.prefix.push(@intFromBool(has_more));
+    }
+
+    pub fn pop(self: *TreePrinter) void {
+        _ = self.prefix.pop();
+    }
+};

@@ -4,6 +4,7 @@ const ansi = @import("ansitty.zig");
 
 const SGR = ansi.SGR;
 const ColorPrinter = ansi.ColorPrinter;
+const TreePrinter = ansi.TreePrinter;
 
 const ctrls = [_][]const u8{
     "␀", "␁", "␂", "␃", "␄", "␅", "␆", "␇",
@@ -35,46 +36,6 @@ pub const TraceStyle = enum {
 };
 
 const TracePrinter = ColorPrinter(TraceStyle);
-
-pub const TreePrinter = struct {
-    prefix: std.BitStack,
-    printer: *TracePrinter,
-
-    pub fn init(allocator: std.mem.Allocator, printer: *TracePrinter) !TreePrinter {
-        return .{
-            .prefix = std.BitStack.init(allocator),
-            .printer = printer,
-        };
-    }
-
-    pub fn deinit(self: *TreePrinter) void {
-        self.prefix.deinit();
-    }
-
-    pub fn printPrefix(self: *TreePrinter, is_last: bool) !void {
-        const depth = self.prefix.bit_len;
-        const writer = self.printer.writer;
-
-        var level: usize = 0;
-        while (level < depth) : (level += 1) {
-            const byte_index = level >> 3;
-            const bit_index: u3 = @intCast(level & 7);
-            const has_more = ((self.prefix.bytes.items[byte_index] >> bit_index) & 1) == 1;
-            try writer.writeAll(if (has_more) "│ " else "  ");
-        }
-        if (depth > 0) {
-            try writer.writeAll(if (is_last) "└─" else "├─");
-        }
-    }
-
-    pub fn push(self: *TreePrinter, has_more: bool) !void {
-        try self.prefix.push(@intFromBool(has_more));
-    }
-
-    pub fn pop(self: *TreePrinter) void {
-        _ = self.prefix.pop();
-    }
-};
 
 const default_trace_theme = TracePrinter.Theme.init(.{
     .control_char = SGR.fg(.magenta),
@@ -315,7 +276,7 @@ pub fn dumpAst(
     const VMType = @TypeOf(machine.*);
     if (machine.root_node) |root| {
         var printer = TracePrinter.init(writer, tty, default_trace_theme);
-        var tree = try TreePrinter.init(gpa, &printer);
+        var tree = try TreePrinter.init(gpa, writer);
         defer tree.deinit();
         try printAstNode(VMType, machine, &printer, root, true, &tree);
     } else {
@@ -656,7 +617,7 @@ pub fn dumpForest(
 
     try writer.writeAll("\nTyped Forest:\n");
     var printer = TracePrinter.init(writer, tty, default_trace_theme);
-    var tree = try TreePrinter.init(allocator, &printer);
+    var tree = try TreePrinter.init(allocator, writer);
     defer tree.deinit();
     const text = machine.text[0..machine.text.len];
     try dumpForestNode(VMType, &built.forest, &printer, &tree, text, root_rule, built.root_index, true);
