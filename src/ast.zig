@@ -6,6 +6,10 @@
 // - Forest: Typed storage for built AST
 // - Helpers for building typed values from parse trees
 
+comptime {
+    @setEvalBranchQuota(500000);
+}
+
 const std = @import("std");
 
 // ============================================================================
@@ -251,6 +255,7 @@ pub fn Forest(comptime rules: type) type {
     const ListsStruct = blk: {
         const rule_count = std.meta.tags(RuleEnum).len;
         var fields: [rule_count]std.builtin.Type.StructField = undefined;
+        @setEvalBranchQuota(2000);
         inline for (std.meta.tags(RuleEnum), 0..) |rule_tag, i| {
             const ListType = Helpers.NodeListType(rule_tag);
             fields[i] = .{
@@ -276,6 +281,7 @@ pub fn Forest(comptime rules: type) type {
         lists: ListsStruct,
 
         pub fn init() Self {
+            @setEvalBranchQuota(2000);
             var lists: ListsStruct = undefined;
             inline for (comptime std.meta.tags(RuleEnum)) |rule_tag| {
                 @field(lists, @tagName(rule_tag)) = Helpers.NodeListType(rule_tag).empty;

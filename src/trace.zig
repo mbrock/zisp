@@ -247,6 +247,15 @@ pub fn trace(
     writer: *std.Io.Writer,
     tty: std.Io.tty.Config,
 ) !void {
+    return traceFrom(machine, writer, tty, null);
+}
+
+pub fn traceFrom(
+    machine: anytype,
+    writer: *std.Io.Writer,
+    tty: std.Io.tty.Config,
+    comptime start_rule: ?@TypeOf(machine.*).Grammar.RuleEnum,
+) !void {
     const VMType = @TypeOf(machine.*);
     const Program = VMType.Ops;
     const has_memo = machine.memo != null;
@@ -259,7 +268,7 @@ pub fn trace(
         try writer.print("\nParsing: \"{s}\"\n\n", .{machine.text});
     }
 
-    var ip: u32 = 0;
+    var ip: u32 = if (start_rule) |rule| VMType.Grammar.ruleStartIp(rule) else 0;
     var last_sp: ?u32 = null;
     var step_count: u32 = 0;
     var cache_hits: u32 = 0;
@@ -474,6 +483,14 @@ fn dumpForestValue(
             },
             .hidden => {
                 // Hidden values should not be displayed
+                return;
+            },
+            .maybe => {
+                if (value.value == null) {
+                    try printer.print(.failure, "(null)\n", .{});
+                } else {
+                    try dumpForestValue(VMType, forest, printer, tree, text, value.value.?, is_last);
+                }
                 return;
             },
             else => {

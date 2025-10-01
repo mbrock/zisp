@@ -1,3 +1,7 @@
+comptime {
+    @setEvalBranchQuota(500000);
+}
+
 const std = @import("std");
 const peg = @import("peg.zig");
 
@@ -12,6 +16,9 @@ const NodeKind = peg.NodeKind;
 pub fn VM(comptime GrammarType: type) type {
     return struct {
         const Self = @This();
+        comptime {
+            @setEvalBranchQuota(500000);
+        }
         pub const Grammar = peg.Grammar(GrammarType);
         pub const RuleEnum = Grammar.RuleEnum;
         pub const Ops = Grammar.compile(false);
@@ -249,6 +256,8 @@ pub fn VM(comptime GrammarType: type) type {
 
             vm: switch (ip) {
                 inline 0...Ops.len - 1 => |IP| {
+                    @setEvalBranchQuota(10_000);
+
                     const OP = Ops[IP];
                     const IP1 = IP + 1;
                     const ch = self.text[self.sp];
@@ -466,6 +475,12 @@ pub fn VM(comptime GrammarType: type) type {
             try self.next(0, .Loop);
         }
 
+        /// Run VM starting from a specific rule
+        pub fn runFrom(self: *Self, comptime rule: RuleEnum) !void {
+            const start_ip = Grammar.ruleStartIp(rule);
+            try self.next(start_ip, .Loop);
+        }
+
         // === Lifecycle & Utilities ===
 
         pub fn initAlloc(
@@ -624,8 +639,8 @@ pub const RecursiveGrammar = struct {
     });
 
     pub const number = peg.Match(struct {
-        first: peg.CharRange('0', '9', .one),
-        rest: peg.CharRange('0', '9', .kleene),
+        first: peg.Char(peg.CharClass.range('1', '9'), .one),
+        rest: peg.Char(peg.CharClass.range('0', '9'), .kleene),
     });
 };
 

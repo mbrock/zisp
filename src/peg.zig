@@ -9,6 +9,10 @@
 // 6. Opcodes & VM Instructions - Low-level VM operations
 // 7. Pattern Combinators - CharSet, Match, Call, Union, etc. (Public API)
 
+comptime {
+    @setEvalBranchQuota(500000);
+}
+
 const std = @import("std");
 const ast = @import("ast.zig");
 
@@ -25,8 +29,8 @@ pub const demoGrammar = struct {
     });
 
     pub const Integer = Match(struct {
-        d: CharRange('1', '9', .one),
-        ds: CharRange('0', '9', .kleene),
+        d: Char(CharClass.range('1', '9'), .one),
+        ds: Char(CharClass.range('0', '9'), .kleene),
         _skip: Hide(Call(R.Skip)),
     });
 
@@ -189,6 +193,7 @@ pub inline fn Grammar(rules: type) type {
             positions: []const usize,
             buckets: *const NodeBuckets,
         ) !ForestType {
+            @setEvalBranchQuota(2000);
             const rule_tags = comptime std.meta.tags(RuleEnum);
 
             var forest = ForestType.init();
@@ -215,6 +220,7 @@ pub inline fn Grammar(rules: type) type {
             root_index: u32,
             comptime root_rule: RuleEnum,
         ) BuildError!BuildResult(root_rule) {
+            @setEvalBranchQuota(2000);
             const node_count = nodes.len;
             if (node_count == 0) {
                 return error.InvalidAst;
@@ -245,6 +251,7 @@ pub inline fn Grammar(rules: type) type {
             }
             const actual_rule: RuleEnum = @enumFromInt(root_node.rule_index);
             if (actual_rule != root_rule) {
+                std.debug.print("root rule is actually {t}, not {t}\n", .{ actual_rule, root_rule });
                 return error.InvalidAst;
             }
 
@@ -314,6 +321,7 @@ pub inline fn Grammar(rules: type) type {
 
         // Helper: Convert relative opcode to absolute opcode (resolve symbols and addresses)
         fn linkOpcode(op: Op, map: RuleOffsetMap, ip: u32) Abs {
+            @setEvalBranchQuota(200000);
             return switch (op) {
                 .call => |rule_tag| blk: {
                     const absolute_offset = map.getAssertContains(@field(RuleEnum, rule_tag));
@@ -362,6 +370,11 @@ pub inline fn Grammar(rules: type) type {
             }
 
             return last_rule;
+        }
+
+        pub fn ruleStartIp(comptime rule: RuleEnum) u32 {
+            const offset_map = comptime buildRuleOffsetMap().map;
+            return offset_map.getAssertContains(rule);
         }
 
         // Compile a single pattern type to opcodes
@@ -444,10 +457,7 @@ pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
         len: if (repeat == .kleene) u32 else void,
 
         pub fn compile(_: type) []const Op {
-            var bs = std.bit_set.ArrayBitSet(usize, 256).initEmpty();
-            for (s) |c| {
-                bs.set(c);
-            }
+            const bs = CharClass.anyOf(s);
             if (repeat == .kleene) {
                 // For Kleene, wrap in open/shut to track the repetition
                 return &[_]Op{
@@ -497,26 +507,39 @@ pub fn CharSet(comptime s: []const u8, comptime repeat: Repeat) type {
     };
 }
 
-pub fn CharRange(comptime a: u8, comptime b: u8, comptime repeat: Repeat) type {
+pub const CharClass = struct {
+    pub const BitSet = std.bit_set.ArrayBitSet(usize, 256);
+
+    pub fn range(a: u8, b: u8) BitSet {
+        var bs = BitSet.initEmpty();
+        bs.setRangeValue(.{ .start = a, .end = b + 1 }, true);
+        return bs;
+    }
+
+    pub fn anyOf(cs: []const u8) BitSet {
+        var bs = BitSet.initEmpty();
+        for (cs) |c| bs.set(c);
+        return bs;
+    }
+};
+
+pub fn Char(comptime class: CharClass.BitSet, comptime repeat: Repeat) type {
     return struct {
         pub const Kind = if (repeat == .kleene) .char_slice else .char;
+
         offset: u32,
         len: if (repeat == .kleene) u32 else void,
 
         pub fn compile(_: type) []const Op {
-            var bs = std.bit_set.ArrayBitSet(usize, 256).initEmpty();
-            for (a..b + 1) |c| {
-                bs.set(c);
-            }
             if (repeat == .kleene) {
                 // For Kleene, wrap in open/shut to track the repetition
                 return &[_]Op{
                     .{ .open = NodeKind.char_slice },
-                    .{ .read = .{ .set = bs, .repeat = repeat } },
+                    .{ .read = .{ .set = class, .repeat = repeat } },
                     .{ .shut = {} },
                 };
             } else {
-                return &[_]Op{.{ .read = .{ .set = bs, .repeat = repeat } }};
+                return &[_]Op{.{ .read = .{ .set = class, .repeat = repeat } }};
             }
         }
 
@@ -747,6 +770,7 @@ pub fn Kleene(comptime rule_ref: anytype) type {
 
 pub fn Maybe(comptime inner: type) type {
     return struct {
+        pub const Kind = .maybe;
         value: ?inner,
 
         pub fn compile(g: type) []const Op {
@@ -866,6 +890,7 @@ pub fn Union(comptime variants: type) type {
         value: variants,
 
         pub fn compile(g: type) []const Op {
+            @setEvalBranchQuota(200000);
             const info = @typeInfo(variants).@"union";
 
             // Enforce that all variants must be Call patterns
