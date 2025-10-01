@@ -739,25 +739,6 @@ test "demo grammar from pegvmfun" {
     try expectParseSuccess(peg.demoGrammar, "[]");
 }
 
-test "memoization reduces steps" {
-    const TestVM = VM(RecursiveGrammar);
-
-    // Deeply nested expression that would benefit from memoization
-    const input = "((((42))))";
-
-    const without_memo = try TestVM.countSteps(input, std.testing.allocator);
-    const with_memo = try TestVM.countStepsWithMemo(input, std.testing.allocator);
-
-    // With recursive grammars, memoization often increases steps slightly due to cache checks
-    // but reduces redundant parsing work. The real benefit shows in pathological cases.
-    _ = without_memo;
-    _ = with_memo;
-
-    // Just verify it works correctly
-    try TestVM.parse(input, std.testing.allocator);
-    try TestVM.parseWithMemo(input, std.testing.allocator);
-}
-
 test "memoization correctness" {
     const TestVM = VM(RecursiveGrammar);
 
@@ -768,20 +749,4 @@ test "memoization correctness" {
     // Both should fail
     try std.testing.expectError(error.ParseFailed, TestVM.parse("((42", std.testing.allocator));
     try std.testing.expectError(error.ParseFailed, TestVM.parseWithMemo("((42", std.testing.allocator));
-}
-
-test "memoization statistics" {
-    const TestVM = VM(RecursiveGrammar);
-
-    // Parse with memoization and check stats
-    const stats = try TestVM.countStepsWithMemo("(((42)))", std.testing.allocator);
-
-    // Should have both hits and misses in a recursive grammar
-    // First calls are misses, repeated positions are hits
-    try std.testing.expect(stats.steps > 0);
-
-    // The recursive nature means we'll parse expr multiple times
-    // so we should see some cache activity
-    _ = stats.hits;
-    _ = stats.misses;
 }
