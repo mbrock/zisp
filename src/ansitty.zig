@@ -153,9 +153,7 @@ pub const TreePrinter = struct {
 
         var level: usize = 0;
         while (level < depth) : (level += 1) {
-            const byte_index = level >> 3;
-            const bit_index: u3 = @intCast(level & 7);
-            const has_more = ((self.prefix.bytes.items[byte_index] >> bit_index) & 1) == 1;
+            const has_more = 1 == std.BitStack.peekWithState(self.prefix.bytes.items, level + 1);
             try writer.writeAll(if (has_more) "│ " else "  ");
         }
         if (depth > 0) {
