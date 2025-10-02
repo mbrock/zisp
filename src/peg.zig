@@ -1138,7 +1138,7 @@ pub fn main() !void {
     var ast_vm = try TestVM.initAlloc("[[1] [2] [4096]]", allocator, 32, 32, 256);
     defer ast_vm.deinit(allocator);
     try ast_vm.run();
-    try trace.dumpAst(&ast_vm, stdout, tty, allocator);
+    try trace.dumpAst(&ast_vm, stdout, tty);
     try trace.dumpForest(&ast_vm, stdout, tty, allocator, .Array);
 
     try stdout.flush();

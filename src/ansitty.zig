@@ -133,39 +133,101 @@ pub fn ColorPrinter(comptime StyleEnum: type) type {
 }
 
 pub const TreePrinter = struct {
-    prefix: std.BitStack,
+    treesplat: BlazingFastTreeSplat = .empty,
     writer: *std.Io.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) !TreePrinter {
+    pub fn init(writer: *std.Io.Writer) TreePrinter {
         return .{
-            .prefix = std.BitStack.init(allocator),
             .writer = writer,
         };
     }
 
-    pub fn deinit(self: *TreePrinter) void {
-        self.prefix.deinit();
-    }
-
     pub fn printPrefix(self: *TreePrinter, is_last: bool) !void {
-        const depth = self.prefix.bit_len;
-        const writer = self.writer;
-
-        var level: usize = 0;
-        while (level < depth) : (level += 1) {
-            const has_more = 1 == std.BitStack.peekWithState(self.prefix.bytes.items, level + 1);
-            try writer.writeAll(if (has_more) "│ " else "  ");
-        }
-        if (depth > 0) {
-            try writer.writeAll(if (is_last) "└─" else "├─");
-        }
+        try self.treesplat.show(self.writer, !is_last);
     }
 
     pub fn push(self: *TreePrinter, has_more: bool) !void {
-        try self.prefix.push(@intFromBool(has_more));
+        try self.treesplat.push(has_more);
     }
 
     pub fn pop(self: *TreePrinter) void {
-        _ = self.prefix.pop();
+        self.treesplat.pop();
+    }
+};
+
+const BlazingFastTreeSplat = struct {
+    levels: Bits = @splat(0),
+    len: std.math.IntFittingRange(0, N) = 0,
+
+    const N = 32;
+    const Bits = @Vector(N, u8);
+
+    const Writer = std.Io.Writer;
+
+    pub const empty = @This(){};
+
+    const av: @Vector(4, u8) = "  "[0..4].*;
+    const bv: @Vector(4, u8) = "│ "[0..4].*;
+    const au: u32 = @bitCast(av);
+    const bu: u32 = @bitCast(bv);
+    const aa: @Vector(N, u32) = @splat(au);
+    const bb: @Vector(N, u32) = @splat(bu);
+
+    pub fn writeUtf8Prefix(
+        w: *Writer,
+        bits: @Vector(N, u8),
+        len: std.math.IntFittingRange(0, N),
+    ) !void {
+        const mask: @Vector(N, bool) = bits != @as(@Vector(N, u8), @splat(0));
+        const sv = @select(u32, mask, bb, aa);
+        const bytes: [4 * N]u8 = @bitCast(sv);
+        const byte_len: usize = @as(usize, len) * 4;
+        try w.writeAll(bytes[0..byte_len]);
+    }
+
+    pub fn show(self: @This(), writer: *Writer, more: bool) !void {
+        try writeUtf8Prefix(writer, self.levels, self.len);
+        if (self.len > 0) {
+            try writer.writeAll(if (!more) "└─" else "├─");
+        }
+    }
+
+    pub fn pushAssumeCapacity(self: *@This(), more: bool) void {
+        self.len += 1;
+        self.levels[self.len - 1] = @intFromBool(more);
+    }
+
+    pub fn push(self: *@This(), more: bool) !void {
+        self.len = try std.math.add(@TypeOf(self.len), self.len, 1);
+        self.levels[self.len - 1] = @intFromBool(more);
+    }
+
+    pub fn pop(self: *@This()) void {
+        self.len -= 1;
+    }
+
+    test "hehe" {
+        var buffer: [1024]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buffer);
+        var bits: Bits = @splat(0);
+        bits[0] = 1;
+        bits[3] = 1;
+
+        try writeUtf8Prefix(&w, bits, 4);
+        try std.testing.expectEqualStrings("│     │ ", w.buffered());
+    }
+
+    test "hehe 2" {
+        var buffer: [1024]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buffer);
+
+        var tree = @This().empty;
+        tree.push(true);
+        tree.push(false);
+        tree.push(false);
+        tree.push(true);
+        try tree.show(&w, true);
+
+        try std.testing.expectEqualStrings("│     │ ├─", w.buffered());
     }
 };

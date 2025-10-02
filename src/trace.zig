@@ -271,13 +271,11 @@ pub fn dumpAst(
     machine: anytype,
     writer: *std.Io.Writer,
     tty: std.Io.tty.Config,
-    gpa: std.mem.Allocator,
 ) !void {
     const VMType = @TypeOf(machine.*);
     if (machine.root_node) |root| {
         var printer = TracePrinter.init(writer, tty, default_trace_theme);
-        var tree = try TreePrinter.init(gpa, writer);
-        defer tree.deinit();
+        var tree = TreePrinter.init(writer);
         try printAstNode(VMType, machine, &printer, root, true, &tree);
     } else {
         try writer.writeAll("<no ast>\n");
@@ -617,8 +615,7 @@ pub fn dumpForest(
 
     try writer.writeAll("\nTyped Forest:\n");
     var printer = TracePrinter.init(writer, tty, default_trace_theme);
-    var tree = try TreePrinter.init(allocator, writer);
-    defer tree.deinit();
+    var tree = TreePrinter.init(writer);
     const text = machine.text[0..machine.text.len];
     try dumpForestNode(VMType, &built.forest, &printer, &tree, text, root_rule, built.root_index, true);
     try writer.writeAll("\n");

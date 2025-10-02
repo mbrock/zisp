@@ -26,7 +26,7 @@ pub fn main() !void {
         defer vm.deinit(allocator);
 
         try trace.traceFrom(&vm, stdout, tty, .Root);
-        try trace.dumpAst(&vm, stdout, tty, allocator);
+        try trace.dumpAst(&vm, stdout, tty);
         try trace.dumpForest(&vm, stdout, tty, allocator, .FnDecl);
     }
 }
