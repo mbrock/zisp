@@ -157,9 +157,11 @@ pub const TreePrinter = struct {
 
 const BlazingFastTreeSplat = struct {
     levels: std.bit_set.IntegerBitSet(N) = std.bit_set.IntegerBitSet(N).initEmpty(),
-    len: std.math.IntFittingRange(0, N) = 0,
+    overflow_levels: std.bit_set.StaticBitSet(MaxDepth - N) = std.bit_set.StaticBitSet(MaxDepth - N).initEmpty(),
+    len: std.math.IntFittingRange(0, MaxDepth) = 0,
 
     const N = 32;
+    const MaxDepth = 256;
     const Writer = std.Io.Writer;
 
     pub const empty = @This(){};
@@ -181,15 +183,28 @@ const BlazingFastTreeSplat = struct {
     }
 
     pub fn show(self: @This(), writer: *Writer, more: bool) !void {
-        try writeUtf8Prefix(writer, self.levels, self.len);
+        const fast_len: std.math.IntFittingRange(0, N) = @intCast(@min(self.len, N));
+        try writeUtf8Prefix(writer, self.levels, fast_len);
+        if (self.len > N) {
+            const overflow_len: usize = @intCast(self.len - N);
+            const buffer = try writer.writableSlice(overflow_len * 4);
+            for (0..overflow_len) |i| {
+                const pattern = if (self.overflow_levels.isSet(i)) &pattern_b else &pattern_a;
+                @memcpy(buffer[i * 4 ..][0..4], pattern);
+            }
+        }
         if (self.len > 0) {
             try writer.writeAll(if (!more) "└─" else "├─");
         }
     }
 
     pub fn push(self: *@This(), more: bool) !void {
-        if (self.len + 1 >= N) return error.OutOfMemory;
-        self.levels.setValue(self.len, more);
+        if (self.len >= MaxDepth) return error.OutOfMemory;
+        if (self.len < N) {
+            self.levels.setValue(@intCast(self.len), more);
+        } else {
+            self.overflow_levels.setValue(@intCast(self.len - N), more);
+        }
         self.len += 1;
     }
 
@@ -221,4 +236,27 @@ const BlazingFastTreeSplat = struct {
 
         try std.testing.expectEqualStrings("│ \xe2\x80\x80 \xe2\x80\x80 │ ├─", w.buffered());
     }
+
+    test "deep trees keep splatting" {
+        var buffer: [2048]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buffer);
+
+        var tree = @This().empty;
+        for (0..MaxDepth) |i| {
+            try tree.push(i % 2 == 0);
+        }
+        try std.testing.expectError(error.OutOfMemory, tree.push(true));
+        try tree.show(&w, false);
+
+        const prefix = w.buffered()[0 .. MaxDepth * 4];
+        for (0..MaxDepth) |i| {
+            const expected = if (i % 2 == 0) pattern_b else pattern_a;
+            try std.testing.expectEqualSlices(u8, &expected, prefix[i * 4 ..][0..4]);
+        }
+        try std.testing.expectEqualStrings("└─", w.buffered()[MaxDepth * 4 ..]);
+    }
 };
+
+test {
+    _ = BlazingFastTreeSplat;
+}
