@@ -32,3 +32,6 @@ tmp/
 /parse
 /bug
 /vm_loop_demo
+
+# Amp orb runtime files
+.amp/portals/*

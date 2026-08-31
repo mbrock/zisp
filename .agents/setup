@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly zig_version="0.15.1"
+
+case "$(uname -m)" in
+    x86_64)
+        readonly zig_arch="x86_64"
+        readonly zig_sha256="c61c5da6edeea14ca51ecd5e4520c6f4189ef5250383db33d01848293bfafe05"
+        ;;
+    aarch64|arm64)
+        readonly zig_arch="aarch64"
+        readonly zig_sha256="bb4a8d2ad735e7fba764c497ddf4243cb129fece4148da3222a7046d3f1f19fe"
+        ;;
+    *)
+        echo "Unsupported architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+esac
+
+readonly install_dir="$HOME/.local/opt/zig-$zig_version-$zig_arch-linux"
+readonly zig_bin="$HOME/.local/bin/zig"
+
+if [[ ! -x "$install_dir/zig" ]]; then
+    echo "Installing Zig $zig_version for $zig_arch-linux..."
+    started_at=$SECONDS
+    archive="$(mktemp)"
+    staging_dir="$(mktemp -d)"
+    trap 'rm -f "$archive"; rm -rf "$staging_dir"' EXIT
+
+    curl --fail --location --retry 3 \
+        "https://ziglang.org/download/$zig_version/zig-$zig_arch-linux-$zig_version.tar.xz" \
+        --output "$archive"
+    echo "$zig_sha256  $archive" | sha256sum --check --status
+    tar --extract --xz --file "$archive" --directory "$staging_dir" --strip-components=1
+    mkdir -p "$(dirname "$install_dir")"
+    rm -rf "$install_dir"
+    mv "$staging_dir" "$install_dir"
+    rm -f "$archive"
+    trap - EXIT
+    echo "Installed Zig in $((SECONDS - started_at))s."
+else
+    echo "Zig $zig_version is already installed."
+fi
+
+mkdir -p "$(dirname "$zig_bin")"
+ln -sfn "$install_dir/zig" "$zig_bin"
+
+echo "Warming the Zig build cache..."
+started_at=$SECONDS
+"$zig_bin" build test
+echo "Build and tests completed in $((SECONDS - started_at))s."
