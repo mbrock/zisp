@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly zig_version="0.15.1"
+readonly zig_version="0.16.0"
 
 case "$(uname -m)" in
     x86_64)
         readonly zig_arch="x86_64"
-        readonly zig_sha256="c61c5da6edeea14ca51ecd5e4520c6f4189ef5250383db33d01848293bfafe05"
+        readonly zig_sha256="70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
         ;;
     aarch64|arm64)
         readonly zig_arch="aarch64"
-        readonly zig_sha256="bb4a8d2ad735e7fba764c497ddf4243cb129fece4148da3222a7046d3f1f19fe"
+        readonly zig_sha256="ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17"
         ;;
     *)
         echo "Unsupported architecture: $(uname -m)" >&2

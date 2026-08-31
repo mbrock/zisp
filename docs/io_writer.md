@@ -11,7 +11,7 @@ how much data can be staged before a flush. For example, to write to stdout:
 
 ```zig
 var stdout_buffer: [1024]u8 = undefined;
-var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
 const stdout: *std.Io.Writer = &stdout_writer.interface;
 
 try stdout.print("hello world\n", .{});
@@ -22,7 +22,7 @@ For file I/O the pattern is similar:
 
 ```zig
 var buffer: [4096]u8 = undefined;
-var file_writer = file.writer(&buffer);
+var file_writer = file.writer(init.io, &buffer);
 try file_writer.interface.print("some data\n", .{});
 try file_writer.interface.flush();
 ```

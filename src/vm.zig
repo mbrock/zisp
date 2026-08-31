@@ -362,7 +362,11 @@ pub fn VM(comptime GrammarType: type) type {
                         },
 
                         .done => {
-                            if (self.calls.pop()) |frame| {
+                            if (self.calls.items.len > 0) {
+                                // Backtracking restores this stack by length, so completed
+                                // frame bytes must remain available in the backing buffer.
+                                const frame = self.calls.items[self.calls.items.len - 1];
+                                self.calls.items.len -= 1;
                                 const node_index = try self.appendNode(frame, self.sp);
 
                                 if (self.memo) |memo| {

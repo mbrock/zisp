@@ -7,7 +7,7 @@
 The repository doubles as a playground for a few ideas:
 
 - **`comptime`-driven codegen** – Grammar rules are analysed and expanded during compilation, producing concrete bytecode tables and AST layouts before the program ever runs.
-- **Switch-label `continue`** – The VM core relies on Zig 0.15's ability to `continue :vm next_ip` directly from inside nested control flow, giving a threaded-interpreter style loop without manual `goto`s.
+- **Switch-label `continue`** – The VM core can `continue :vm next_ip` directly from inside nested control flow, giving a threaded-interpreter style loop without manual `goto`s.
 - **Runtime that still feels ergonomic** – Even with all the specialization, the public API stays close to "declare a grammar, parse a buffer, walk a typed AST".
 - **Transparency of the generated code** – We want to be able to inspect the lowered form easily (LLVM IR, assembly, AST dumps) and reason about the cost model.
 
@@ -21,7 +21,7 @@ The repository doubles as a playground for a few ideas:
 
 ## Getting started
 
-You need Zig 0.15.1 or newer (the build script uses the labeled-`continue` feature). The usual workflow:
+You need Zig 0.16.0 or newer. The usual workflow:
 
 ```bash
 zig build run            # build the CLI and run it

@@ -254,25 +254,15 @@ pub fn Forest(comptime rules: type) type {
 
     const ListsStruct = blk: {
         const rule_count = std.meta.tags(RuleEnum).len;
-        var fields: [rule_count]std.builtin.Type.StructField = undefined;
+        var field_names: [rule_count][]const u8 = undefined;
+        var field_types: [rule_count]type = undefined;
+        const field_attrs: [rule_count]std.builtin.Type.StructField.Attributes = @splat(.{});
         @setEvalBranchQuota(2000);
         inline for (std.meta.tags(RuleEnum), 0..) |rule_tag, i| {
-            const ListType = Helpers.NodeListType(rule_tag);
-            fields[i] = .{
-                .name = @tagName(rule_tag),
-                .type = ListType,
-                .default_value_ptr = null,
-                .is_comptime = false,
-                .alignment = @alignOf(ListType),
-            };
+            field_names[i] = @tagName(rule_tag);
+            field_types[i] = Helpers.NodeListType(rule_tag);
         }
-        break :blk @Type(.{ .@"struct" = .{
-            .layout = .auto,
-            .backing_integer = null,
-            .fields = &fields,
-            .decls = &.{},
-            .is_tuple = false,
-        } });
+        break :blk @Struct(.auto, null, &field_names, &field_types, &field_attrs);
     };
 
     return struct {

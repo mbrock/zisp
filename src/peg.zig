@@ -148,7 +148,7 @@ pub inline fn Grammar(rules: type) type {
             const rule_count = rule_tags.len;
 
             var buckets: NodeBuckets = undefined;
-            inline for (0..rule_count) |i| buckets[i] = .{};
+            inline for (0..rule_count) |i| buckets[i] = .empty;
 
             for (nodes, 0..) |node, idx| {
                 if (node.kind != NodeKind.rule) continue;
@@ -1051,11 +1051,6 @@ pub fn Shun(comptime inner: type) type {
     };
 }
 
-var stdoutbuf: [4096]u8 = undefined;
-const stdout_file = std.fs.File.stdout();
-var stdout_writer = stdout_file.writer(&stdoutbuf);
-const stdout = &stdout_writer.interface;
-
 test "Grammar AST inference" {
     const G = Grammar(demoGrammar);
 
@@ -1112,12 +1107,18 @@ test "literal opcode matches keyword" {
     try std.testing.expectError(error.ParseFailed, vm_fail.run());
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const G = demoGrammar;
     const VM = @import("vm.zig").VM;
     const trace = @import("trace.zig");
 
-    const tty = std.Io.tty.detectConfig(stdout_file);
+    var stdoutbuf: [4096]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(init.io, &stdoutbuf);
+    const stdout = &stdout_writer.interface;
+    const no_color = if (init.environ_map.get("NO_COLOR")) |value| value.len > 0 else false;
+    const force_color = if (init.environ_map.get("CLICOLOR_FORCE")) |value| value.len > 0 else false;
+    const tty = try std.Io.Terminal.Mode.detect(init.io, stdout_file, no_color, force_color);
 
     try trace.dumpCode(G, stdout, tty);
 

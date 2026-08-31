@@ -1024,14 +1024,15 @@ test "zig grammar: complex expression" {
     try parseRule(.Expr, "a + b * c == d and e or f");
 }
 
-var stdoutbuf: [4096]u8 = undefined;
-const stdout_file = std.fs.File.stdout();
-var stdout_writer = stdout_file.writer(&stdoutbuf);
-const stdout = &stdout_writer.interface;
-
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const trace = @import("trace.zig");
-    const tty = std.Io.tty.detectConfig(stdout_file);
+    var stdoutbuf: [4096]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(init.io, &stdoutbuf);
+    const stdout = &stdout_writer.interface;
+    const no_color = if (init.environ_map.get("NO_COLOR")) |value| value.len > 0 else false;
+    const force_color = if (init.environ_map.get("CLICOLOR_FORCE")) |value| value.len > 0 else false;
+    const tty = try std.Io.Terminal.Mode.detect(init.io, stdout_file, no_color, force_color);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -1041,6 +1042,6 @@ pub fn main() !void {
     var vm = try TestVM.initAlloc("[0]", allocator, 64, 64, 512);
     defer vm.deinit(allocator);
 
-    try trace.traceFrom(&vm, stdout, tty, .Root);
+    try trace.traceFrom(&vm, stdout, tty, .ArrayIndex);
     try stdout.flush();
 }

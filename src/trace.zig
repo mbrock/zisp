@@ -7,10 +7,38 @@ const ColorPrinter = ansi.ColorPrinter;
 const TreePrinter = ansi.TreePrinter;
 
 const ctrls = [_][]const u8{
-    "␀", "␁", "␂", "␃", "␄", "␅", "␆", "␇",
-    "␈", "␉", "␤", "␋", "␌", "␍", "␎", "␏",
-    "␐", "␑", "␒", "␓", "␔", "␕", "␖", "␗",
-    "␘", "␙", "␚", "␛", "␜", "␝", "␞", "␟",
+    "␀",
+    "␁",
+    "␂",
+    "␃",
+    "␄",
+    "␅",
+    "␆",
+    "␇",
+    "␈",
+    "␉",
+    "␤",
+    "␋",
+    "␌",
+    "␍",
+    "␎",
+    "␏",
+    "␐",
+    "␑",
+    "␒",
+    "␓",
+    "␔",
+    "␕",
+    "␖",
+    "␗",
+    "␘",
+    "␙",
+    "␚",
+    "␛",
+    "␜",
+    "␝",
+    "␞",
+    "␟",
     "␠",
 };
 
@@ -141,7 +169,7 @@ pub fn dumpOp(
     try writer.writeAll("\n");
 }
 
-pub fn dumpCode(comptime T: type, writer: *std.Io.Writer, tty: std.Io.tty.Config) !void {
+pub fn dumpCode(comptime T: type, writer: *std.Io.Writer, tty: std.Io.Terminal.Mode) !void {
     const G = comptime peg.Grammar(T);
     const ops = comptime G.compile(false);
 
@@ -206,7 +234,7 @@ fn traceStep(
 pub fn trace(
     machine: anytype,
     writer: *std.Io.Writer,
-    tty: std.Io.tty.Config,
+    tty: std.Io.Terminal.Mode,
 ) !void {
     return traceFrom(machine, writer, tty, null);
 }
@@ -214,7 +242,7 @@ pub fn trace(
 pub fn traceFrom(
     machine: anytype,
     writer: *std.Io.Writer,
-    tty: std.Io.tty.Config,
+    tty: std.Io.Terminal.Mode,
     comptime start_rule: ?@TypeOf(machine.*).Grammar.RuleEnum,
 ) !void {
     const VMType = @TypeOf(machine.*);
@@ -270,7 +298,7 @@ pub fn traceFrom(
 pub fn dumpAst(
     machine: anytype,
     writer: *std.Io.Writer,
-    tty: std.Io.tty.Config,
+    tty: std.Io.Terminal.Mode,
 ) !void {
     const VMType = @TypeOf(machine.*);
     if (machine.root_node) |root| {
@@ -604,7 +632,7 @@ fn dumpForestNode(
 pub fn dumpForest(
     machine: anytype,
     writer: *std.Io.Writer,
-    tty: std.Io.tty.Config,
+    tty: std.Io.Terminal.Mode,
     allocator: std.mem.Allocator,
     comptime root_rule: @TypeOf(machine.*).RuleEnum,
 ) !void {

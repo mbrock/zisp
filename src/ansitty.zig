@@ -98,10 +98,10 @@ pub fn ColorPrinter(comptime StyleEnum: type) type {
         pub const Theme = std.EnumMap(StyleEnum, SGR);
 
         writer: *std.Io.Writer,
-        tty: std.Io.tty.Config,
+        tty: std.Io.Terminal.Mode,
         theme: Theme,
 
-        pub fn init(writer: *std.Io.Writer, tty: std.Io.tty.Config, theme: Theme) Self {
+        pub fn init(writer: *std.Io.Writer, tty: std.Io.Terminal.Mode, theme: Theme) Self {
             return .{ .writer = writer, .tty = tty, .theme = theme };
         }
 

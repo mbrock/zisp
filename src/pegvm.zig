@@ -243,7 +243,7 @@ pub fn VM(
 
         marklist: []Mark,
         savelist: []Save,
-        nodelist: std.ArrayList(Node) = .{},
+        nodelist: std.ArrayList(Node) = .empty,
 
         codehead: u32 = codeinit,
         texthead: u32 = 0,
@@ -256,7 +256,7 @@ pub fn VM(
         // Error tracking
         furthest_pos: u32 = 0,
         furthest_rule: ?P.RuleT = null,
-        expected_at_furthest: std.ArrayList(P.RuleT) = .{},
+        expected_at_furthest: std.ArrayList(P.RuleT) = .empty,
 
         pub fn init(allocator: std.mem.Allocator, src: [:0]const u8, marks: []Mark, saves: []Save) Machine {
             return .{
@@ -276,10 +276,10 @@ pub fn VM(
             self.savehead = 0;
             self.text = src;
             self.allocator = allocator;
-            self.nodelist = .{};
+            self.nodelist = .empty;
             self.furthest_pos = 0;
             self.furthest_rule = null;
-            self.expected_at_furthest = .{};
+            self.expected_at_furthest = .empty;
         }
 
         pub fn deinit(self: *Machine) void {
